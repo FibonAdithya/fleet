@@ -2672,6 +2672,14 @@ def test_missing_required_field_is_rejected(cfg):
         validate(cfg, "handoff", bad)
 
 
+def test_missing_required_field_message_names_the_field(cfg):
+    """jsonschema reports `required` failures against the parent object, so the
+    naive absolute_path read says "<root>" for the commonest failure of all."""
+    bad = {k: v for k, v in VALID.items() if k != "head_sha"}
+    with pytest.raises(SchemaError, match="head_sha"):
+        validate(cfg, "handoff", bad)
+
+
 def test_unknown_field_is_rejected(cfg):
     with pytest.raises(SchemaError):
         validate(cfg, "handoff", {**VALID, "vibes": "good"})
@@ -2741,7 +2749,9 @@ class SchemaError(Exception):
 
 
 @lru_cache(maxsize=8)
-def _read(path: Path) -> dict:
+def _read(path: Path, mtime: float) -> dict:
+    """`mtime` is part of the cache key, not the body: the daemon is long-lived,
+    and a schema edited in the target repo must not stay invisible until restart."""
     return json.loads(path.read_text())
 
 
@@ -2751,21 +2761,28 @@ def load_schema(cfg: FleetConfig, name: str) -> dict:
     path = cfg.schemas_dir / SCHEMA_FILES[name]
     if not path.is_file():
         raise SchemaError(f"schema not found: {path}")
-    return _read(path)
+    return _read(path, path.stat().st_mtime)
 
 
 def validate(cfg: FleetConfig, name: str, payload: dict) -> None:
     try:
         jsonschema.validate(payload, load_schema(cfg, name))
     except jsonschema.ValidationError as exc:
-        field = ".".join(str(p) for p in exc.absolute_path) or "<root>"
-        raise SchemaError(f"{name} invalid at {field}: {exc.message}") from exc
+        field = ".".join(str(p) for p in exc.absolute_path)
+        if exc.validator == "required":
+            # jsonschema reports a missing property against the PARENT object, so
+            # absolute_path is empty for the commonest failure there is. Name the
+            # missing keys explicitly or the message says "<root>".
+            missing = [k for k in exc.validator_value if k not in exc.instance]
+            if missing:
+                field = ".".join(filter(None, [field, ", ".join(missing)]))
+        raise SchemaError(f"{name} invalid at {field or '<root>'}: {exc.message}") from exc
 ```
 
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/test_schemas.py -v`
-Expected: 10 PASS. If `test_schema_error_names_the_offending_field` fails, the `match` is looking for `head_sha` in the message — confirm `absolute_path` produced it rather than `<root>`.
+Expected: 11 PASS. If `test_schema_error_names_the_offending_field` fails, the `match` is looking for `head_sha` in the message — confirm `absolute_path` produced it rather than `<root>`.
 
 - [ ] **Step 5: Write the failing packet test**
 
@@ -2830,7 +2847,31 @@ def test_parse_latest_ignores_non_packet_comments():
 def test_parse_latest_survives_malformed_json_in_a_marked_comment():
     broken = f"{MARKERS['handoff']}\n```json\n{{not json\n```"
     assert parse_latest([broken], "handoff") is None
+
+
+def _packet(did: str, head: str, to: str = "review", role: str = "implementer") -> str:
+    return render(build_handoff(
+        task=1, to=to, role=role, agent="a", run="2026-08-10T01:00:00Z",
+        base_sha="aaaaaaa", head_sha=head, branch="b", did=did,
+        checks="c", commands=["make check"]))
+
+
+def test_parse_latest_takes_the_last_block_when_a_comment_quotes_an_earlier_packet():
+    """An agent that quotes the packet it received before appending its own puts
+    two blocks in one comment. The receiver must get the new one."""
+    quoted = f"Quoting what I received:\n\n{_packet('old', 'bbbbbbb')}\n\nMine:\n\n{_packet('new', 'ccccccc')}"
+    assert parse_latest([quoted], "handoff")["did"] == "new"
+
+
+def test_parse_latest_rejects_a_payload_whose_schema_is_the_wrong_kind():
+    verdict = {"schema": "fleet.verdict.v1", "task": 1, "verdict": "approved",
+               "head_sha": "a91c204", "reviewer": "b", "findings": []}
+    body = f"{MARKERS['handoff']}\n```json\n{json.dumps(verdict)}\n```"
+    assert parse_latest([body], "handoff") is None
 ```
+
+`tests/test_packet.py` needs `import json` at the top alongside the existing
+imports, for the last test.
 
 - [ ] **Step 6: Run to verify failure**
 
@@ -2848,6 +2889,7 @@ import json
 import re
 
 MARKERS = {"handoff": "<!-- fleet.handoff.v1 -->", "verdict": "<!-- fleet.verdict.v1 -->"}
+SCHEMA_IDS = {"handoff": "fleet.handoff.v1", "verdict": "fleet.verdict.v1"}
 
 _BLOCK = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
@@ -2904,25 +2946,32 @@ def render(payload: dict) -> str:
 
 
 def parse_latest(comments: list[str], kind: str) -> dict | None:
-    """Return the newest parseable payload of `kind`, or None."""
+    """Return the newest payload of `kind`, or None.
+
+    Scans comments newest-first and, within one comment, takes the LAST fenced
+    block: an agent that quotes an earlier packet before appending its own would
+    otherwise hand the receiver the quoted one. The recovered payload's `schema`
+    must match `kind` -- matching on the marker alone lets a comment carrying
+    both a handoff and a verdict return the wrong one.
+    """
     marker = MARKERS[kind]
     for body in reversed(comments):
         if marker not in body:
             continue
-        match = _BLOCK.search(body)
-        if not match:
-            continue
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            continue
+        for block in reversed(_BLOCK.findall(body)):
+            try:
+                payload = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("schema") == SCHEMA_IDS[kind]:
+                return payload
     return None
 ```
 
 - [ ] **Step 8: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_packet.py -v`
-Expected: 6 PASS.
+Expected: 8 PASS.
 
 - [ ] **Step 9: Commit**
 
