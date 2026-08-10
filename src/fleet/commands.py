@@ -49,3 +49,42 @@ def do_escalate(
         task=task, to="human", question=question.strip(), considered=considered.strip(), **kw
     )
     return _post(cfg, gh, packet, "human")
+
+
+class DuplicateDiscovery(Exception):
+    """An open issue with this title already exists."""
+
+
+DISCOVERY_BODY = """Found while working #{parent}. Filed by an agent, not triaged.
+
+## Evidence
+
+{evidence}
+
+## Acceptance criteria
+
+_To be written by a scout during triage._
+"""
+
+
+def do_discover(
+    cfg: FleetConfig, gh: GhClient, *, parent: int, title: str, area: str, evidence: str
+) -> int:
+    """File a discovery in TRIAGE. Never READY, never auto-ok."""
+    gh.get_issue(parent)
+    area_label = labels.area_label(area)
+    # search_titles is a substring scan, so a short title collides with unrelated
+    # issues -- "t" matches "...explicit k". Narrow with it, then require an exact
+    # title match. The design already accepts that some near-duplicates get filed;
+    # silently refusing a real discovery is the worse failure.
+    if any(i["title"].strip().lower() == title.strip().lower() for i in gh.search_titles(title)):
+        raise DuplicateDiscovery(f"an issue titled {title!r} already exists")
+    # `discovered-by:<n>` is generated at runtime, so it does not exist in the
+    # repo's label set. gh refuses an unknown label and creates no issue at all.
+    parentage = f"discovered-by:{parent}"
+    gh.ensure_label(parentage)
+    return gh.create_issue(
+        title,
+        DISCOVERY_BODY.format(parent=parent, evidence=evidence),
+        [labels.state_label("triage"), area_label, parentage],
+    )

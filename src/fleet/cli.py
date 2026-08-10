@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import click
 
 from fleet import git
-from fleet.commands import do_block, do_escalate, do_handoff
+from fleet.commands import do_block, do_discover, do_escalate, do_handoff
 from fleet.config import load_config
 from fleet.gh import RealGh
 
@@ -122,6 +122,18 @@ def escalate(task, question, considered, did, checks, commands):
         **_git_facts(cfg),
     )
     click.echo(f"task {task} escalated to a human")
+
+
+@main.command()
+@click.option("--from", "parent", type=int, required=True, help="The task you are working on.")
+@click.option("--title", required=True)
+@click.option("--area", required=True, help="One of: eval train models data configs docs")
+@click.option("--evidence", required=True, help="file:line and what is wrong there.")
+def discover(parent, title, area, evidence):
+    """File an unrelated defect for someone else. Then carry on with your task."""
+    cfg, gh, _ = _context()
+    number = do_discover(cfg, gh, parent=parent, title=title, area=area, evidence=evidence)
+    click.echo(f"filed #{number} in triage (discovered by #{parent})")
 
 
 if __name__ == "__main__":

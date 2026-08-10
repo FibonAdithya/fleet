@@ -15,6 +15,7 @@ class GhClient(Protocol):
     def get_issue(self, issue: int) -> dict: ...
     def list_issues(self, state: str = "open") -> list[dict]: ...
     def search_titles(self, text: str) -> list[dict]: ...
+    def ensure_label(self, name: str, colour: str = "ededed") -> None: ...
 
 
 class RealGh:
@@ -88,6 +89,16 @@ class RealGh:
         """
         return [i for i in self.list_issues("all") if text.lower() in i["title"].lower()]
 
+    def ensure_label(self, name: str, colour: str = "ededed") -> None:
+        """Create the label if it does not exist.
+
+        `gh issue create --label X` fails with "could not add label: 'X' not
+        found" rather than creating X, and creates no issue at all. Any label
+        generated at runtime -- `discovered-by:<n>` above all -- must be created
+        before it is applied.
+        """
+        self._run("label", "create", name, "--color", colour, "--force")
+
 
 class FakeGh:
     """In-memory ledger with the same surface. The only client tests use."""
@@ -95,6 +106,7 @@ class FakeGh:
     def __init__(self) -> None:
         self.issues: dict[int, dict] = {}
         self._next = 1
+        self.ensured_labels: set[str] = set()
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
         number = self._next
@@ -141,3 +153,6 @@ class FakeGh:
 
     def search_titles(self, text: str) -> list[dict]:
         return [i for i in self.list_issues("all") if text.lower() in i["title"].lower()]
+
+    def ensure_label(self, name: str, colour: str = "ededed") -> None:
+        self.ensured_labels.add(name)
