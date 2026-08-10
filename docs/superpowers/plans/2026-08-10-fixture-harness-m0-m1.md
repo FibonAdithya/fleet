@@ -3012,9 +3012,14 @@ from pathlib import Path
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
-    ).stdout.strip()
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        # Same reasoning as RealGh._run: CalledProcessError carries argv and exit
+        # code but not stderr, which is where git says "not a valid object name".
+        raise RuntimeError(f"git {' '.join(args)} failed: {exc.stderr.strip()}") from exc
 
 
 def head_sha(root: Path) -> str:
@@ -3026,7 +3031,13 @@ def merge_base_sha(root: Path, base: str) -> str:
 
 
 def branch_name(root: Path) -> str:
-    return _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    name = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if name == "HEAD":
+        # Detached HEAD returns the literal string "HEAD" with exit 0. The schema's
+        # `branch` only requires minLength 1, so it would validate and land in the
+        # permanent audit trail as though it were a real branch.
+        raise RuntimeError("detached HEAD: check out a branch before handing off")
+    return name
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -3143,6 +3154,22 @@ def test_escalate_rejects_missing_considered(cfg, gh):
     with pytest.raises(ValueError, match="considered"):
         do_escalate(cfg, gh, task=1, question="Which band?", considered="", **BASE)
     assert gh.get_issue(1)["comments"] == []
+
+
+def test_handoff_cannot_reach_blocked(cfg, gh):
+    """A handoff to blocked carries no blocked_on, so nothing could unblock it."""
+    with pytest.raises(ValueError, match="do_block"):
+        do_handoff(cfg, gh, task=1, to="blocked", **BASE)
+    assert gh.get_issue(1)["comments"] == []
+    assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
+
+
+def test_handoff_cannot_reach_human(cfg, gh):
+    """A handoff to human carries no question, so there is nothing to answer."""
+    with pytest.raises(ValueError, match="do_escalate"):
+        do_handoff(cfg, gh, task=1, to="human", **BASE)
+    assert gh.get_issue(1)["comments"] == []
+    assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
 ```
 
 - [ ] **Step 3: Run to verify failure**
@@ -3174,6 +3201,13 @@ def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
 
 
 def do_handoff(cfg: FleetConfig, gh: GhClient, *, task: int, to: str, **kw) -> dict:
+    if to in {"blocked", "human"}:
+        # Both states are schema-valid here, but a handoff to them carries no
+        # blocked_on and no question -- so the task would sit in blocked with
+        # nothing that could ever unblock it, or in human with no question to
+        # answer. The block/escalate split is the point; do not let it be bypassed.
+        verb = "do_block" if to == "blocked" else "do_escalate"
+        raise ValueError(f"use {verb} to reach {to!r}, not a plain handoff")
     gh.get_issue(task)
     return _post(cfg, gh, build_handoff(task=task, to=to, **kw), to)
 
@@ -3202,7 +3236,7 @@ def do_escalate(
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_commands.py -v`
-Expected: 10 PASS.
+Expected: 12 PASS.
 
 - [ ] **Step 6: Write `src/fleet/cli.py`**
 
@@ -3226,9 +3260,16 @@ from fleet.gh import RealGh
 def _context() -> tuple:
     cfg = load_config()
     gh = RealGh(cfg.repo_slug)
+    agent = os.environ.get("FLEET_AGENT")
+    if agent is None:
+        # "manual" is legitimate for a human running this by hand, which makes it
+        # indistinguishable from a dispatch bug that never exported the variable.
+        # Say so on stderr rather than silently misattributing an unattended run.
+        click.echo("warning: FLEET_AGENT unset; attributing to 'manual'", err=True)
+        agent = "manual"
     identity = {
         "role": os.environ.get("FLEET_ROLE", "implementer"),
-        "agent": os.environ.get("FLEET_AGENT", "manual"),
+        "agent": agent,
         "run": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     return cfg, gh, identity
