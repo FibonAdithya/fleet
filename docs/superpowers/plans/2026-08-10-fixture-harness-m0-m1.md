@@ -2359,6 +2359,20 @@ def attempt_label(n: int) -> str:
 
 def all_state_labels() -> list[str]:
     return [f"fleet:{s}" for s in STATES]
+
+
+def static_vocabulary() -> set[str]:
+    """Exactly the labels created up front in the target repo. Anything outside
+    this set is generated at runtime and must be created before it is applied."""
+    return {
+        *all_state_labels(),
+        AUTO_OK,
+        *(f"area:{a}" for a in AREAS),
+        *(f"class:{c}" for c in CLASSES),
+        "fleet:attempt-1",
+        "fleet:attempt-2",
+        "fleet:fix-pass-1",
+    }
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -2433,6 +2447,16 @@ def test_add_labels_does_not_duplicate():
     assert gh.get_issue(n)["labels"] == ["area:eval", "fleet:ready"]
 
 
+def test_applying_an_unknown_label_fails_like_gh_does():
+    """`gh issue create --label X` fails when X does not exist and creates no
+    issue. A fake that accepts anything hides every missing ensure_label call."""
+    gh = FakeGh()
+    with pytest.raises(KeyError, match="discovered-by:1"):
+        gh.create_issue("t", "b", ["discovered-by:1"])
+    gh.ensure_label("discovered-by:1")
+    assert gh.create_issue("t", "b", ["discovered-by:1"]) == 1
+
+
 def test_list_issues_omits_comments_like_the_real_client():
     """RealGh's `issue list` does not fetch comment bodies. A fake that returns
     them lets code pass every test here and KeyError against real GitHub."""
@@ -2458,6 +2482,8 @@ from __future__ import annotations
 import json
 import subprocess
 from typing import Protocol
+
+from fleet import labels as labels_module
 
 
 class GhClient(Protocol):
@@ -2540,7 +2566,14 @@ class RealGh:
         generated at runtime -- `discovered-by:<n>` above all -- must be created
         before it is applied.
         """
-        self._run("label", "create", name, "--color", colour, "--force")
+        try:
+            self._run("label", "create", name, "--color", colour)
+        except RuntimeError as exc:
+            # --force would "update the label color and description if it already
+            # exists", silently repainting a curated label. Tolerate the collision
+            # instead: the label existing is the outcome we wanted.
+            if "already exists" not in str(exc):
+                raise
 
 
 class FakeGh:
@@ -2551,7 +2584,18 @@ class FakeGh:
         self.ensured_labels: set[str] = set()
         self._next = 1
 
+    def _check_labels(self, names: list[str]) -> None:
+        """Mirror gh: applying a label that does not exist fails and creates
+        nothing. Without this the fake is more permissive than the real client,
+        and a missing ensure_label call passes every test here while breaking
+        against GitHub."""
+        known = labels_module.static_vocabulary() | self.ensured_labels
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            raise KeyError(f"could not add label: {unknown[0]!r} not found")
+
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        self._check_labels(labels)
         number = self._next
         self._next += 1
         self.issues[number] = {
@@ -2564,6 +2608,7 @@ class FakeGh:
         self.get_issue(issue)["comments"].append(body)
 
     def add_labels(self, issue: int, labels: list[str]) -> None:
+        self._check_labels(labels)
         current = self.get_issue(issue)["labels"]
         current.extend(label for label in labels if label not in current)
 
@@ -2600,7 +2645,7 @@ class FakeGh:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_gh.py -v`
-Expected: 9 PASS.
+Expected: 10 PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -3475,14 +3520,16 @@ def test_unknown_area_is_rejected(cfg, gh):
 
 def test_a_substring_collision_is_not_a_duplicate(cfg, gh):
     """The parent issue is titled "estimate_lid should accept an explicit k".
-    A bare substring check refuses any title contained in it -- including "t"."""
+    A bare substring check refuses any title contained in it, "k" included."""
     n = do_discover(cfg, gh, parent=1, title="k", area="data", evidence="e")
     assert gh.get_issue(n)["title"] == "k"
 
 
 def test_the_parentage_label_is_created_before_it_is_applied(gh, cfg):
     """`discovered-by:<n>` is generated at runtime and is not in the repo's
-    label set. Real gh refuses an unknown label and creates no issue at all."""
+    label set. Real gh refuses an unknown label and creates no issue at all, and
+    FakeGh now mirrors that -- so inverting the order fails this test rather
+    than passing it silently."""
     do_discover(cfg, gh, parent=1, title="make_synthetic ignores dims above 0",
                 area="data", evidence="e")
     assert "discovered-by:1" in gh.ensured_labels
@@ -3518,8 +3565,12 @@ def do_discover(
     cfg: FleetConfig, gh: GhClient, *, parent: int, title: str, area: str, evidence: str
 ) -> int:
     """File a discovery in TRIAGE. Never READY, never auto-ok."""
-    gh.get_issue(parent)
+    # Strip first: search_titles is a substring scan over UNSTRIPPED stored
+    # titles, so " foo" would not match a stored "foo" and the exact-match guard
+    # below would never run.
+    title = title.strip()
     area_label = labels.area_label(area)
+    gh.get_issue(parent)
     # search_titles is a substring scan, so a short title collides with unrelated
     # issues -- "t" matches "...explicit k". Narrow with it, then require an exact
     # title match. The design already accepts that some near-duplicates get filed;
@@ -3550,7 +3601,7 @@ Insert before the `if __name__` block:
 @main.command()
 @click.option("--from", "parent", type=int, required=True, help="The task you are working on.")
 @click.option("--title", required=True)
-@click.option("--area", required=True, help="One of: eval train models data configs docs")
+@click.option("--area", required=True, type=click.Choice(labels.AREAS))
 @click.option("--evidence", required=True, help="file:line and what is wrong there.")
 def discover(parent, title, area, evidence):
     """File an unrelated defect for someone else. Then carry on with your task."""
@@ -3559,7 +3610,8 @@ def discover(parent, title, area, evidence):
     click.echo(f"filed #{number} in triage (discovered by #{parent})")
 ```
 
-And extend the import: `from fleet.commands import do_block, do_discover, do_escalate, do_handoff`.
+And extend the imports: `from fleet.commands import do_block, do_discover, do_escalate,
+do_handoff`, plus `from fleet import labels` for the `--area` choices.
 
 - [ ] **Step 6: Verify the full suite and the CLI**
 
