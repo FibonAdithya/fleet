@@ -17,9 +17,16 @@ from fleet.gh import RealGh
 def _context() -> tuple:
     cfg = load_config()
     gh = RealGh(cfg.repo_slug)
+    agent = os.environ.get("FLEET_AGENT")
+    if agent is None:
+        # "manual" is legitimate for a human running this by hand, which makes it
+        # indistinguishable from a dispatch bug that never exported the variable.
+        # Say so on stderr rather than silently misattributing an unattended run.
+        click.echo("warning: FLEET_AGENT unset; attributing to 'manual'", err=True)
+        agent = "manual"
     identity = {
         "role": os.environ.get("FLEET_ROLE", "implementer"),
-        "agent": os.environ.get("FLEET_AGENT", "manual"),
+        "agent": agent,
         "run": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     return cfg, gh, identity

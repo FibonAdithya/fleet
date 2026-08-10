@@ -19,6 +19,13 @@ def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
 
 
 def do_handoff(cfg: FleetConfig, gh: GhClient, *, task: int, to: str, **kw) -> dict:
+    if to in {"blocked", "human"}:
+        # Both states are schema-valid here, but a handoff to them carries no
+        # blocked_on and no question -- so the task would sit in blocked with
+        # nothing that could ever unblock it, or in human with no question to
+        # answer. The block/escalate split is the point; do not let it be bypassed.
+        verb = "do_block" if to == "blocked" else "do_escalate"
+        raise ValueError(f"use {verb} to reach {to!r}, not a plain handoff")
     gh.get_issue(task)
     return _post(cfg, gh, build_handoff(task=task, to=to, **kw), to)
 

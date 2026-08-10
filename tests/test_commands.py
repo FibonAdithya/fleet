@@ -118,3 +118,19 @@ def test_escalate_rejects_missing_considered(cfg, gh):
     with pytest.raises(ValueError, match="considered"):
         do_escalate(cfg, gh, task=1, question="Which band?", considered="", **BASE)
     assert gh.get_issue(1)["comments"] == []
+
+
+def test_handoff_cannot_reach_blocked(cfg, gh):
+    """A handoff to blocked carries no blocked_on, so nothing could unblock it."""
+    with pytest.raises(ValueError, match="do_block"):
+        do_handoff(cfg, gh, task=1, to="blocked", **BASE)
+    assert gh.get_issue(1)["comments"] == []
+    assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
+
+
+def test_handoff_cannot_reach_human(cfg, gh):
+    """A handoff to human carries no question, so there is nothing to answer."""
+    with pytest.raises(ValueError, match="do_escalate"):
+        do_handoff(cfg, gh, task=1, to="human", **BASE)
+    assert gh.get_issue(1)["comments"] == []
+    assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
