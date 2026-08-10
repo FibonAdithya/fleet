@@ -11,8 +11,22 @@ import yaml
 
 def existing_titles(repo: str) -> set[str]:
     out = subprocess.run(
-        ["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", "200", "--json", "title"],
-        capture_output=True, text=True, check=True,
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--limit",
+            "200",
+            "--json",
+            "title",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     return {row["title"] for row in json.loads(out)}
 
@@ -28,8 +42,19 @@ def main(repo: str, spec_path: str) -> int:
         if spec.get("auto_ok"):
             labels.append("fleet:auto-ok")
         subprocess.run(
-            ["gh", "issue", "create", "--repo", repo, "--title", spec["title"],
-             "--body", spec["body"], "--label", ",".join(labels)],
+            [
+                "gh",
+                "issue",
+                "create",
+                "--repo",
+                repo,
+                "--title",
+                spec["title"],
+                "--body",
+                spec["body"],
+                "--label",
+                ",".join(labels),
+            ],
             check=True,
         )
         print(f"created: {spec['title']}")
