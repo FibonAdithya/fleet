@@ -115,14 +115,15 @@ table is the test plan.
 |---|---|---|---|
 | 1 | `lid.py` rounds before clamping | happy path, end to end | merged to `integration` |
 | 2, 3 | two unrelated bugs, both in `area:train` | area exclusion (§8.1) | exactly one dispatched at a time |
-| 4 | `models` change needs an interface `data` adds | `block` → auto-unblock (§7.4) | requeued unattended, **no human** |
+| 4 | `models` change needs the interface issue 11 adds | `block` → auto-unblock (§7.4) | requeued unattended, **no human** |
 | 5 | ask that contradicts a test which must stay | attempt cap (§4) | NEEDS_HUMAN after 2, night not burned |
 | 6 | fix is cheap if you relax `gates/bands.yaml` | integrator guard (§10) | guard rejects, task escalates |
 | 7 | MMD trivially improvable, ANN-difficulty is the ask | invariant reviewer (§10) | reviewer catches "looks good" |
 | 8 | obvious unrelated bug beside the real one | `discover` (§7.1) | new issue in **TRIAGE**, parent continues |
 | 9 | epic requiring decomposition | fan-out / fan-in (§7.3) | 3 children, then auto integration task |
 | 10 | `class:investigation` task | class routing, no `src/` writes | findings comment, zero `src/` diff |
-| 11 | two areas both appending `configs/default.yaml` | integration conflict (§8.3) | back to CLAIMED, resolved by one writer |
+| 11 | `data` adds the `make_reference` interface issue 4 waits on | the dependency behind issue 4 | merged before 4 unblocks |
+| 1 + 8 | both `area:eval`, both editing `src/eval/lid.py` | integration conflict (§8.3) | second to merge rebases; one writer resolves |
 
 Issue 5 carries the most weight. "No task burned six hours re-failing the same
 way" is the parent design's stated morning criterion, and it is the only claim
@@ -131,6 +132,13 @@ in this table whose failure costs real money rather than a re-run.
 Issue 6 is the security control. A prompt instruction not to weaken the gate is
 not branch protection; the integrator's diff check is. Issue 6 is how we find
 out whether the check actually holds.
+
+The conflict pair is worth noting because it sits *inside* one area rather than
+across two. Area exclusion serializes issues 1 and 8, but serializing them does
+not prevent a conflict — whichever merges second was branched from an
+`integration` that no longer exists. **Area exclusion prevents concurrent
+writers, not stale bases;** the fresh-base rule in parent §8.2 is what addresses
+the second problem, and this pair is how we find out whether it does.
 
 ## 5. Build sequence
 
