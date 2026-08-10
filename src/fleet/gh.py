@@ -24,14 +24,23 @@ class RealGh:
         self.repo = repo_slug
 
     def _run(self, *args: str) -> str:
-        return subprocess.run(
-            ["gh", *args, "--repo", self.repo], capture_output=True, text=True, check=True
-        ).stdout
+        try:
+            return subprocess.run(
+                ["gh", *args, "--repo", self.repo], capture_output=True, text=True, check=True
+            ).stdout
+        except subprocess.CalledProcessError as exc:
+            # CalledProcessError's message carries the argv and exit code but not
+            # stderr, which is where gh puts the actual reason. Task 19 is the only
+            # live exercise of this path; an opaque failure there is undiagnosable.
+            raise RuntimeError(f"gh {' '.join(args)} failed: {exc.stderr.strip()}") from exc
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
-        url = self._run(
-            "issue", "create", "--title", title, "--body", body, "--label", ",".join(labels)
-        ).strip()
+        args = ["issue", "create", "--title", title, "--body", body]
+        if labels:
+            # `--label ""` is not "no labels" to gh -- it looks up a label named ""
+            # and fails the whole create.
+            args += ["--label", ",".join(labels)]
+        url = self._run(*args).strip().splitlines()[-1]
         return int(url.rstrip("/").rsplit("/", 1)[-1])
 
     def comment(self, issue: int, body: str) -> None:
@@ -71,6 +80,12 @@ class RealGh:
         return raw
 
     def search_titles(self, text: str) -> list[dict]:
+        """Case-insensitive substring match over the most recent 200 issues.
+
+        Client-side filtering, not GitHub's search API, and capped by the
+        `--limit 200` in `list_issues`. Good enough as a best-effort duplicate
+        check; not an exhaustive one.
+        """
         return [i for i in self.list_issues("all") if text.lower() in i["title"].lower()]
 
 
@@ -114,7 +129,15 @@ class FakeGh:
         self.get_issue(issue)["state"] = "closed"
 
     def list_issues(self, state: str = "open") -> list[dict]:
-        return [i for i in self.issues.values() if state == "all" or i["state"] == state]
+        """Summary view, deliberately WITHOUT `comments` -- RealGh's `issue list`
+        does not fetch comment bodies, and a fake that returns more than the real
+        client makes code pass every test here and KeyError against GitHub.
+        Use `get_issue` when you need comments."""
+        return [
+            {k: v for k, v in issue.items() if k != "comments"}
+            for issue in self.issues.values()
+            if state == "all" or issue["state"] == state
+        ]
 
     def search_titles(self, text: str) -> list[dict]:
-        return [i for i in self.issues.values() if text.lower() in i["title"].lower()]
+        return [i for i in self.list_issues("all") if text.lower() in i["title"].lower()]

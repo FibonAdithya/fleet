@@ -56,3 +56,20 @@ def test_search_titles_is_case_insensitive_substring():
 def test_unknown_issue_raises():
     with pytest.raises(KeyError):
         FakeGh().get_issue(99)
+
+
+def test_add_labels_does_not_duplicate():
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [area_label("eval")])
+    gh.add_labels(n, [area_label("eval"), state_label("ready")])
+    assert gh.get_issue(n)["labels"] == ["area:eval", "fleet:ready"]
+
+
+def test_list_issues_omits_comments_like_the_real_client():
+    """RealGh's `issue list` does not fetch comment bodies. A fake that returns
+    them lets code pass every test here and KeyError against real GitHub."""
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [])
+    gh.comment(n, "hello")
+    assert "comments" not in gh.list_issues("open")[0]
+    assert gh.get_issue(n)["comments"] == ["hello"]
