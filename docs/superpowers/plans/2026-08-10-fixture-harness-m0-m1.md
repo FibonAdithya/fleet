@@ -2468,6 +2468,7 @@ class GhClient(Protocol):
     def get_issue(self, issue: int) -> dict: ...
     def list_issues(self, state: str = "open") -> list[dict]: ...
     def search_titles(self, text: str) -> list[dict]: ...
+    def ensure_label(self, name: str, colour: str = "ededed") -> None: ...
 
 
 class RealGh:
@@ -2531,12 +2532,23 @@ class RealGh:
         """
         return [i for i in self.list_issues("all") if text.lower() in i["title"].lower()]
 
+    def ensure_label(self, name: str, colour: str = "ededed") -> None:
+        """Create the label if it does not exist.
+
+        `gh issue create --label X` fails with "could not add label: 'X' not
+        found" rather than creating X, and creates no issue at all. Any label
+        generated at runtime -- `discovered-by:<n>` above all -- must be created
+        before it is applied.
+        """
+        self._run("label", "create", name, "--color", colour, "--force")
+
 
 class FakeGh:
     """In-memory ledger with the same surface. The only client tests use."""
 
     def __init__(self) -> None:
         self.issues: dict[int, dict] = {}
+        self.ensured_labels: set[str] = set()
         self._next = 1
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
@@ -2580,6 +2592,9 @@ class FakeGh:
 
     def search_titles(self, text: str) -> list[dict]:
         return [i for i in self.list_issues("all") if text.lower() in i["title"].lower()]
+
+    def ensure_label(self, name: str, colour: str = "ededed") -> None:
+        self.ensured_labels.add(name)
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -3455,6 +3470,13 @@ def test_duplicate_title_is_refused(cfg, gh):
 def test_unknown_area_is_rejected(cfg, gh):
     with pytest.raises(ValueError):
         do_discover(cfg, gh, parent=1, title="t", area="nonsense", evidence="e")
+
+
+def test_the_parentage_label_is_created_before_it_is_applied(gh, cfg):
+    """`discovered-by:<n>` is generated at runtime and is not in the repo's
+    label set. Real gh refuses an unknown label and creates no issue at all."""
+    do_discover(cfg, gh, parent=1, title="t", area="data", evidence="e")
+    assert "discovered-by:1" in gh.ensured_labels
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -3491,17 +3513,21 @@ def do_discover(
     area_label = labels.area_label(area)
     if gh.search_titles(title):
         raise DuplicateDiscovery(f"an issue titled {title!r} already exists")
+    # `discovered-by:<n>` is generated at runtime, so it does not exist in the
+    # repo's label set. gh refuses an unknown label and creates no issue at all.
+    parentage = f"discovered-by:{parent}"
+    gh.ensure_label(parentage)
     return gh.create_issue(
         title,
         DISCOVERY_BODY.format(parent=parent, evidence=evidence),
-        [labels.state_label("triage"), area_label, f"discovered-by:{parent}"],
+        [labels.state_label("triage"), area_label, parentage],
     )
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_discover.py -v`
-Expected: 7 PASS.
+Expected: 8 PASS.
 
 - [ ] **Step 5: Add the `discover` subcommand to `src/fleet/cli.py`**
 
