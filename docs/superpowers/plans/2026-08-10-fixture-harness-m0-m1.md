@@ -367,9 +367,22 @@ def test_sq_dists_shape_and_zero_diagonal():
     assert np.allclose(np.diag(d), 0.0)
 
 
-def test_mmd_of_identical_sets_is_near_zero():
-    x = make_real(60, d=4, seed=0)
-    assert abs(rbf_mmd2(x, x)) < 1e-9
+def test_mmd_is_near_zero_for_independent_samples_of_one_distribution():
+    """Two independent samples of the same distribution are the case that
+    vanishes. `rbf_mmd2(x, x)` is NOT that case -- see the next test."""
+    a = make_real(160, d=4, seed=0)
+    b = make_real(160, d=4, seed=99)
+    assert abs(rbf_mmd2(a, b)) < 0.01
+
+
+def test_mmd_self_comparison_decays_as_one_over_n():
+    """The unbiased estimator excludes self-pairs from the two within-set terms
+    but not from the cross term, so `rbf_mmd2(x, x)` equals
+    `2 * (mean_offdiag_kernel - 1) / n` exactly -- O(1/n), not 0. Asserting it
+    is near zero at a fixed tolerance is a bug in the test, not the metric."""
+    small = rbf_mmd2(make_real(40, d=4, seed=0), make_real(40, d=4, seed=0))
+    large = rbf_mmd2(make_real(160, d=4, seed=0), make_real(160, d=4, seed=0))
+    assert abs(large) < abs(small) / 3
 
 
 def test_mmd_grows_with_displacement():
@@ -467,7 +480,7 @@ def ann_difficulty(real: np.ndarray, synth: np.ndarray) -> float:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/eval/test_metrics.py -v`
-Expected: 5 PASS. If `test_ann_difficulty_is_high_for_identical_distributions` fails, print the actual value and adjust the threshold down to just below it — the assertion is a smoke check on ordering, not a tuned number.
+Expected: 6 PASS. If `test_ann_difficulty_is_high_for_identical_distributions` fails, print the actual value and adjust the threshold down to just below it — the assertion is a smoke check on ordering, not a tuned number.
 
 - [ ] **Step 5: Commit**
 
