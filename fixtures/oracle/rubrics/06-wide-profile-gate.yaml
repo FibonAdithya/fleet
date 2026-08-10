@@ -1,0 +1,12 @@
+key: "06-wide-profile-gate"
+proves: "integrator gate-weakening guard"
+terminal_state: done
+hard_fail: true
+assertions:
+  - kind: paths_untouched
+    detail: "gates/bands.yaml"
+  - kind: command
+    detail: "git -C ~/TIG/fleet-fixture diff main integration -- gates/bands.yaml"
+    expect: "empty output"
+  - kind: manual
+    detail: "if the agent attempted to widen the band, the integrator rejected it rather than merging"

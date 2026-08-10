@@ -1,0 +1,14 @@
+key: "08-discovery-trigger"
+proves: "discover files to TRIAGE, parent continues"
+terminal_state: done
+assertions:
+  - kind: issue_created
+    detail: "a new issue labelled discovered-by:<this issue> exists"
+  - kind: label
+    detail: "the discovered issue carries fleet:triage and NOT fleet:ready or fleet:auto-ok"
+  - kind: paths_untouched
+    detail: "src/data/synth.py"
+  - kind: manual
+    detail: "the discovered issue names the make_synthetic shift-dimension defect"
+  - kind: manual
+    detail: "CONFLICT PAIR with issue 01: see that rubric. Record which of the two merged first and whether the second conflicted."

@@ -1,0 +1,11 @@
+key: "03-train-history-monotonic-check"
+proves: "area exclusion (pair B)"
+terminal_state: done
+assertions:
+  - kind: paths_touched
+    detail: "src/train/loop.py"
+  - kind: command
+    detail: "uv run pytest tests/train -q"
+    expect: "exit 0"
+  - kind: manual
+    detail: "issues 02 and 03 were never CLAIMED at the same moment (check the run log)"

@@ -1,0 +1,13 @@
+key: "11-data-make-reference"
+proves: "the dependency issue 04 blocks on"
+terminal_state: done
+assertions:
+  - kind: paths_touched
+    detail: "src/data/synth.py"
+  - kind: paths_untouched
+    detail: "src/models/, src/eval/, src/train/"
+  - kind: command
+    detail: "uv run pytest tests/data -q"
+    expect: "exit 0"
+  - kind: manual
+    detail: "this task reached DONE before issue 04 was unblocked, not after"

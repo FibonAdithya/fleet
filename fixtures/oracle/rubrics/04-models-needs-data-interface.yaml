@@ -1,0 +1,14 @@
+key: "04-models-needs-data-interface"
+proves: "block -> auto-unblock, no human"
+terminal_state: done
+hard_fail: true
+assertions:
+  - kind: label
+    detail: "fleet:blocked was applied at some point during the run"
+  - kind: paths_untouched
+    detail: "src/data/"
+  - kind: manual
+    detail: "the task left BLOCKED without any human action -- no fleet:human label was ever applied"
+  - kind: command
+    detail: "uv run pytest tests/models -q"
+    expect: "exit 0"
