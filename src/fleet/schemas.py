@@ -18,7 +18,9 @@ class SchemaError(Exception):
 
 
 @lru_cache(maxsize=8)
-def _read(path: Path) -> dict:
+def _read(path: Path, mtime: float) -> dict:
+    """`mtime` is part of the cache key, not the body: the daemon is long-lived,
+    and a schema edited in the target repo must not stay invisible until restart."""
     return json.loads(path.read_text())
 
 
@@ -28,12 +30,19 @@ def load_schema(cfg: FleetConfig, name: str) -> dict:
     path = cfg.schemas_dir / SCHEMA_FILES[name]
     if not path.is_file():
         raise SchemaError(f"schema not found: {path}")
-    return _read(path)
+    return _read(path, path.stat().st_mtime)
 
 
 def validate(cfg: FleetConfig, name: str, payload: dict) -> None:
     try:
         jsonschema.validate(payload, load_schema(cfg, name))
     except jsonschema.ValidationError as exc:
-        field = ".".join(str(p) for p in exc.absolute_path) or "<root>"
-        raise SchemaError(f"{name} invalid at {field}: {exc.message}") from exc
+        field = ".".join(str(p) for p in exc.absolute_path)
+        if exc.validator == "required":
+            # jsonschema reports a missing property against the PARENT object, so
+            # absolute_path is empty for the commonest failure there is. Name the
+            # missing keys explicitly or the message says "<root>".
+            missing = [k for k in exc.validator_value if k not in exc.instance]
+            if missing:
+                field = ".".join(filter(None, [field, ", ".join(missing)]))
+        raise SchemaError(f"{name} invalid at {field or '<root>'}: {exc.message}") from exc

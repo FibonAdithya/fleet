@@ -6,6 +6,7 @@ import json
 import re
 
 MARKERS = {"handoff": "<!-- fleet.handoff.v1 -->", "verdict": "<!-- fleet.verdict.v1 -->"}
+SCHEMA_IDS = {"handoff": "fleet.handoff.v1", "verdict": "fleet.verdict.v1"}
 
 _BLOCK = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
@@ -62,16 +63,23 @@ def render(payload: dict) -> str:
 
 
 def parse_latest(comments: list[str], kind: str) -> dict | None:
-    """Return the newest parseable payload of `kind`, or None."""
+    """Return the newest payload of `kind`, or None.
+
+    Scans comments newest-first and, within one comment, takes the LAST fenced
+    block: an agent that quotes an earlier packet before appending its own would
+    otherwise hand the receiver the quoted one. The recovered payload's `schema`
+    must match `kind` -- matching on the marker alone lets a comment carrying
+    both a handoff and a verdict return the wrong one.
+    """
     marker = MARKERS[kind]
     for body in reversed(comments):
         if marker not in body:
             continue
-        match = _BLOCK.search(body)
-        if not match:
-            continue
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            continue
+        for block in reversed(_BLOCK.findall(body)):
+            try:
+                payload = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("schema") == SCHEMA_IDS[kind]:
+                return payload
     return None

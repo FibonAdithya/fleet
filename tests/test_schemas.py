@@ -51,6 +51,14 @@ def test_missing_required_field_is_rejected(cfg):
         validate(cfg, "handoff", bad)
 
 
+def test_missing_required_field_message_names_the_field(cfg):
+    """jsonschema reports `required` failures against the parent object, so the
+    naive absolute_path read says "<root>" for the commonest failure of all."""
+    bad = {k: v for k, v in VALID.items() if k != "head_sha"}
+    with pytest.raises(SchemaError, match="head_sha"):
+        validate(cfg, "handoff", bad)
+
+
 def test_unknown_field_is_rejected(cfg):
     with pytest.raises(SchemaError):
         validate(cfg, "handoff", {**VALID, "vibes": "good"})
