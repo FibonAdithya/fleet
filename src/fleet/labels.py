@@ -35,3 +35,17 @@ def attempt_label(n: int) -> str:
 
 def all_state_labels() -> list[str]:
     return [f"fleet:{s}" for s in STATES]
+
+
+def static_vocabulary() -> set[str]:
+    """Exactly the labels created up front in the target repo. Anything outside
+    this set is generated at runtime and must be created before it is applied."""
+    return {
+        *all_state_labels(),
+        AUTO_OK,
+        *(f"area:{a}" for a in AREAS),
+        *(f"class:{c}" for c in CLASSES),
+        "fleet:attempt-1",
+        "fleet:attempt-2",
+        "fleet:fix-pass-1",
+    }

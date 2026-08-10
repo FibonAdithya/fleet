@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import click
 
-from fleet import git
+from fleet import git, labels
 from fleet.commands import do_block, do_discover, do_escalate, do_handoff
 from fleet.config import load_config
 from fleet.gh import RealGh
@@ -127,7 +127,7 @@ def escalate(task, question, considered, did, checks, commands):
 @main.command()
 @click.option("--from", "parent", type=int, required=True, help="The task you are working on.")
 @click.option("--title", required=True)
-@click.option("--area", required=True, help="One of: eval train models data configs docs")
+@click.option("--area", required=True, type=click.Choice(labels.AREAS))
 @click.option("--evidence", required=True, help="file:line and what is wrong there.")
 def discover(parent, title, area, evidence):
     """File an unrelated defect for someone else. Then carry on with your task."""

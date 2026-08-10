@@ -65,6 +65,16 @@ def test_add_labels_does_not_duplicate():
     assert gh.get_issue(n)["labels"] == ["area:eval", "fleet:ready"]
 
 
+def test_applying_an_unknown_label_fails_like_gh_does():
+    """`gh issue create --label X` fails when X does not exist and creates no
+    issue. A fake that accepts anything hides every missing ensure_label call."""
+    gh = FakeGh()
+    with pytest.raises(KeyError, match="discovered-by:1"):
+        gh.create_issue("t", "b", ["discovered-by:1"])
+    gh.ensure_label("discovered-by:1")
+    assert gh.create_issue("t", "b", ["discovered-by:1"]) == 1
+
+
 def test_list_issues_omits_comments_like_the_real_client():
     """RealGh's `issue list` does not fetch comment bodies. A fake that returns
     them lets code pass every test here and KeyError against real GitHub."""

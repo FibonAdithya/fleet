@@ -71,8 +71,12 @@ def do_discover(
     cfg: FleetConfig, gh: GhClient, *, parent: int, title: str, area: str, evidence: str
 ) -> int:
     """File a discovery in TRIAGE. Never READY, never auto-ok."""
-    gh.get_issue(parent)
+    # Strip first: search_titles is a substring scan over UNSTRIPPED stored
+    # titles, so " foo" would not match a stored "foo" and the exact-match guard
+    # below would never run.
+    title = title.strip()
     area_label = labels.area_label(area)
+    gh.get_issue(parent)
     # search_titles is a substring scan, so a short title collides with unrelated
     # issues -- "t" matches "...explicit k". Narrow with it, then require an exact
     # title match. The design already accepts that some near-duplicates get filed;

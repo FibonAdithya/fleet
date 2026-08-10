@@ -109,14 +109,16 @@ def test_unknown_area_is_rejected(cfg, gh):
 
 def test_a_substring_collision_is_not_a_duplicate(cfg, gh):
     """The parent issue is titled "estimate_lid should accept an explicit k".
-    A bare substring check refuses any title contained in it -- including "t"."""
+    A bare substring check refuses any title contained in it, "k" included."""
     n = do_discover(cfg, gh, parent=1, title="k", area="data", evidence="e")
     assert gh.get_issue(n)["title"] == "k"
 
 
 def test_the_parentage_label_is_created_before_it_is_applied(gh, cfg):
     """`discovered-by:<n>` is generated at runtime and is not in the repo's
-    label set. Real gh refuses an unknown label and creates no issue at all."""
+    label set. Real gh refuses an unknown label and creates no issue at all, and
+    FakeGh now mirrors that -- so inverting the order fails this test rather
+    than passing it silently."""
     do_discover(
         cfg, gh, parent=1, title="make_synthetic ignores dims above 0", area="data", evidence="e"
     )

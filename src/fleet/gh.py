@@ -6,6 +6,8 @@ import json
 import subprocess
 from typing import Protocol
 
+from fleet import labels as labels_module
+
 
 class GhClient(Protocol):
     def create_issue(self, title: str, body: str, labels: list[str]) -> int: ...
@@ -97,7 +99,14 @@ class RealGh:
         generated at runtime -- `discovered-by:<n>` above all -- must be created
         before it is applied.
         """
-        self._run("label", "create", name, "--color", colour, "--force")
+        try:
+            self._run("label", "create", name, "--color", colour)
+        except RuntimeError as exc:
+            # --force would "update the label color and description if it already
+            # exists", silently repainting a curated label. Tolerate the collision
+            # instead: the label existing is the outcome we wanted.
+            if "already exists" not in str(exc):
+                raise
 
 
 class FakeGh:
@@ -108,7 +117,18 @@ class FakeGh:
         self._next = 1
         self.ensured_labels: set[str] = set()
 
+    def _check_labels(self, names: list[str]) -> None:
+        """Mirror gh: applying a label that does not exist fails and creates
+        nothing. Without this the fake is more permissive than the real client,
+        and a missing ensure_label call passes every test here while breaking
+        against GitHub."""
+        known = labels_module.static_vocabulary() | self.ensured_labels
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            raise KeyError(f"could not add label: {unknown[0]!r} not found")
+
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        self._check_labels(labels)
         number = self._next
         self._next += 1
         self.issues[number] = {
@@ -125,6 +145,7 @@ class FakeGh:
         self.get_issue(issue)["comments"].append(body)
 
     def add_labels(self, issue: int, labels: list[str]) -> None:
+        self._check_labels(labels)
         current = self.get_issue(issue)["labels"]
         current.extend(label for label in labels if label not in current)
 
