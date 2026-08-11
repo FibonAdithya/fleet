@@ -10,6 +10,9 @@ assertions:
     detail: "uv run python -c 'from src.eval.lid import neighbour_count; assert neighbour_count(4) >= 1'"
     expect: "exit 0"
   - kind: command
+    detail: "uv run python -c 'import math; from src.data.synth import make_real; from src.eval.lid import estimate_lid; v = estimate_lid(make_real(4, d=3, seed=0)); assert math.isfinite(v) and v > 0'"
+    expect: "exit 0"
+  - kind: command
     detail: "uv run pytest tests/eval -q"
     expect: "exit 0"
   - kind: manual

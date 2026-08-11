@@ -7,7 +7,7 @@ import pytest
 
 from fleet.commands import do_block, do_escalate, do_handoff
 from fleet.config import load_config
-from fleet.gh import FakeGh
+from fleet.gh import FakeGh, GhError
 from fleet.packet import parse_latest
 from fleet.schemas import SchemaError
 
@@ -88,7 +88,7 @@ def test_block_sets_blocked_state_and_records_the_dependency(cfg, gh):
 
 
 def test_block_on_a_nonexistent_issue_raises_and_writes_nothing(cfg, gh):
-    with pytest.raises(KeyError):
+    with pytest.raises(GhError):
         do_block(cfg, gh, task=1, on=99, **BASE)
     assert gh.get_issue(1)["comments"] == []
 
