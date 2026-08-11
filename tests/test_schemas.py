@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import json
-import shutil
-from pathlib import Path
 
 import pytest
 
-from fleet.config import load_config
 from fleet.schemas import SchemaError, load_schema, validate
-
-FIXTURE_SCHEMAS = Path.home() / "TIG/fleet-fixture/.agents/schemas"
 
 VALID = {
     "schema": "fleet.handoff.v1",
@@ -25,16 +20,6 @@ VALID = {
     "do_not": ["Do not change the gate band."],
     "discovered": [],
 }
-
-
-@pytest.fixture()
-def cfg(tmp_path):
-    (tmp_path / "fleet.toml").write_text(
-        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
-        'roles = ".agents/roles"\nschemas = ".agents/schemas"\n'
-    )
-    shutil.copytree(FIXTURE_SCHEMAS, tmp_path / ".agents" / "schemas")
-    return load_config(tmp_path)
 
 
 def test_load_handoff_schema(cfg):
@@ -101,3 +86,70 @@ def test_schema_error_names_the_offending_field(cfg):
 
 def test_round_trip_through_json(cfg):
     validate(cfg, "handoff", json.loads(json.dumps(VALID)))
+
+
+def test_a_malformed_run_timestamp_is_rejected(cfg):
+    """`from.run` orders the permanent audit trail, and it was the one field in
+    the schema with no enforced constraint: jsonschema treats `format` as an
+    annotation unless a FormatChecker is supplied, and the date-time check
+    itself lives in rfc3339-validator. This fails if either goes missing."""
+    bad = {**VALID, "from": {**VALID["from"], "run": "tuesday-ish"}}
+    with pytest.raises(SchemaError, match="run"):
+        validate(cfg, "handoff", bad)
+
+
+def test_a_well_formed_run_timestamp_still_passes(cfg):
+    validate(cfg, "handoff", {**VALID, "from": {**VALID["from"], "run": "2026-08-10T02:14:00Z"}})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"to": "review", "blocked_on": 2},
+        {"to": "done", "blocked_on": 2},
+        {"to": "review", "question": "why?"},
+        {"to": "human", "question": "q", "considered": "c", "blocked_on": 2},
+        {"to": "blocked"},
+        {"to": "human"},
+        {"to": "human", "question": "q"},
+    ],
+    ids=lambda p: f"{p['to']}+{'+'.join(k for k in p if k != 'to') or 'nothing'}",
+)
+def test_the_conditional_fields_are_bound_to_their_state_by_the_schema(cfg, payload):
+    """build_handoff enforces this too, but only for callers that go through it.
+    The schema is what holds for a packet recovered from a comment, or written
+    by anything that is not this CLI."""
+    with pytest.raises(SchemaError):
+        validate(cfg, "handoff", {**VALID, **payload})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"to": "blocked", "blocked_on": 2},
+        {"to": "human", "question": "which band?", "considered": "0.42-0.58 vs 0.62"},
+        {"to": "done"},
+        {"to": "integrating"},
+    ],
+    ids=lambda p: p["to"],
+)
+def test_a_correctly_shaped_packet_still_passes(cfg, payload):
+    validate(cfg, "handoff", {**VALID, **payload})
+
+
+def test_a_schema_rejection_still_names_the_offending_field(cfg):
+    """`{"not": {}}` under `properties` rather than a boolean `false` or a
+    top-level not/required pair: jsonschema drops the instance path for a
+    boolean schema, and the top-level form reports against the whole packet."""
+    with pytest.raises(SchemaError, match="at blocked_on"):
+        validate(cfg, "handoff", {**VALID, "to": "review", "blocked_on": 2})
+
+
+def test_a_malformed_schema_file_raises_ours_not_jsonschemas(cfg):
+    """A structurally invalid schema in the target repo makes jsonschema raise
+    SchemaError, which is not a ValidationError -- so it used to sail past the
+    handler and out of the CLI as a bare third-party traceback, defeating this
+    module's "the message names the offending field" contract."""
+    (cfg.schemas_dir / "handoff.schema.json").write_text('{"type": 17}')
+    with pytest.raises(SchemaError, match="malformed schema"):
+        validate(cfg, "handoff", VALID)

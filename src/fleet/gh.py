@@ -127,17 +127,30 @@ class RealGh:
 class FakeGh:
     """In-memory ledger with the same surface. The only client tests use."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_attempts: int = labels_module.DEFAULT_MAX_ATTEMPTS,
+        max_fix_passes: int = labels_module.DEFAULT_MAX_FIX_PASSES,
+    ) -> None:
         self.issues: dict[int, dict] = {}
         self._next = 1
         self.ensured_labels: set[str] = set()
+        # A fake standing in for a repo seeded under a different policy needs the
+        # same counters that repo was seeded with, or its idea of "this label
+        # exists" diverges from the real one. See labels.static_vocabulary.
+        self.vocabulary = labels_module.static_vocabulary(max_attempts, max_fix_passes)
 
     def _check_labels(self, names: list[str]) -> None:
-        """Mirror gh: applying a label that does not exist fails and creates
-        nothing. Without this the fake is more permissive than the real client,
-        and a missing ensure_label call passes every test here while breaking
-        against GitHub."""
-        known = labels_module.static_vocabulary() | self.ensured_labels
+        """Mirror gh: naming a label that does not exist fails the whole edit and
+        changes nothing. Without this the fake is more permissive than the real
+        client, and a missing ensure_label call passes every test here while
+        breaking against GitHub.
+
+        Applies to removal too: `gh issue edit --remove-label X` resolves X to an
+        id before it can remove it, so an X the repo has never had fails. (An X
+        the repo has but the issue does not is a no-op -- that is a different
+        case, and remove_labels still tolerates it.)"""
+        known = self.vocabulary | self.ensured_labels
         unknown = [n for n in names if n not in known]
         if unknown:
             raise GhError(f"could not add label: {unknown[0]!r} not found")
@@ -179,6 +192,7 @@ class FakeGh:
     def remove_labels(self, issue: int, labels: list[str]) -> None:
         if not labels:
             return
+        self._check_labels(labels)
         record = self._get(issue)
         record["labels"] = [label for label in record["labels"] if label not in labels]
 
@@ -208,10 +222,16 @@ class FakeGh:
         "open", "OPEN", or any other casing identically, and the stored state
         here is "OPEN"/"CLOSED" (what gh's JSON actually returns -- see
         fixtures/ledger/issues.json), so a literal `==` would silently diverge
-        from both callers and gh."""
+        from both callers and gh.
+
+        Each row is a snapshot, for the same reason get_issue's is: a dict
+        comprehension is a shallow copy, so handing back the stored `labels`
+        list would let a caller that builds a label list in place corrupt this
+        ledger -- passing every test here and doing nothing against GitHub,
+        which returns freshly-parsed JSON every call."""
         normalized = state.upper()
         return [
-            {k: v for k, v in issue.items() if k != "comments"}
+            {**{k: v for k, v in issue.items() if k != "comments"}, "labels": list(issue["labels"])}
             for issue in self.issues.values()
             if normalized == "ALL" or issue["state"] == normalized
         ]

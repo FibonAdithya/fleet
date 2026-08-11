@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
@@ -51,6 +53,6 @@ def load_config(start: Path | None = None) -> FleetConfig:
         schemas_dir=root / policy["schemas"],
         slots=int(fleet.get("slots", 6)),
         stall_minutes=int(fleet.get("stall_minutes", 10)),
-        max_attempts=int(fleet.get("max_attempts", 2)),
-        max_fix_passes=int(fleet.get("max_fix_passes", 1)),
+        max_attempts=int(fleet.get("max_attempts", DEFAULT_MAX_ATTEMPTS)),
+        max_fix_passes=int(fleet.get("max_fix_passes", DEFAULT_MAX_FIX_PASSES)),
     )

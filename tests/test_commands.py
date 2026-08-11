@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-
 import pytest
 
 from fleet.commands import do_block, do_escalate, do_handoff
-from fleet.config import load_config
 from fleet.gh import FakeGh, GhError
 from fleet.packet import parse_latest
 from fleet.schemas import SchemaError
-
-FIXTURE_SCHEMAS = Path.home() / "TIG/fleet-fixture/.agents/schemas"
 
 BASE = dict(
     role="implementer",
@@ -24,16 +18,6 @@ BASE = dict(
     checks="make check: pass",
     commands=["make check"],
 )
-
-
-@pytest.fixture()
-def cfg(tmp_path):
-    (tmp_path / "fleet.toml").write_text(
-        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
-        'roles = ".agents/roles"\nschemas = ".agents/schemas"\n'
-    )
-    shutil.copytree(FIXTURE_SCHEMAS, tmp_path / ".agents" / "schemas")
-    return load_config(tmp_path)
 
 
 @pytest.fixture()
@@ -134,3 +118,29 @@ def test_handoff_cannot_reach_human(cfg, gh):
         do_handoff(cfg, gh, task=1, to="human", **BASE)
     assert gh.get_issue(1)["comments"] == []
     assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
+
+
+def test_a_task_cannot_block_on_itself(cfg, gh):
+    """Both lookups resolve and the schema is satisfied, so nothing downstream
+    catches it: the unblock watcher waits for the very task it is blocking, and
+    block is the non-escalating path, so no human is ever woken. A
+    `--task 1 --on 1` typo used to strand the task until the stall timer."""
+    with pytest.raises(ValueError, match="itself"):
+        do_block(cfg, gh, task=1, on=1, **BASE)
+    assert gh.get_issue(1)["comments"] == []
+    assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
+
+
+def test_blocked_on_cannot_ride_on_a_packet_bound_elsewhere(cfg, gh):
+    """The schema lists blocked_on as a free optional property, so a REVIEW
+    packet carrying one validates -- a phantom dependency an unblock watcher
+    will act on. do_handoff's `**kw` passed it straight through."""
+    with pytest.raises(ValueError, match="blocked_on"):
+        do_handoff(cfg, gh, task=1, to="review", blocked_on=2, **BASE)
+    assert gh.get_issue(1)["comments"] == []
+
+
+def test_a_question_cannot_ride_on_a_packet_bound_elsewhere(cfg, gh):
+    with pytest.raises(ValueError, match="question"):
+        do_handoff(cfg, gh, task=1, to="review", question="why?", **BASE)
+    assert gh.get_issue(1)["comments"] == []

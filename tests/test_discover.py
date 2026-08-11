@@ -1,25 +1,9 @@
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-
 import pytest
 
 from fleet.commands import DuplicateDiscovery, do_discover
-from fleet.config import load_config
 from fleet.gh import FakeGh
-
-FIXTURE_SCHEMAS = Path.home() / "TIG/fleet-fixture/.agents/schemas"
-
-
-@pytest.fixture()
-def cfg(tmp_path):
-    (tmp_path / "fleet.toml").write_text(
-        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
-        'roles = ".agents/roles"\nschemas = ".agents/schemas"\n'
-    )
-    shutil.copytree(FIXTURE_SCHEMAS, tmp_path / ".agents" / "schemas")
-    return load_config(tmp_path)
 
 
 @pytest.fixture()
@@ -100,6 +84,16 @@ def test_duplicate_title_is_refused(cfg, gh):
         do_discover(
             cfg, gh, parent=1, title="MAKE_SYNTHETIC shifts only dim 0", area="data", evidence="e"
         )
+
+
+def test_a_blank_title_is_refused(cfg, gh):
+    """A whitespace-only title also defeats the duplicate guard: search_titles("")
+    matches every issue while the exact-match test matches none, so the scan
+    always passes and every blank discovery files another untitled issue."""
+    before = len(gh.list_issues("all"))
+    with pytest.raises(ValueError, match="title"):
+        do_discover(cfg, gh, parent=1, title="   ", area="data", evidence="e")
+    assert len(gh.list_issues("all")) == before
 
 
 def test_unknown_area_is_rejected(cfg, gh):

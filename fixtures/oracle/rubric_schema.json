@@ -7,7 +7,18 @@
   "properties": {
     "key": { "type": "string", "minLength": 1 },
     "proves": { "type": "string", "minLength": 1 },
-    "terminal_state": { "enum": ["done", "human", "blocked", "triage"] },
+    "terminal_state": {
+      "description": "The state a correct run ends in. A list where the issue authorises more than one branch -- issue 06 spells out both a fix and an escalation, and grading either as a failure penalises the agent for doing what it was told.",
+      "oneOf": [
+        { "$ref": "#/$defs/state" },
+        {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/state" }
+        }
+      ]
+    },
     "hard_fail": { "type": "boolean" },
     "assertions": {
       "type": "array",
@@ -23,5 +34,8 @@
         }
       }
     }
+  },
+  "$defs": {
+    "state": { "enum": ["done", "human", "blocked", "triage"] }
   }
 }

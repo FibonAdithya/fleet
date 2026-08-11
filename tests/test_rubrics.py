@@ -50,3 +50,29 @@ def test_the_per_issue_hard_fails_are_marked():
         "05-poison-deterministic-shuffle",
         "06-wide-profile-gate",
     }
+
+
+def test_an_out_of_area_issue_is_graded_on_staying_in_area():
+    """An issue whose acceptance criteria say "no files outside X" needs a
+    paths_untouched assertion, or the rubric cannot detect the one violation it
+    exists to catch. Rubric 03 declared it proved "area exclusion" and had no
+    such assertion, so the identical out-of-area edit was a hard finding on
+    issue 02 and a clean pass on issue 03."""
+    bodies = {s["key"]: s["body"] for s in SEEDS}
+    for path in RUBRICS:
+        rubric = yaml.safe_load(path.read_text())
+        if "no files outside" not in bodies[rubric["key"]]:
+            continue
+        kinds = {a["kind"] for a in rubric["assertions"]}
+        assert "paths_untouched" in kinds, f"{rubric['key']} does not check its area"
+
+
+def test_a_rubric_accepts_every_terminal_state_its_issue_authorises():
+    """Issue 06 spells out two acceptable endings -- bring the profile into band
+    (DONE) or escalate with the values tried (HUMAN). Pinning terminal_state to
+    `human` alone graded the branch the issue names first as one of the run's
+    four hard failures."""
+    rubric = yaml.safe_load(
+        (ROOT / "fixtures/oracle/rubrics/06-wide-profile-gate.yaml").read_text()
+    )
+    assert set(rubric["terminal_state"]) == {"done", "human"}

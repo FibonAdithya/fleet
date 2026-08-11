@@ -20,10 +20,10 @@ def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
 
 def do_handoff(cfg: FleetConfig, gh: GhClient, *, task: int, to: str, **kw) -> dict:
     if to in {"blocked", "human"}:
-        # Both states are schema-valid here, but a handoff to them carries no
-        # blocked_on and no question -- so the task would sit in blocked with
-        # nothing that could ever unblock it, or in human with no question to
-        # answer. The block/escalate split is the point; do not let it be bypassed.
+        # build_handoff would reject these anyway -- it requires blocked_on for
+        # BLOCKED and question+considered for HUMAN -- but it can only say which
+        # field is missing. Name the command instead: the caller's mistake is not
+        # a forgotten argument, it is the wrong entry point.
         verb = "do_block" if to == "blocked" else "do_escalate"
         raise ValueError(f"use {verb} to reach {to!r}, not a plain handoff")
     gh.get_issue(task)
@@ -75,6 +75,12 @@ def do_discover(
     # titles, so " foo" would not match a stored "foo" and the exact-match guard
     # below would never run.
     title = title.strip()
+    if not title:
+        # An empty title also defeats the duplicate guard below: search_titles("")
+        # matches every issue, while the exact-match test matches none, so the
+        # scan always passes and every blank discovery files another untitled
+        # issue. do_escalate guards its own empty fields the same way.
+        raise ValueError("discover needs a title, not an empty one")
     area_label = labels.area_label(area)
     gh.get_issue(parent)
     # search_titles is a substring scan, so a short title collides with unrelated

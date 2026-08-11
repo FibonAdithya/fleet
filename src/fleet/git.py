@@ -25,11 +25,18 @@ def merge_base_sha(root: Path, base: str) -> str:
     return _git(root, "rev-parse", "--short=7", _git(root, "merge-base", "HEAD", base))
 
 
-def branch_name(root: Path) -> str:
+def branch_name(root: Path, *, allow_detached: bool = False) -> str:
     name = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     if name == "HEAD":
         # Detached HEAD returns the literal string "HEAD" with exit 0. The schema's
         # `branch` only requires minLength 1, so it would validate and land in the
         # permanent audit trail as though it were a real branch.
-        raise RuntimeError("detached HEAD: check out a branch before handing off")
+        if not allow_detached:
+            raise RuntimeError("detached HEAD: check out a branch before handing off")
+        # escalate and block are the only paths that reach a human, and a broken
+        # git state is exactly when an agent needs them. Refusing there would leave
+        # it with no command at all. Record the truth instead of a name: anything
+        # downstream that tries to check this out fails loudly rather than
+        # resolving to the wrong branch, which "HEAD" would.
+        return f"detached at {head_sha(root)}"
     return name

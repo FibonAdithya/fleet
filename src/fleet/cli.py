@@ -17,26 +17,36 @@ from fleet.gh import RealGh
 def _context() -> tuple:
     cfg = load_config()
     gh = RealGh(cfg.repo_slug)
-    agent = os.environ.get("FLEET_AGENT")
-    if agent is None:
+    # Falsy, not `is None`: a dispatcher doing `export FLEET_AGENT="$AGENT_ID"`
+    # with AGENT_ID unset exports an empty string, which is not None. That would
+    # skip the warning and the fallback both, then fail schema validation with
+    # "from.agent: '' is too short" -- a complaint about a field the operator
+    # never set. Same shape for FLEET_ROLE against the role enum.
+    agent = os.environ.get("FLEET_AGENT", "").strip()
+    if not agent:
         # "manual" is legitimate for a human running this by hand, which makes it
         # indistinguishable from a dispatch bug that never exported the variable.
         # Say so on stderr rather than silently misattributing an unattended run.
         click.echo("warning: FLEET_AGENT unset; attributing to 'manual'", err=True)
         agent = "manual"
     identity = {
-        "role": os.environ.get("FLEET_ROLE", "implementer"),
+        "role": os.environ.get("FLEET_ROLE", "").strip() or "implementer",
         "agent": agent,
         "run": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     return cfg, gh, identity
 
 
-def _git_facts(cfg) -> dict:
+def _git_facts(cfg, *, allow_detached: bool = False) -> dict:
+    """`allow_detached` is set only by escalate and block. A handoff needs a real
+    branch for the receiver to check out, but escalate and block are the only
+    commands that reach a human, and a detached HEAD -- mid-bisect, mid-failed-
+    rebase -- is exactly when an agent needs them. Refusing there would leave it
+    with no way out at all."""
     return {
         "base_sha": git.merge_base_sha(cfg.root, cfg.integration_branch),
         "head_sha": git.head_sha(cfg.root),
-        "branch": git.branch_name(cfg.root),
+        "branch": git.branch_name(cfg.root, allow_detached=allow_detached),
     }
 
 
@@ -94,7 +104,7 @@ def block(task, on, did, checks, commands):
         checks=checks,
         commands=list(commands),
         **identity,
-        **_git_facts(cfg),
+        **_git_facts(cfg, allow_detached=True),
     )
     click.echo(f"task {task} blocked on {on}")
 
@@ -119,7 +129,7 @@ def escalate(task, question, considered, did, checks, commands):
         checks=checks,
         commands=list(commands),
         **identity,
-        **_git_facts(cfg),
+        **_git_facts(cfg, allow_detached=True),
     )
     click.echo(f"task {task} escalated to a human")
 

@@ -35,8 +35,11 @@ on area will either wrongly refuse #6 or wrongly permit a `gates/` edit.
 ## 3. Fixture validity — what the final review found
 
 The fixture grades some things it does not test. Fixed already: issue 6 (was
-trivially solvable and mis-scoped) and rubric 01 (graded a weaker property than
-its issue demanded). Still open:
+trivially solvable and mis-scoped), rubric 01 (graded a weaker property than its
+issue demanded), rubric 06 (accepted only the escalate branch, so an agent taking
+the fix branch issue 6 spells out first was graded a hard failure), and rubric 03
+(declared it proved area exclusion with no `paths_untouched` to prove it with).
+Still open:
 
 - **Issue 5's poison is escapable.** Shuffling with a fresh literal seed
   satisfies all three acceptance criteria. It is meant to be unsatisfiable — it
@@ -102,9 +105,9 @@ for a reason unrelated to the orchestrator.
   commit hands the reviewer a `head_sha` that does not contain the work, and both
   packet and verdict validate.
 - **The fleet suite depends on a hardcoded absolute path** into the fixture repo
-  (`Path.home() / "TIG/fleet-fixture/.agents/schemas"`, in three test modules),
-  and validates against that repo's *working tree*. Vendor a copy or skip when
-  absent.
+  (`Path.home() / "TIG/fleet-fixture/.agents/schemas"`) and validates against that
+  repo's *working tree*. Vendor a copy or skip when absent. It is now in
+  `tests/conftest.py` only, so that is a one-line change rather than three.
 - **`discover` cannot file what `planner.md` requires** — it accepts only
   parent/title/area/evidence with a fixed body template, but a planner must give
   each child a class and acceptance criteria. Issue 9 is not completable as

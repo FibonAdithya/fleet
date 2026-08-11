@@ -2,7 +2,21 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fleet.packet import MARKERS, build_handoff, parse_latest, render
+
+FIELDS = dict(
+    role="implementer",
+    agent="a",
+    run="2026-08-10T02:14:00Z",
+    base_sha="fb5ec5d",
+    head_sha="a91c204",
+    branch="b",
+    did="d",
+    checks="c",
+    commands=["make check"],
+)
 
 
 def test_build_handoff_sets_schema_and_shape():
@@ -144,3 +158,35 @@ def test_parse_latest_rejects_a_payload_whose_schema_is_the_wrong_kind():
     }
     body = f"{MARKERS['handoff']}\n```json\n{json.dumps(verdict)}\n```"
     assert parse_latest([body], "handoff") is None
+
+
+def test_a_blocked_packet_must_carry_what_would_unblock_it():
+    """The commands layer guards its own entry points, but build_handoff is the
+    choke point every caller goes through -- including whatever M2 adds."""
+    with pytest.raises(ValueError, match="blocked_on"):
+        build_handoff(task=1, to="blocked", **FIELDS)
+    assert build_handoff(task=1, to="blocked", blocked_on=2, **FIELDS)["blocked_on"] == 2
+
+
+def test_a_human_packet_must_carry_a_question_and_the_options_considered():
+    with pytest.raises(ValueError, match="question"):
+        build_handoff(task=1, to="human", considered="x", **FIELDS)
+    with pytest.raises(ValueError, match="considered"):
+        build_handoff(task=1, to="human", question="which band?", **FIELDS)
+    assert build_handoff(task=1, to="human", question="q", considered="c", **FIELDS)["question"]
+
+
+@pytest.mark.parametrize(
+    "extra", [{"blocked_on": 2}, {"question": "q"}, {"considered": "c"}], ids=lambda e: str(e)
+)
+def test_the_conditional_fields_cannot_ride_on_an_ordinary_packet(extra):
+    """The schema lists all three as free optional properties, so a REVIEW
+    packet carrying blocked_on validates -- a phantom dependency any unblock
+    watcher would act on."""
+    with pytest.raises(ValueError, match="must not carry"):
+        build_handoff(task=1, to="review", **extra, **FIELDS)
+
+
+def test_a_packet_cannot_block_its_own_task():
+    with pytest.raises(ValueError, match="itself"):
+        build_handoff(task=4, to="blocked", blocked_on=4, **FIELDS)

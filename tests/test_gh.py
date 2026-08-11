@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from fleet.gh import FakeGh, GhError
-from fleet.labels import area_label, attempt_label, state_label
+from fleet.labels import area_label, attempt_label, state_label, static_vocabulary
 
 
 def test_create_issue_returns_increasing_numbers():
@@ -153,3 +153,49 @@ def test_get_issue_returns_a_copy_not_the_live_record():
     assert fresh["labels"] == ["area:eval"]
     assert fresh["comments"] == ["hello"]
     assert fresh["title"] == "t"
+
+
+def test_list_issues_returns_copies_not_the_live_records():
+    """The same defect get_issue was fixed for. A dict comprehension is a
+    shallow copy, so the rows shared their `labels` list with the store: an
+    allocator that builds a label list in place would corrupt the ledger,
+    pass every test here, and do nothing against GitHub."""
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [area_label("eval")])
+    row = gh.list_issues("open")[0]
+    row["labels"].append("area:data")
+    row["title"] = "mutated"
+    assert gh.get_issue(n)["labels"] == ["area:eval"]
+    assert gh.get_issue(n)["title"] == "t"
+
+
+def test_search_titles_returns_copies_too():
+    """search_titles builds on list_issues, so it inherited the same aliasing."""
+    gh = FakeGh()
+    n = gh.create_issue("estimate_lid crashes", "b", [area_label("eval")])
+    gh.search_titles("crashes")[0]["labels"].append("area:data")
+    assert gh.get_issue(n)["labels"] == ["area:eval"]
+
+
+def test_removing_a_label_the_repo_never_had_fails_like_gh_does():
+    """`gh issue edit --remove-label X` resolves X to an id first, so an X the
+    repo has never had fails the whole edit. Only create_issue and add_labels
+    mirrored that -- and _post's every transition goes through remove_labels,
+    so a repo missing one state label passed the whole offline suite and failed
+    on the first live write."""
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [area_label("eval")])
+    with pytest.raises(GhError, match="discovered-by:1"):
+        gh.remove_labels(n, ["discovered-by:1"])
+    assert gh.get_issue(n)["labels"] == ["area:eval"]
+
+
+def test_the_label_vocabulary_tracks_the_configured_attempt_cap():
+    """`max_attempts` is a fleet.toml knob, but the vocabulary hardcoded
+    attempt-1 and attempt-2. Raising the cap produced a well-formed
+    attempt_label(3) that no repo and no fake had ever heard of."""
+    assert attempt_label(3) not in static_vocabulary()
+    assert attempt_label(3) in static_vocabulary(max_attempts=3)
+    with pytest.raises(GhError, match="attempt-3"):
+        FakeGh().create_issue("t", "b", [attempt_label(3)])
+    assert FakeGh(max_attempts=3).create_issue("t", "b", [attempt_label(3)]) == 1
