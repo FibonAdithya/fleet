@@ -26,12 +26,21 @@ a dispatch bug and not a value. `manual` is a legitimate value for a human at a
 keyboard, which is exactly why an unattended run that silently produced it would
 be indistinguishable from that bug.
 
-## The four write commands
+`FLEET_ROLE` is no longer only attribution: a handoff's target state is checked
+against it. An implementer may hand to `review` and nothing else; only an
+integrator may reach `done`; a reviewer leaves REVIEW by writing a verdict and
+cannot hand out of it at all. An unrecognised role is refused rather than
+permitted, so a typo is an error and not a privilege escalation — and so is an
+*unset* `FLEET_ROLE`, which used to fall back to `implementer` silently and so
+handed out exactly the privilege this check exists to fence off.
+
+## The five write commands
 
     fleet handoff  --task N --to review --did "..." --checks "..." --command "make check"
     fleet discover --from N --title "..." --area data --evidence "path:line ..."
     fleet block    --task N --on M --did "..."
     fleet escalate --task N --question "..." --considered "..." --did "..."
+    fleet verdict  --task N --verdict approved --head-sha SHA --checks-rerun "make check: pass"
 
 `block` resolves itself when task M lands. `escalate` wakes a human and is
 terminal. Choosing the wrong one is the difference between a task that fixes
@@ -65,6 +74,40 @@ The following were exercised end to end against real GitHub, then cleaned up:
 | `discover` creates its parentage label | `discovered-by:12` did not exist and was created on demand |
 | Duplicate discovery | refused; issue count unchanged |
 | Parent task during discovery | labels and comments untouched |
+
+## Seeing what the allocator would do
+
+    cd ~/TIG/fleet-fixture && fleet plan --dry-run
+
+Reads the ledger, runs one tick of `decide()`, prints the intents and writes
+nothing. The client is wrapped so that every method outside a read allowlist
+raises — deny by default, so a mutating method added later is refused until
+someone classifies it. The guarantee is a property of the code path, not of
+having read it carefully.
+
+The tick runs with **no live agents**, because M2 has no agent source. When the
+ledger holds a `fleet:claimed` task the output says so above the intents: with no
+agents that task is indistinguishable from ledger drift, so the
+`Release(N, no_agent, 2)` printed for it is an artefact of the dry run rather
+than a recommendation. Against an idle backlog the output is exactly the
+dispatches the allocator would make.
+
+`--no-dry-run` is refused until the daemon lands in M3.
+
+## Running the scenarios
+
+    uv run pytest tests/test_scenarios.py -v
+
+`fixtures/scenarios/` holds one file per claim, and each names its claim in its
+`proves` field. Five of the seven seed from the captured ledger
+(`fixtures/ledger/issues.json`), so they are exercised against real gh output
+rather than invented rows; the two that do not say in their own `proves` why the
+capture cannot express their case. Every tick lists **every** intent that tick
+emits — the comparison is exhaustive, which is what lets a scenario assert an
+absence without writing `expect: []`.
+
+Three rows of the design's failure table are covered by no scenario at all.
+`docs/m2-inputs.md` §7 names them and says why.
 
 ## Known warts
 
