@@ -24,6 +24,7 @@ from fleet.model import (
     Policy,
     Release,
     Task,
+    Unblock,
 )
 
 # Intents whose expansion stops the agent, so that agent's cost is final.
@@ -123,6 +124,20 @@ def _reap(
     return intents
 
 
+def _unblock(ledger: list[Task]) -> list[Intent]:
+    """BLOCKED tasks whose dependency reached DONE. No human is involved -- that
+    is the entire reason `block` is kept distinct from `escalate`."""
+    done = {t.number for t in ledger if t.state == "done"}
+    return [
+        Unblock(task=t.number)
+        for t in ledger
+        # A dependency we cannot see stays blocked. Treating an unrecorded or
+        # absent `blocked_on` as satisfied requeues work whose prerequisite
+        # never landed.
+        if t.state == "blocked" and t.blocked_on is not None and t.blocked_on in done
+    ]
+
+
 def _final_cost(intents: list[Intent], agents: list[AgentState]) -> float:
     """Only a reaped agent's cost is final, so only a reaped agent's cost lands
     in the running total. `AgentState.cost_usd` is cumulative per agent: adding
@@ -142,6 +157,7 @@ def decide(
     observations = _observe(prev, agents, now)
     intents: list[Intent] = []
     intents += _reap(ledger, policy, agents, observations, now)
+    intents += _unblock(ledger)
     state = FleetState(
         seen=tuple(sorted(observations.items())),
         spent_usd=prev.spent_usd + _final_cost(intents, agents),
