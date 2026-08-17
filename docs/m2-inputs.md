@@ -246,6 +246,64 @@ scenario files against ten claims.
   attempt number on the packet and refuse one that does not match the task's
   current `fleet:attempt-N`, or fetch only comments written after the current
   attempt's dispatch.
+- **A closed dependency no longer satisfies UNBLOCK.** `_open`
+  (`src/fleet/decide.py`) filters closed issues out of the ledger before all
+  three phases. For REAP and DISPATCH that is correct and is what parity with
+  `list_issues("open")` requires. For UNBLOCK it is a narrowing: a blocker
+  that is `fleet:done` *and* closed — the ordinary end state of a completed
+  task — is dropped from the ledger before `_unblock` builds its `done` set,
+  so the task it should release is never released. Nothing else can move a
+  BLOCKED row: REAP touches only CLAIMED, DISPATCH only READY. The task holds
+  no slot and no area, so the fleet does not deadlock; that one task simply
+  never runs.
+
+  Inert in M2 for two independent reasons — not the parity argument the
+  `_open` docstring frames it under, which forces the filter for REAP and
+  DISPATCH but buys UNBLOCK nothing. What actually keeps it harmless: nothing
+  in the repo can close an issue (`close_issue` is on `FakeGh` alone, absent
+  from the `GhClient` Protocol and from `RealGh` — confirmed, §5 above already
+  says as much), and only the simulator supplies packets at all —
+  `do_plan` (`src/fleet/cli.py`) calls `ledger.read(gh.list_issues("open"))`
+  with no `packets` argument, so every `Task.blocked_on` is `None` and
+  UNBLOCK is unreachable through the CLI regardless of the filter.
+
+  M3 removes both accidents on day one: its shell fetches handoff comments,
+  so `blocked_on` is populated, and closing an issue on completion is
+  ordinary. The smallest correct change:
+
+  ```python
+  def _unblock(ledger: list[Task], all_rows: list[Task]) -> list[Intent]:
+      done = {t.number for t in all_rows if t.state == "done" or not t.is_open}
+  ```
+
+  called as `_unblock(open_ledger, ledger)` — a closed issue IS a satisfied
+  dependency whatever label it still carries. The query-side half is easy to
+  miss: once M3's shell fetches packets, its ledger query must be `all`, not
+  `open`, or the CLI reintroduces the same wedge from the query side.
+- **A CLOSED row still labelled `fleet:claimed` leaks its agent.** Same
+  filter, a second consequence, unrecorded until now. Because `_open` runs
+  before `_reap`, a closed row still carrying `fleet:claimed` produces no
+  `Release` and therefore no `StopAgent` — the agent runs on. A ledger of
+  `[#5 CLOSED fleet:claimed area:eval, #8 OPEN fleet:ready area:eval]` with a
+  live agent on #5 yields `Dispatch(8, implementer, 1)`: a second agent starts
+  in an area an agent is still live in, and #5's agent is never stopped. Its
+  cost still counts toward the fleet ceiling while nothing can stop it.
+  Before this filter existed, #5 would have been released and its agent
+  stopped — REAP used to see every CLAIMED row regardless of open state.
+
+  Unreachable in M2 for the same two reasons as the UNBLOCK finding above,
+  plus one more specific to this path: the simulator's row fold applies only
+  `SetLabels` (`src/fleet/simulate.py`), so no scenario can close a row
+  mid-run — there is no way to construct the ledger this needs even inside
+  the harness.
+
+  M3 inherits it the same day it inherits the UNBLOCK narrowing: once closing
+  an issue on completion is real, a REAP pass that skips closed rows before
+  checking for a live agent stops being "correct behaviour on an unreachable
+  case" and becomes a leak. REAP needs to see a closed-but-still-claimed row
+  in order to release it, even though DISPATCH and UNBLOCK must not act on a
+  closed row at all — the filter cannot stay a single blanket `_open()` call
+  shared by all three phases.
 - **The fixture repo's `reviewer.md` is now stale.** It still instructs
   `fleet handoff --task <n> --to claimed`, which this milestone refuses — a
   reviewer's allowed handoff targets are the empty set, and the refusal names

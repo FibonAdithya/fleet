@@ -135,13 +135,17 @@ and nobody runs `fleet verdict` on a closed issue. §10's parity row is now
 discharged by a standing test that runs `decide()` over the capture through both
 loaders and asserts they agree.
 
-One consequence, stated because it is a real narrowing: a dependency that was
-*closed* rather than labelled `fleet:done` no longer satisfies UNBLOCK. Nothing
+Two consequences, stated because they are real narrowings, not one: a
+dependency that was *closed* rather than labelled `fleet:done` no longer
+satisfies UNBLOCK, and a row that was closed while still labelled
+`fleet:claimed` is no longer reaped, so its agent is never released. Nothing
 in M2 closes an issue — `close_issue` exists on `FakeGh` alone and on no
-Protocol — so `done` is a label on an open row, and reading a closed row as done
-would reintroduce exactly the divergence the invariant removes. If M3 starts
-closing issues on completion, UNBLOCK's `done` set is the line that has to change
-with it.
+Protocol — so `done` is a label on an open row and CLAIMED never coincides
+with CLOSED, and reading either as its label read on a closed row would
+reintroduce exactly the divergence the invariant removes. If M3 starts closing
+issues on completion, UNBLOCK's `done` set and REAP's blanket use of the
+`is_open` filter are both lines that have to change with it —
+`docs/m2-inputs.md` §7 records the shape of both fixes.
 
 ### `FleetState` is derived and disposable
 
