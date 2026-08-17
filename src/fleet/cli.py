@@ -9,9 +9,14 @@ from datetime import datetime, timezone
 import click
 
 from fleet import git, labels
+from fleet import ledger as ledger_module
+from fleet import policy as policy_module
 from fleet.commands import do_block, do_discover, do_escalate, do_handoff, do_verdict
 from fleet.config import load_config
+from fleet.decide import decide
 from fleet.gh import RealGh
+from fleet.model import FleetState
+from fleet.simulate import render_intent
 
 ROLE_UNSET = (
     "FLEET_ROLE is unset. It decides which state transitions you may write, so there is "
@@ -19,6 +24,58 @@ ROLE_UNSET = (
     "and an empty role reaches the command layer as \"unknown role ''\", which blames "
     "the agent for a variable the dispatcher never exported. Export FLEET_ROLE."
 )
+
+
+# Named here rather than inlined so the test asserts the same string the command
+# prints.
+NO_AGENTS_CAVEAT = (
+    "note: M2 has no agent source, so this tick ran with no live agents. Every "
+    "fleet:claimed task therefore reads as ledger drift, and the Release below "
+    "is an artefact of that rather than a recommendation."
+)
+
+
+class ReadOnlyGh:
+    """Wraps a GhClient and refuses everything that is not a known read.
+
+    Deny by default, not a list of known writes. `close_issue` exists on FakeGh,
+    on no Protocol, and mutates -- and a wrapper that enumerates its writes
+    passes the next such method straight through to the client. `--dry-run
+    writes nothing` is then a property of the code path rather than of having
+    read it carefully, which is the same reasoning that made FakeGh refuse
+    unknown labels: a stand-in more permissive than the real thing is how M1's
+    defects survived the entire offline suite.
+    """
+
+    READS = frozenset({"get_issue", "list_issues", "search_titles"})
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str):
+        if name in self.READS:
+            return getattr(self._inner, name)
+
+        def refuse(*_args, **_kwargs):
+            raise PermissionError(f"dry-run: refusing to call {name}")
+
+        return refuse
+
+
+def do_plan(cfg, gh, now: datetime) -> list[str]:
+    """One tick of decide() against a live ledger, rendered.
+
+    Separate from the command because inside it -- behind `RealGh(cfg.repo_slug)`
+    -- the only wiring of ledger.read, policy.load and decide() in the CLI is
+    reachable by no test that does not talk to GitHub.
+    """
+    tasks = ledger_module.read(gh.list_issues("open"))
+    intents, _ = decide(FleetState(), tasks, policy_module.load(cfg), [], now)
+    lines: list[str] = []
+    if any(task.state == "claimed" for task in tasks):
+        lines.append(NO_AGENTS_CAVEAT)
+    lines += [render_intent(intent) for intent in intents]
+    return lines or ["no action"]
 
 
 def _context(*, role_required: bool = True) -> tuple:
@@ -204,6 +261,21 @@ def verdict(task, decision, head_sha, checks_rerun, findings, packet_was_suffici
         packet_was_sufficient=packet_was_sufficient,
     )
     click.echo(f"recorded {decision} on task {task}; it is now fleet:{landed}")
+
+
+@main.command()
+@click.option("--dry-run/--no-dry-run", default=True, help="Print the plan; write nothing.")
+def plan(dry_run):
+    """Print what the allocator would do right now."""
+    if not dry_run:
+        # Refused before load_config, or `fleet plan --no-dry-run` outside a
+        # fleet repo complains about a missing fleet.toml instead of saying
+        # which half of the flag is unimplemented.
+        raise click.ClickException("only --dry-run is implemented; the daemon lands in M3")
+    cfg = load_config()
+    gh = ReadOnlyGh(RealGh(cfg.repo_slug))
+    for line in do_plan(cfg, gh, datetime.now(timezone.utc)):
+        click.echo(line)
 
 
 if __name__ == "__main__":
