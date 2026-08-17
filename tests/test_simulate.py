@@ -279,6 +279,27 @@ def test_a_missing_seed_is_a_scenario_error_not_a_key_error():
         run({"name": "x", "proves": "y", "ticks": [{"outcomes": {}, "expect": []}]}, ROOT)
 
 
+def test_a_missing_name_is_a_scenario_error_not_a_key_error():
+    """`scenario["name"]` appears unguarded in the AssertionError message `run`
+    raises on a mismatch. A bare KeyError on a missing `name` would fire from
+    inside that formatting instead of from validation -- the reporter itself
+    breaking, and breaking silently for every scenario nobody wrote a `name`
+    into."""
+    no_name = {k: v for k, v in INLINE.items() if k != "name"}
+    with pytest.raises(ScenarioError, match="no name"):
+        run(no_name, ROOT)
+
+
+def test_a_missing_seed_policy_is_a_scenario_error_not_a_key_error():
+    """`seed["policy"]` is read unguarded to join against `root` and load
+    fleet.toml. Without this check a missing policy fails as a bare KeyError
+    (or worse, resolves against the process CWD) instead of the ScenarioError
+    the schema's whole contract promises."""
+    no_policy = {**INLINE, "seed": {k: v for k, v in INLINE["seed"].items() if k != "policy"}}
+    with pytest.raises(ScenarioError, match="no policy"):
+        run(no_policy, ROOT)
+
+
 def test_a_seed_naming_both_a_ledger_and_inline_issues_is_refused():
     """One silently won. A scenario whose hand-written rows are ignored proves
     something about a ledger its author never looked at."""
