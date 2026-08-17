@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import pytest
+
+from fleet.expand import expand
+from fleet.labels import static_vocabulary
+from fleet.model import (
+    Advance,
+    Assign,
+    Dispatch,
+    Drain,
+    Escalate,
+    Release,
+    SetLabels,
+    StartAgent,
+    StopAgent,
+    Unblock,
+)
+from test_decide_reap import POLICY
+
+
+def labels_of(effects):
+    return [e for e in effects if isinstance(e, SetLabels)]
+
+
+def test_a_state_transition_is_exactly_one_labels_effect():
+    """commands._post removes all eight state labels then adds one; a failure
+    between the two strands the task with no state label at all, invisible to
+    every label query. One effect keeps the two halves from drifting apart."""
+    effects = expand(Unblock(task=4), POLICY)
+    assert len(labels_of(effects)) == 1
+    move = labels_of(effects)[0]
+    assert "fleet:ready" in move.add
+    assert "fleet:blocked" in move.remove
+
+
+def test_a_transition_never_removes_the_label_it_adds():
+    """GhClient has no combined edit -- only add_labels and remove_labels
+    (gh.py:24-25) -- so an executor makes two calls in some order. Catches
+    `remove=all_state_labels()`: applied add-then-remove it strands the task
+    with no state label at all, the exact defect SetLabels exists to prevent."""
+    move = labels_of(expand(Unblock(task=4), POLICY))[0]
+    assert set(move.add) & set(move.remove) == set()
+
+
+def test_dispatch_claims_the_task_and_starts_the_agent():
+    effects = expand(Dispatch(task=1, role="implementer", base="integration", attempt=1), POLICY)
+    assert StartAgent(task=1, role="implementer", base="integration") in effects
+    add = labels_of(effects)[0].add
+    assert "fleet:claimed" in add
+    assert "fleet:attempt-1" in add
+
+
+def test_dispatch_writes_the_attempt_number_it_was_given():
+    """Catches the hardcoded attempt_label(1), the second writer that disagreed
+    with the Release that had already counted the attempt."""
+    effects = expand(Dispatch(task=1, role="implementer", base="integration", attempt=2), POLICY)
+    assert "fleet:attempt-2" in labels_of(effects)[0].add
+
+
+def test_dispatch_names_no_assignee():
+    """`fleet-1` is not a GitHub login: `gh issue edit --add-assignee fleet-1`
+    resolves the user first and fails the whole edit. Nothing in M2 knows the
+    identity the executor runs agents as, and GhClient has no assignee method,
+    so ownership is written in M3 by the executor that does. Catches a
+    fabricated owner going back in."""
+    effects = expand(Dispatch(task=1, role="implementer", base="integration", attempt=1), POLICY)
+    assert [e for e in effects if isinstance(e, Assign)] == []
+
+
+def test_release_stops_the_agent_unassigns_and_writes_the_attempt():
+    effects = expand(Release(task=1, reason="stalled", attempt=2), POLICY)
+    assert StopAgent(task=1) in effects
+    assert Assign(task=1, owner=None) in effects
+    add = labels_of(effects)[0].add
+    assert "fleet:ready" in add
+    assert "fleet:attempt-2" in add
+
+
+def test_release_never_emits_an_attempt_label_beyond_the_cap():
+    """labels.static_vocabulary is sized from max_attempts, so a label past the
+    cap is one gh has never heard of -- and gh refuses an unknown label and
+    changes nothing at all. Drift releases are not capped, so this arrives."""
+    effects = expand(Release(task=1, reason="no_agent", attempt=3), POLICY)
+    add = labels_of(effects)[0].add
+    assert "fleet:attempt-3" not in add
+    assert "fleet:attempt-2" in add
+
+
+def test_a_zero_attempt_raises_rather_than_being_rounded_up():
+    """Catches a clamp on the low end, which is the silent-reset defect the
+    counter used to have: a caller that forgot the number wrote attempt-1 over a
+    task already on its second try."""
+    with pytest.raises(ValueError, match="attempts start at 1"):
+        expand(Release(task=1, reason="stalled", attempt=0), POLICY)
+
+
+def test_escalate_reaches_human_and_stops_the_agent():
+    effects = expand(Escalate(task=1, reason="attempts_exhausted"), POLICY)
+    assert StopAgent(task=1) in effects
+    assert "fleet:human" in labels_of(effects)[0].add
+
+
+def test_advance_moves_to_the_named_state_and_stops_the_finished_agent():
+    """The agent that wrote the packet has exited. Catches leaving it in the
+    executor's live set, where it keeps reporting a cumulative cost every tick
+    and drains the fleet budget on a process that finished."""
+    effects = expand(Advance(task=1, to="review"), POLICY)
+    assert StopAgent(task=1) in effects
+    assert "fleet:review" in labels_of(effects)[0].add
+
+
+def test_advance_refuses_a_state_outside_the_vocabulary():
+    """A packet's `to` reaches here from an issue comment, so it is not
+    necessarily a state this repo's label set contains."""
+    with pytest.raises(ValueError, match="unknown state"):
+        expand(Advance(task=1, to="merged"), POLICY)
+
+
+def test_drain_produces_no_effects():
+    """Drain is a decision not to dispatch. There is nothing to write."""
+    assert expand(Drain(reason="budget"), POLICY) == []
+
+
+def test_every_label_written_is_within_the_static_vocabulary():
+    """gh resolves a label to an id before adding or removing it, so naming a
+    label the repo has never had fails the whole edit. FakeGh mirrors that."""
+    vocabulary = static_vocabulary(POLICY.max_attempts, POLICY.max_fix_passes)
+    for intent in [
+        Unblock(task=4),
+        Dispatch(task=1, role="implementer", base="integration", attempt=1),
+        Release(task=1, reason="stalled", attempt=2),
+        Escalate(task=1, reason="attempts_exhausted"),
+        Advance(task=1, to="review"),
+    ]:
+        for effect in labels_of(expand(intent, POLICY)):
+            assert set(effect.add) <= vocabulary
+            assert set(effect.remove) <= vocabulary
