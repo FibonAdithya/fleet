@@ -1,0 +1,29 @@
+name: area-exclusion
+proves: >-
+  parent §11 "two READY tasks in one area → exactly one dispatched"; harness §4
+  issues 2 and 3. Tick 1 is the positive and negative control together: eleven
+  READY tasks, five dispatched, one per free area. Tick 3 shows an area
+  re-opening to exactly one of its three waiting tasks once it is vacated.
+seed:
+  ledger: fixtures/ledger/issues.json
+  policy: fixtures/policy/fleet-fixture
+ticks:
+  # 3, 7, 8, 10 and 11 are each the second READY task in an area already taken;
+  # 9 is excluded because issue 12 is in fleet:review, a live state, and holds
+  # area:docs.
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 1)"
+      - "Dispatch(2, implementer, 1)"
+      - "Dispatch(4, implementer, 1)"
+      - "Dispatch(5, implementer, 1)"
+      - "Dispatch(6, implementer, 1)"
+  # The fleet is full: five claimed plus one reviewing against slots = 6.
+  - outcomes: {1: dirty_exit}
+    expect:
+      - "Release(1, dirty_exit, 2)"
+  # area:eval is free again and three READY tasks want it -- 1, 8 and 10.
+  # Exactly one goes, and it is the lowest-numbered.
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 2)"

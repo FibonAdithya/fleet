@@ -1,0 +1,25 @@
+name: ledger-drift
+proves: >-
+  parent §10 ledger drift and parent §11 "CLAIMED task with no live agent →
+  released"; herdr state is the tiebreaker. The drift arises inside the run --
+  an agent vanishes under a CLAIMED task -- rather than being hand-seeded as a
+  label, so the reconciliation is observed rather than assumed.
+seed:
+  ledger: fixtures/ledger/issues.json
+  policy: fixtures/policy/fleet-fixture
+ticks:
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 1)"
+      - "Dispatch(2, implementer, 1)"
+      - "Dispatch(4, implementer, 1)"
+      - "Dispatch(5, implementer, 1)"
+      - "Dispatch(6, implementer, 1)"
+  # herdr loses the agent; the ledger still says fleet:claimed. No status
+  # reports this -- the agent is simply absent.
+  - outcomes: {1: vanished}
+    expect:
+      - "Release(1, no_agent, 2)"
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 2)"

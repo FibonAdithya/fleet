@@ -1,0 +1,34 @@
+name: poison-task
+proves: >-
+  parent §10 poison task and parent §11 "second failure → NEEDS_HUMAN, not a
+  third attempt"; harness §7 hard fail "no task exceeds 2 attempts". The final
+  tick's list is the claim: it contains a dispatch, and it does not contain a
+  third Dispatch(5, ...).
+seed:
+  ledger: fixtures/ledger/issues.json
+  policy: fixtures/policy/fleet-fixture
+ticks:
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 1)"
+      - "Dispatch(2, implementer, 1)"
+      - "Dispatch(4, implementer, 1)"
+      - "Dispatch(5, implementer, 1)"
+      - "Dispatch(6, implementer, 1)"
+  - outcomes: {5: dirty_exit}
+    expect:
+      - "Release(5, dirty_exit, 2)"
+  # Re-dispatched at attempt 2, read back off the fleet:attempt-2 label the
+  # release wrote.
+  - outcomes: {}
+    expect:
+      - "Dispatch(5, implementer, 2)"
+  # attempts == max_attempts, so the release is refused and a human is woken.
+  - outcomes: {5: dirty_exit}
+    expect:
+      - "Escalate(5, attempts_exhausted)"
+  # #5 is now fleet:human and area:data is free, so #11 -- the other data task --
+  # takes the slot. No third attempt on #5 appears here or anywhere after.
+  - outcomes: {}
+    expect:
+      - "Dispatch(11, implementer, 1)"
