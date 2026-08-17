@@ -22,7 +22,13 @@ from fleet.schemas import validate
 # fleet:ready", and `ready` is not in handoff.schema.json's `to` enum at all, so
 # no handoff can express a scout's write. `planner`'s `review` is a choice, not
 # a derivation -- planner.md names no target state, and `review` is the only
-# non-terminal member of that enum. Both are recorded in Task 17.
+# non-terminal member of that enum. Both are recorded in docs/m2-inputs.md §7.
+#
+# `integrator`'s `claimed` is faithful to integrator.md -- a rebase hands the
+# task back -- but nothing starts an agent at that moment, so the next tick
+# reads it as ledger drift and spends an attempt. Left as-is in M2 and recorded
+# in the same section: routing to `ready` instead is not schema-legal without
+# editing the fixture repo.
 ROLE_MAY_HAND_TO: dict[str, frozenset[str]] = {
     "implementer": frozenset({"review"}),
     "reviewer": frozenset(),

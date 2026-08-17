@@ -89,7 +89,7 @@ Data flow, with every impure edge on the left:
 
 ```
 gh issue list ──┐
-gh issue view ──┼─→ ledger.read()   ─→ [Task]
+gh issue view ──┼─→ ledger.read()   ─→ [Task]  (OPEN and CLOSED both)
 herdr snapshot ─┼─→ shell normalize ─→ [AgentState]   task ← worktree path
 fleet.toml ─────┴─→ policy.load()   ─→ Policy         idle ← prev + now
                                           │
@@ -115,6 +115,33 @@ file specifically: gh returns label *objects* where `FakeGh` stores names, and
 states are `OPEN`/`CLOSED` rather than lowercase. Concentrating the parse means
 parity is one test module's standing obligation rather than a property every
 caller has to remember.
+
+**Amended after implementation — the closed-issue invariant.** This spec did not
+originally say whether the ledger `decide()` receives contains closed issues, and
+the two callers answered differently: `fleet plan` reads `gh.list_issues("open")`
+while a scenario seeds from a captured file that includes CLOSED rows. That is
+the divergence class this module exists to remove, so the invariant is stated
+rather than left to each caller:
+
+> `ledger.read()` parses every row it is given, open or closed, and `Task.is_open`
+> records which. `decide()` accepts both and acts on neither the state label nor
+> the area of a closed row: it narrows to `is_open` rows once, before REAP, so
+> `decide(all rows) == decide(open rows)` by construction.
+
+Captured row #12 is why it matters: CLOSED, but still labelled `fleet:review` and
+`area:docs`. Keyed on the label alone it consumed a slot and locked `area:docs`
+for the whole night, with nothing able to release it — REAP only touches CLAIMED,
+and nobody runs `fleet verdict` on a closed issue. §10's parity row is now
+discharged by a standing test that runs `decide()` over the capture through both
+loaders and asserts they agree.
+
+One consequence, stated because it is a real narrowing: a dependency that was
+*closed* rather than labelled `fleet:done` no longer satisfies UNBLOCK. Nothing
+in M2 closes an issue — `close_issue` exists on `FakeGh` alone and on no
+Protocol — so `done` is a label on an open row, and reading a closed row as done
+would reintroduce exactly the divergence the invariant removes. If M3 starts
+closing issues on completion, UNBLOCK's `done` set is the line that has to change
+with it.
 
 ### `FleetState` is derived and disposable
 
@@ -180,11 +207,15 @@ timer all live. That is the wrong thing to leave untested.
 
 Parent §8's three phases, in order, once per tick.
 
+All three phases read the *open* ledger. A CLOSED issue is not a task, whatever
+its labels still say — see §3's closed-issue invariant.
+
 **REAP** — for each CLAIMED task, read its agent state.
 
 | Observation | Intent |
 |---|---|
 | clean exit | parse the packet, advance per its `to` |
+| clean exit, no packet fetched yet | nothing this tick — but the stall timer still runs, so the wait is bounded (amended after implementation; the original wait was unbounded and wedged the task forever) |
 | dirty exit, stalled (`idle ≥ stall_minutes`), or over per-task budget | `Release(task, reason)`, attempts += 1 |
 | release would exceed `max_attempts` | `Escalate(task, attempts_exhausted)` → NEEDS_HUMAN |
 | CLAIMED with no live agent | `Release` — ledger drift, herdr state is the tiebreaker |
@@ -230,8 +261,24 @@ area by definition, so per-area exclusion does not cover it. Harness amendment
 2; it costs throughput, and M5 measures how much.
 
 **4. REVIEW exits only on a verdict.** Approved → INTEGRATING.
-`changes_required` → back to CLAIMED with fix passes += 1, or to NEEDS_HUMAN if
-the fix-pass cap is already spent.
+`changes_required` → another implementer pass with fix passes += 1, or to
+NEEDS_HUMAN if the fix-pass cap is already spent.
+
+**Amended after implementation, in two places.** As shipped, `fleet verdict`
+performs this transition and `decide()` does not model it at all: REVIEW is
+simply a live state, holding its slot and its area until a verdict moves it.
+M2 ships no daemon (§1 non-goal), so a `decide()`-owned transition would move
+nothing until M3 and would make REVIEW a dead end for the manual reviewer flow
+M1.5 proved. Ruling 4 is therefore honoured by the system rather than by
+`decide()` specifically, and a daemon that later wants the transition inside the
+fold must move the logic.
+
+Second, `changes_required` targets READY, not CLAIMED as written above. CLAIMED
+means an agent holds the task, and nothing starts one at that moment — REAP would
+read it as ledger drift on the very next tick and release it, spending an attempt
+that ruling 2 says a fix pass must not cost. READY leaves DISPATCH to pick it up
+with `attempt` unchanged and leaves no window in which a task is claimed by
+nobody. `commands._verdict_target` carries this reasoning in its docstring.
 
 Ruling 4 forces an input-shape decision. `FakeGh.list_issues` deliberately omits
 comment bodies because `gh issue list` does not fetch them — a divergence found
@@ -270,6 +317,16 @@ decide(…) → [Intent] → expand() → [Effect]
 `dirty_exit`, `stall`, `over_budget`, `conflict`. The state machine then runs
 with no agents, no tokens and no network.
 
+**Amended after implementation.** `conflict` was dropped and `vanished` added.
+At this seam a conflict *is* a dirty exit — same status, same everything — so
+`decide()` cannot distinguish the two and a conflict scenario would prove only
+what the dirty-exit scenario already proves; the conflict row needs an executor
+that can report a reason, which is `HerdrExecutor` in M3
+(`docs/m2-inputs.md` §7). `vanished` replaces it because ledger drift is the one
+failure the allocator reads as an *absence*, and nothing else here can produce
+one. The shipped set is `healthy`, `clean_exit`, `dirty_exit`, `stall`,
+`over_budget`, `vanished`.
+
 Building the seam now is nearly free because the parent design already made
 `decide()` pure. Retrofitting it after a daemon exists is not.
 
@@ -290,11 +347,20 @@ ticks:
     expect: [Release(5, dirty_exit)]
   - outcomes: {}
     expect: [Dispatch(5, implementer)]              # attempt 2
-  - outcomes: {5: stall}
+  - outcomes: {5: dirty_exit}
     expect: [Escalate(5, attempts_exhausted)]
   - outcomes: {}
     expect: []                                      # never a third attempt
 ```
+
+**Amended after implementation.** Tick 4 above read `{5: stall}` and would not
+have produced the escalation it shows. A first-seen agent has `idle == 0`, so a
+stall needs *two* consecutive frozen ticks — the second re-dispatch resets the
+observation, and one stalled tick after it is nine minutes short of
+`stall_minutes`. `dirty_exit` escalates in the single tick the example depicts.
+`fixtures/scenarios/poison-task.yaml` ships the corrected form and
+`stall-releases.yaml` spends the extra tick deliberately, with its `proves` line
+saying why. The §5 rule was always binding; this example was not.
 
 The final tick asserts an *absence*, which is the shape of the claim: the
 overnight failure being guarded against is not a wrong answer, it is a third
@@ -368,6 +434,15 @@ still behave like the real client" as a standing test obligation, not a review
 finding. M2 is where that class of defect does its damage, because `decide()`
 reads the ledger through exactly the surface that diverged four times.
 
+**Amended after implementation.** The parity row shipped as assertions over the
+two *parsers* and stopped there — nothing checked that the two *loaders* fed
+`decide()` the same ledger, and they did not (§3's closed-issue invariant). The
+row is now discharged end to end:
+`tests/test_plan.py::test_the_simulators_row_loader_and_list_issues_open_agree`
+runs `decide()` over the captured ledger through `gh.list_issues("open")` and
+through the simulator's row loader and asserts the tick is identical. Reverting
+the invariant makes it fail.
+
 ## 11. Decisions and their reasons
 
 | Decision | Reason | Rejected alternative |
@@ -393,6 +468,13 @@ reads the ledger through exactly the surface that diverged four times.
 3. **What is a per-task cost observation, concretely?** The budget rule needs
    dollars per task and nothing produces them yet. M2 models it as an input on
    `AgentState`; where the number comes from is M3's question.
-4. **Does the global integration lock make most scenarios trivially serial?** If
-   every scenario ends up single-threaded, the harness is not exercising area
-   exclusion at all. Worth checking once the scenarios exist.
+4. **Does the global integration lock make most scenarios trivially serial?**
+   **Answered by the shipped scenarios: no.** The lock does not serialize the
+   set. `integration-lock.yaml` runs three concurrent agents before the
+   integrator's own tick and is the only file where the lock binds at all;
+   `area-exclusion.yaml` runs six, one per area, and four other scenarios run six
+   concurrently from the captured ledger. Area exclusion is exercised with both
+   controls — the areas that are free dispatch, the ones already held do not —
+   independently of the lock. The lock is proven where it belongs, in one
+   scenario with a positive control, a negative control, and a tick showing
+   dispatch resume once the integrator finishes.

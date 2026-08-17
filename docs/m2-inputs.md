@@ -197,7 +197,7 @@ scenario files against ten claims.
   during a simulated night stays there, holding its area and its slot, because
   nothing in the simulation can issue the verdict that would move it.
 - **`slots` binds in no scenario independently of area exclusion.** The captured
-  ledger's first tick dispatches five tasks with five free areas and five free
+  ledger's first tick dispatches six tasks with six free areas and six free
   slots, so either rule alone explains the number.
   `tests/test_decide_dispatch.py` pins the bound directly; a scenario cannot,
   because nothing lets a scenario override a policy field.
@@ -213,6 +213,39 @@ scenario files against ten claims.
   `FakeExecutor.apply` reacts only to `StartAgent`/`StopAgent` and drops every
   `SetLabels` and `Assign` it is handed. M3's executor, which knows its own
   identity, owns the assigning half.
+- **Two entries in `ROLE_MAY_HAND_TO` are choices, not derivations.**
+  `commands.py` maps `scout` to the empty set and `planner` to `{review}`, and
+  neither follows from a role prompt. `scout.md`'s step 5 is "promote to
+  `fleet:ready`", but `ready` is not in `handoff.schema.json`'s `to` enum at
+  all, so no handoff can express a scout's write and the empty set is the only
+  honest mapping — a scout promotes by relabelling, not by handing over.
+  `planner.md` names no target state whatsoever; `review` was chosen because it
+  is the only non-terminal member of that enum, `done` being the state parent §4
+  reserves for the integrator. If M3 gives either role a real target, it comes
+  from amending the schema's enum in the fixture repo, not from widening the map
+  here.
+- **`integrator → claimed` collides with the drift rule.** `commands.py` lets an
+  integrator hand a task back to CLAIMED for a rebase, faithfully implementing
+  `integrator.md`. But nothing starts an agent at that moment, so the next tick
+  reads the task as ledger drift and `_reap` releases it — spending a dispatch
+  attempt and inflating `fleet:attempt-N`, which is exactly what the grader's
+  "no task exceeds 2 attempts" hard fail reads. It is the same collision
+  `_verdict_target` routes around by targeting READY rather than CLAIMED.
+  **The behaviour is deliberately unchanged in M2**: `ready` is not in the
+  handoff schema's `to` enum, so routing there is not schema-legal without
+  editing the fixture repo, which is out of bounds for this milestone. M3
+  resolves it either by adding `ready` to the enum or by not treating a
+  just-handed-back task as drift.
+- **`Task.packet` carries no binding to the attempt it came from.**
+  `FakeExecutor` drops a task's packet on `StartAgent`, so a re-dispatched task
+  cannot advance on the failed attempt's packet. `Task` has no field a real
+  shell could use to make the same guarantee, and M3's shell will fetch the last
+  handoff comment off an issue that persists across attempts — so a stale packet
+  from attempt 1 is readable on attempt 2 and would advance work that never
+  happened. **This is a contract M3's shell must honour**: either carry the
+  attempt number on the packet and refuse one that does not match the task's
+  current `fleet:attempt-N`, or fetch only comments written after the current
+  attempt's dispatch.
 - **The fixture repo's `reviewer.md` is now stale.** It still instructs
   `fleet handoff --task <n> --to claimed`, which this milestone refuses — a
   reviewer's allowed handoff targets are the empty set, and the refusal names
