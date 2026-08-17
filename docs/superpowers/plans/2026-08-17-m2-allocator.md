@@ -231,6 +231,21 @@ In `src/fleet/config.py`, add two fields to the `FleetConfig` dataclass after `m
     fleet_usd: float
 ```
 
+Name the two defaults as module constants near the top of `config.py`, beside the
+`DEFAULT_MAX_ATTEMPTS` import:
+
+```python
+DEFAULT_PER_TASK_USD = 2.0
+DEFAULT_FLEET_USD = 25.0
+```
+
+They live here rather than in `labels.py` because a budget is not label vocabulary. The
+counters are imported from `labels.py` for a reason that does not apply to dollars: the label
+set is *sized* from them, so a vocabulary disagreeing with policy yields a label gh has never
+heard of. Naming them is still the module's own pattern — `config.py` already imports two
+defaults rather than repeating their literals, and a default written twice is a default that
+can be changed once.
+
 In `load_config`, change the unpacking line and add the two fields:
 
 ```python
@@ -241,8 +256,8 @@ In `load_config`, change the unpacking line and add the two fields:
 and inside the `FleetConfig(...)` call, after `max_fix_passes=...`:
 
 ```python
-        per_task_usd=float(budget.get("per_task_usd", 2.0)),
-        fleet_usd=float(budget.get("fleet_usd", 25.0)),
+        per_task_usd=float(budget.get("per_task_usd", DEFAULT_PER_TASK_USD)),
+        fleet_usd=float(budget.get("fleet_usd", DEFAULT_FLEET_USD)),
 ```
 
 - [ ] **Step 4: Run to verify pass**
