@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 from fleet.model import (
     Advance,
     AgentState,
+    Dispatch,
+    Drain,
     Escalate,
     FleetState,
     Intent,
@@ -29,6 +31,14 @@ from fleet.model import (
 
 # Intents whose expansion stops the agent, so that agent's cost is final.
 _REAPING = (Advance, Release, Escalate)
+
+_DRAIN_FRACTION = 0.8
+
+# States that hold an area and a slot. REVIEW is live because someone is working
+# on the task: it keeps its area until `fleet verdict` moves it out, which is the
+# only legal exit (spec §5 ruling 4). Nothing here dispatches for those states --
+# a reviewer and an integrator are M3's to start.
+_LIVE = ("claimed", "review", "integrating")
 
 
 def _observe(prev: FleetState, agents: list[AgentState], now: datetime) -> dict[int, Observation]:
@@ -138,6 +148,51 @@ def _unblock(ledger: list[Task]) -> list[Intent]:
     ]
 
 
+def _dispatch(
+    ledger: list[Task], policy: Policy, agents: list[AgentState], spent_usd: float
+) -> list[Intent]:
+    committed = spent_usd + sum(a.cost_usd for a in agents)
+    if policy.fleet_usd > 0 and committed >= policy.fleet_usd * _DRAIN_FRACTION:
+        # Drain, do not kill: in-flight tasks finish. Killing at the ceiling
+        # throws away work already paid for, and the tokens are spent either way.
+        return [Drain(reason="budget")]
+
+    live = [t for t in ledger if t.state in _LIVE]
+    if any(t.klass == "integration" for t in live):
+        # Global exclusive lock. The integrator touches every area, so per-area
+        # exclusion does not cover it (harness amendment 2).
+        return []
+
+    held = {t.area for t in live if t.area}
+    free = policy.slots - len(live)
+    intents: list[Intent] = []
+    for task in sorted(ledger, key=lambda t: t.number):
+        if free <= 0:
+            break
+        if task.state != "ready" or not task.auto_ok:
+            continue
+        route = policy.route_for(task.klass)
+        if not route:
+            continue
+        if task.area is not None and task.area in held:
+            continue
+        intents.append(
+            Dispatch(
+                task=task.number,
+                role=route[0],
+                base=policy.integration_branch,
+                # The attempt already on the task, not the next one: a dispatch
+                # does not consume an attempt, a release does. One number,
+                # computed here, written by expand().
+                attempt=max(task.attempts, 1),
+            )
+        )
+        if task.area is not None:
+            held.add(task.area)
+        free -= 1
+    return intents
+
+
 def _final_cost(intents: list[Intent], agents: list[AgentState]) -> float:
     """Only a reaped agent's cost is final, so only a reaped agent's cost lands
     in the running total. `AgentState.cost_usd` is cumulative per agent: adding
@@ -158,6 +213,7 @@ def decide(
     intents: list[Intent] = []
     intents += _reap(ledger, policy, agents, observations, now)
     intents += _unblock(ledger)
+    intents += _dispatch(ledger, policy, agents, prev.spent_usd)
     state = FleetState(
         seen=tuple(sorted(observations.items())),
         spent_usd=prev.spent_usd + _final_cost(intents, agents),
