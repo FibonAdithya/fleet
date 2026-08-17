@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from fleet.config import ConfigNotFound, load_config
+from fleet.config import ConfigError, ConfigNotFound, load_config
 
 TOML = """
 [repo]
@@ -76,3 +76,26 @@ def test_budget_has_defaults_when_the_block_is_absent(tmp_path):
     cfg = load_config(tmp_path)
     assert cfg.per_task_usd == 2.0
     assert cfg.fleet_usd == 25.0
+
+
+BUDGET_TOML = (
+    '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
+    'roles = "r"\nschemas = "s"\n[budget]\nper_task_usd = {}\nfleet_usd = {}\n'
+)
+
+
+def test_a_zero_fleet_budget_is_refused(tmp_path):
+    """decide() used to guard the drain with `fleet_usd > 0`, so zero meant the
+    rule never fired and an overnight run had no fleet-wide ceiling at all -- a
+    misconfiguration silently becoming unlimited spend."""
+    (tmp_path / "fleet.toml").write_text(BUDGET_TOML.format("2.0", "0"))
+    with pytest.raises(ConfigError, match="fleet_usd"):
+        load_config(tmp_path)
+
+
+def test_a_non_positive_per_task_budget_is_refused(tmp_path):
+    """The mirror failure: every agent is over budget on its first tick, so the
+    whole backlog is released and then escalated."""
+    (tmp_path / "fleet.toml").write_text(BUDGET_TOML.format("-1.0", "25.0"))
+    with pytest.raises(ConfigError, match="per_task_usd"):
+        load_config(tmp_path)

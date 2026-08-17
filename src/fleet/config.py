@@ -20,6 +20,29 @@ class ConfigNotFound(Exception):
     """No fleet.toml was found in this directory or any parent."""
 
 
+class ConfigError(Exception):
+    """fleet.toml was found and parsed, but a value in it cannot be used."""
+
+
+def _positive(value: float, key: str) -> float:
+    """A budget of zero or less is a misconfiguration, not a setting.
+
+    `fleet_usd = 0` used to mean the drain never fires -- an overnight run with
+    no fleet-wide ceiling at all -- because decide() guarded the rule with
+    `fleet_usd > 0`. `per_task_usd = 0` is the mirror failure: every agent is
+    over budget on its first tick, so the whole backlog is released and then
+    escalated. A rule whose purpose is a spending bound must not turn a typo
+    into unlimited spend, so the value is refused here and the rule in decide()
+    has one meaning.
+    """
+    if value <= 0:
+        raise ConfigError(
+            f"[budget] {key} must be greater than zero, got {value!r}. "
+            "Zero is not 'no limit': it disables the ceiling this key exists to set."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class FleetConfig:
     root: Path
@@ -61,6 +84,8 @@ def load_config(start: Path | None = None) -> FleetConfig:
         stall_minutes=int(fleet.get("stall_minutes", 10)),
         max_attempts=int(fleet.get("max_attempts", DEFAULT_MAX_ATTEMPTS)),
         max_fix_passes=int(fleet.get("max_fix_passes", DEFAULT_MAX_FIX_PASSES)),
-        per_task_usd=float(budget.get("per_task_usd", DEFAULT_PER_TASK_USD)),
-        fleet_usd=float(budget.get("fleet_usd", DEFAULT_FLEET_USD)),
+        per_task_usd=_positive(
+            float(budget.get("per_task_usd", DEFAULT_PER_TASK_USD)), "per_task_usd"
+        ),
+        fleet_usd=_positive(float(budget.get("fleet_usd", DEFAULT_FLEET_USD)), "fleet_usd"),
     )

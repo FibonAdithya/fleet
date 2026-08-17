@@ -23,23 +23,41 @@ def labels_of(effects):
     return [e for e in effects if isinstance(e, SetLabels)]
 
 
-def test_a_state_transition_is_exactly_one_labels_effect():
+# Every intent that writes a state label. `Drain` is excluded because it writes
+# nothing; its own emptiness is asserted separately. Both properties below are
+# the module's reason for existing, so they are checked against each branch
+# rather than against `Unblock` alone -- with only `Unblock` covered, appending
+# a duplicate SetLabels to the Dispatch or Release branch survived all 305 tests.
+MUTATING = [
+    Unblock(task=4),
+    Dispatch(task=1, role="implementer", base="integration", attempt=1),
+    Release(task=1, reason="stalled", attempt=2),
+    Escalate(task=1, reason="attempts_exhausted"),
+    Advance(task=1, to="review"),
+]
+
+
+@pytest.mark.parametrize("intent", MUTATING, ids=lambda i: type(i).__name__)
+def test_a_state_transition_is_exactly_one_labels_effect(intent):
     """commands._post removes all eight state labels then adds one; a failure
     between the two strands the task with no state label at all, invisible to
     every label query. One effect keeps the two halves from drifting apart."""
-    effects = expand(Unblock(task=4), POLICY)
-    assert len(labels_of(effects)) == 1
-    move = labels_of(effects)[0]
+    assert len(labels_of(expand(intent, POLICY))) == 1
+
+
+def test_unblock_moves_blocked_to_ready():
+    move = labels_of(expand(Unblock(task=4), POLICY))[0]
     assert "fleet:ready" in move.add
     assert "fleet:blocked" in move.remove
 
 
-def test_a_transition_never_removes_the_label_it_adds():
+@pytest.mark.parametrize("intent", MUTATING, ids=lambda i: type(i).__name__)
+def test_a_transition_never_removes_the_label_it_adds(intent):
     """GhClient has no combined edit -- only add_labels and remove_labels
     (gh.py:24-25) -- so an executor makes two calls in some order. Catches
     `remove=all_state_labels()`: applied add-then-remove it strands the task
     with no state label at all, the exact defect SetLabels exists to prevent."""
-    move = labels_of(expand(Unblock(task=4), POLICY))[0]
+    move = labels_of(expand(intent, POLICY))[0]
     assert set(move.add) & set(move.remove) == set()
 
 
@@ -126,13 +144,7 @@ def test_every_label_written_is_within_the_static_vocabulary():
     """gh resolves a label to an id before adding or removing it, so naming a
     label the repo has never had fails the whole edit. FakeGh mirrors that."""
     vocabulary = static_vocabulary(POLICY.max_attempts, POLICY.max_fix_passes)
-    for intent in [
-        Unblock(task=4),
-        Dispatch(task=1, role="implementer", base="integration", attempt=1),
-        Release(task=1, reason="stalled", attempt=2),
-        Escalate(task=1, reason="attempts_exhausted"),
-        Advance(task=1, to="review"),
-    ]:
+    for intent in MUTATING:
         for effect in labels_of(expand(intent, POLICY)):
             assert set(effect.add) <= vocabulary
             assert set(effect.remove) <= vocabulary

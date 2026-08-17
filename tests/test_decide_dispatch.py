@@ -144,6 +144,39 @@ def test_dispatch_stops_entirely_while_an_integration_task_is_live():
     assert dispatched(intents) == []
 
 
+def test_a_task_in_integrating_arms_the_global_lock():
+    """INTEGRATING is the state a real integrator lands in -- `fleet verdict
+    --verdict approved` puts it there -- and the lock was proven only via a
+    CLAIMED integration task, so dropping "integrating" from `_LIVE` entirely
+    passed every test while unlocking the fleet under a running integrator."""
+    integrating = Task(
+        number=20,
+        title="t",
+        state="integrating",
+        area=None,
+        klass="integration",
+        auto_ok=True,
+    )
+    intents, _ = decide(FleetState(), [integrating, ready(1, "eval")], POLICY, [], T0)
+    assert dispatched(intents) == []
+
+
+def test_a_task_in_integrating_holds_its_slot_and_its_area():
+    """The other half of the same membership: INTEGRATING is live, so it counts
+    against slots and excludes its area."""
+    small = dataclasses.replace(POLICY, slots=1)
+    integrating = Task(
+        number=20,
+        title="t",
+        state="integrating",
+        area="eval",
+        klass="patch",
+        auto_ok=True,
+    )
+    intents, _ = decide(FleetState(), [integrating, ready(8, "eval")], small, [], T0)
+    assert dispatched(intents) == []
+
+
 def test_slots_bound_the_number_of_dispatches():
     small = dataclasses.replace(POLICY, slots=2)
     backlog = [ready(1, "eval"), ready(2, "train"), ready(3, "models"), ready(4, "data")]

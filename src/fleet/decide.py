@@ -144,7 +144,20 @@ def _reap(
             intents.append(Release(task=task.number, reason="no_agent", attempt=task.attempts + 1))
             continue
         if agent.status == "done":
-            intents += _advance(task)
+            advanced = _advance(task)
+            if advanced:
+                intents += advanced
+                continue
+            # A done agent whose task has no packet. Waiting one tick is right --
+            # `gh issue list` does not fetch comment bodies -- but waiting
+            # forever is not: the task holds its slot and its area with no
+            # escalation and no timer, and a clean exit whose handoff comment is
+            # missing, malformed or simply not yet fetched is ordinary in
+            # production. Fall through to the stall check so the wait is bounded
+            # by the same timer everything else is. The cost check is skipped on
+            # purpose: this agent has finished, and its work is already paid for.
+            if _stalled(task, observations, policy, now):
+                intents.append(_fail(task, "stalled", policy))
             continue
         if agent.status == "dirty":
             intents.append(_fail(task, "dirty_exit", policy))
@@ -178,7 +191,11 @@ def _dispatch(
     ledger: list[Task], policy: Policy, agents: list[AgentState], spent_usd: float
 ) -> list[Intent]:
     committed = spent_usd + sum(a.cost_usd for a in agents)
-    if policy.fleet_usd > 0 and committed >= policy.fleet_usd * _DRAIN_FRACTION:
+    # No `fleet_usd > 0` guard: that turned a misconfigured ceiling into no
+    # ceiling at all, which is the wrong direction for a rule whose purpose is a
+    # spending bound. `load_config` refuses a non-positive budget instead, so
+    # this comparison has one meaning.
+    if committed >= policy.fleet_usd * _DRAIN_FRACTION:
         # Drain, do not kill: in-flight tasks finish. Killing at the ceiling
         # throws away work already paid for, and the tokens are spent either way.
         return [Drain(reason="budget")]
