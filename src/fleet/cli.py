@@ -9,12 +9,19 @@ from datetime import datetime, timezone
 import click
 
 from fleet import git, labels
-from fleet.commands import do_block, do_discover, do_escalate, do_handoff
+from fleet.commands import do_block, do_discover, do_escalate, do_handoff, do_verdict
 from fleet.config import load_config
 from fleet.gh import RealGh
 
+ROLE_UNSET = (
+    "FLEET_ROLE is unset. It decides which state transitions you may write, so there is "
+    "no safe default: 'implementer' hands out exactly the privilege the gate withholds, "
+    "and an empty role reaches the command layer as \"unknown role ''\", which blames "
+    "the agent for a variable the dispatcher never exported. Export FLEET_ROLE."
+)
 
-def _context() -> tuple:
+
+def _context(*, role_required: bool = True) -> tuple:
     cfg = load_config()
     gh = RealGh(cfg.repo_slug)
     # Falsy, not `is None`: a dispatcher doing `export FLEET_AGENT="$AGENT_ID"`
@@ -29,8 +36,16 @@ def _context() -> tuple:
         # Say so on stderr rather than silently misattributing an unattended run.
         click.echo("warning: FLEET_AGENT unset; attributing to 'manual'", err=True)
         agent = "manual"
+    role = os.environ.get("FLEET_ROLE", "").strip()
+    # An unset role is refused HERE and nowhere else, because this is the only
+    # place that can still tell "unset" from "deliberately implementer". One line
+    # further on the information is gone: the command layer sees a role that
+    # looks chosen, and `do_handoff`/`do_verdict` gate on a value nobody set.
+    # `role_required=False` is for the one command that records no role at all.
+    if role_required and not role:
+        raise click.ClickException(ROLE_UNSET)
     identity = {
-        "role": os.environ.get("FLEET_ROLE", "").strip() or "implementer",
+        "role": role,
         "agent": agent,
         "run": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -141,9 +156,54 @@ def escalate(task, question, considered, did, checks, commands):
 @click.option("--evidence", required=True, help="file:line and what is wrong there.")
 def discover(parent, title, area, evidence):
     """File an unrelated defect for someone else. Then carry on with your task."""
-    cfg, gh, _ = _context()
+    # The only command that records no role: do_discover ignores identity, and a
+    # discovery lands in TRIAGE whoever files it. Requiring FLEET_ROLE here would
+    # refuse a human triaging by hand and gate nothing.
+    cfg, gh, _ = _context(role_required=False)
     number = do_discover(cfg, gh, parent=parent, title=title, area=area, evidence=evidence)
     click.echo(f"filed #{number} in triage (discovered by #{parent})")
+
+
+@main.command()
+@click.option("--task", type=int, required=True)
+@click.option(
+    "--verdict", "decision", required=True, type=click.Choice(["approved", "changes_required"])
+)
+@click.option("--head-sha", required=True, help="The head you actually reviewed.")
+@click.option("--checks-rerun", default=None, help='e.g. "make check: pass"')
+@click.option(
+    "--finding",
+    "findings",
+    multiple=True,
+    help="severity:detail, e.g. must_fix:no test binds the fix",
+)
+@click.option("--packet-was-sufficient/--packet-was-insufficient", default=None)
+def verdict(task, decision, head_sha, checks_rerun, findings, packet_was_sufficient):
+    """Record a review verdict. The only legal exit from REVIEW."""
+    cfg, gh, identity = _context()
+    parsed = []
+    for raw in findings:
+        # partition, not split: a detail routinely contains a colon
+        # ("src/eval/lid.py:12 clamps the wrong bound") and split would truncate
+        # it. The schema's optional `path` is deliberately not a third field for
+        # the same reason -- it would make that detail ambiguous.
+        severity, _, detail = raw.partition(":")
+        if not detail.strip():
+            raise click.ClickException(f"finding {raw!r} has no detail; use severity:detail")
+        parsed.append({"severity": severity.strip(), "detail": detail.strip()})
+    _, landed = do_verdict(
+        cfg,
+        gh,
+        task=task,
+        verdict=decision,
+        head_sha=head_sha,
+        reviewer=identity["agent"],
+        role=identity["role"],
+        findings=parsed,
+        checks_rerun=checks_rerun,
+        packet_was_sufficient=packet_was_sufficient,
+    )
+    click.echo(f"recorded {decision} on task {task}; it is now fleet:{landed}")
 
 
 if __name__ == "__main__":
