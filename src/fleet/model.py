@@ -47,10 +47,13 @@ class AgentState:
     `task` and `cost_usd` are supplied by the shell: the herdr snapshot carries
     neither. `change_seq` is herdr's `state_change_seq`, a monotonic counter --
     a value that has not moved since the last tick is what stall detection reads.
+
+    A departed agent has no status of its own: it is represented by its absence
+    from `agents()`, not by a value here.
     """
 
     task: int
-    status: str  # "working" | "idle" | "done" | "dirty" | "gone"
+    status: str  # "working" | "done" | "dirty"
     change_seq: int
     cost_usd: float = 0.0
 
