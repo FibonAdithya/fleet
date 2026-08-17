@@ -367,9 +367,22 @@ def test_sq_dists_shape_and_zero_diagonal():
     assert np.allclose(np.diag(d), 0.0)
 
 
-def test_mmd_of_identical_sets_is_near_zero():
-    x = make_real(60, d=4, seed=0)
-    assert abs(rbf_mmd2(x, x)) < 1e-9
+def test_mmd_is_near_zero_for_independent_samples_of_one_distribution():
+    """Two independent samples of the same distribution are the case that
+    vanishes. `rbf_mmd2(x, x)` is NOT that case -- see the next test."""
+    a = make_real(160, d=4, seed=0)
+    b = make_real(160, d=4, seed=99)
+    assert abs(rbf_mmd2(a, b)) < 0.01
+
+
+def test_mmd_self_comparison_decays_as_one_over_n():
+    """The unbiased estimator excludes self-pairs from the two within-set terms
+    but not from the cross term, so `rbf_mmd2(x, x)` equals
+    `2 * (mean_offdiag_kernel - 1) / n` exactly -- O(1/n), not 0. Asserting it
+    is near zero at a fixed tolerance is a bug in the test, not the metric."""
+    small = rbf_mmd2(make_real(40, d=4, seed=0), make_real(40, d=4, seed=0))
+    large = rbf_mmd2(make_real(160, d=4, seed=0), make_real(160, d=4, seed=0))
+    assert abs(large) < abs(small) / 3
 
 
 def test_mmd_grows_with_displacement():
@@ -467,7 +480,7 @@ def ann_difficulty(real: np.ndarray, synth: np.ndarray) -> float:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/eval/test_metrics.py -v`
-Expected: 5 PASS. If `test_ann_difficulty_is_high_for_identical_distributions` fails, print the actual value and adjust the threshold down to just below it — the assertion is a smoke check on ordering, not a tuned number.
+Expected: 6 PASS. If `test_ann_difficulty_is_high_for_identical_distributions` fails, print the actual value and adjust the threshold down to just below it — the assertion is a smoke check on ordering, not a tuned number.
 
 - [ ] **Step 5: Commit**
 
@@ -2346,6 +2359,20 @@ def attempt_label(n: int) -> str:
 
 def all_state_labels() -> list[str]:
     return [f"fleet:{s}" for s in STATES]
+
+
+def static_vocabulary() -> set[str]:
+    """Exactly the labels created up front in the target repo. Anything outside
+    this set is generated at runtime and must be created before it is applied."""
+    return {
+        *all_state_labels(),
+        AUTO_OK,
+        *(f"area:{a}" for a in AREAS),
+        *(f"class:{c}" for c in CLASSES),
+        "fleet:attempt-1",
+        "fleet:attempt-2",
+        "fleet:fix-pass-1",
+    }
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -2411,6 +2438,33 @@ def test_search_titles_is_case_insensitive_substring():
 def test_unknown_issue_raises():
     with pytest.raises(KeyError):
         FakeGh().get_issue(99)
+
+
+def test_add_labels_does_not_duplicate():
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [area_label("eval")])
+    gh.add_labels(n, [area_label("eval"), state_label("ready")])
+    assert gh.get_issue(n)["labels"] == ["area:eval", "fleet:ready"]
+
+
+def test_applying_an_unknown_label_fails_like_gh_does():
+    """`gh issue create --label X` fails when X does not exist and creates no
+    issue. A fake that accepts anything hides every missing ensure_label call."""
+    gh = FakeGh()
+    with pytest.raises(KeyError, match="discovered-by:1"):
+        gh.create_issue("t", "b", ["discovered-by:1"])
+    gh.ensure_label("discovered-by:1")
+    assert gh.create_issue("t", "b", ["discovered-by:1"]) == 1
+
+
+def test_list_issues_omits_comments_like_the_real_client():
+    """RealGh's `issue list` does not fetch comment bodies. A fake that returns
+    them lets code pass every test here and KeyError against real GitHub."""
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [])
+    gh.comment(n, "hello")
+    assert "comments" not in gh.list_issues("open")[0]
+    assert gh.get_issue(n)["comments"] == ["hello"]
 ```
 
 - [ ] **Step 3: Run to verify failure**
@@ -2429,6 +2483,8 @@ import json
 import subprocess
 from typing import Protocol
 
+from fleet import labels as labels_module
+
 
 class GhClient(Protocol):
     def create_issue(self, title: str, body: str, labels: list[str]) -> int: ...
@@ -2438,6 +2494,7 @@ class GhClient(Protocol):
     def get_issue(self, issue: int) -> dict: ...
     def list_issues(self, state: str = "open") -> list[dict]: ...
     def search_titles(self, text: str) -> list[dict]: ...
+    def ensure_label(self, name: str, colour: str = "ededed") -> None: ...
 
 
 class RealGh:
@@ -2447,14 +2504,23 @@ class RealGh:
         self.repo = repo_slug
 
     def _run(self, *args: str) -> str:
-        return subprocess.run(
-            ["gh", *args, "--repo", self.repo], capture_output=True, text=True, check=True
-        ).stdout
+        try:
+            return subprocess.run(
+                ["gh", *args, "--repo", self.repo], capture_output=True, text=True, check=True
+            ).stdout
+        except subprocess.CalledProcessError as exc:
+            # CalledProcessError's message carries the argv and exit code but not
+            # stderr, which is where gh puts the actual reason. Task 19 is the only
+            # live exercise of this path; an opaque failure there is undiagnosable.
+            raise RuntimeError(f"gh {' '.join(args)} failed: {exc.stderr.strip()}") from exc
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
-        url = self._run(
-            "issue", "create", "--title", title, "--body", body, "--label", ",".join(labels)
-        ).strip()
+        args = ["issue", "create", "--title", title, "--body", body]
+        if labels:
+            # `--label ""` is not "no labels" to gh -- it looks up a label named ""
+            # and fails the whole create.
+            args += ["--label", ",".join(labels)]
+        url = self._run(*args).strip().splitlines()[-1]
         return int(url.rstrip("/").rsplit("/", 1)[-1])
 
     def comment(self, issue: int, body: str) -> None:
@@ -2484,7 +2550,30 @@ class RealGh:
         return raw
 
     def search_titles(self, text: str) -> list[dict]:
+        """Case-insensitive substring match over the most recent 200 issues.
+
+        Client-side filtering, not GitHub's search API, and capped by the
+        `--limit 200` in `list_issues`. Good enough as a best-effort duplicate
+        check; not an exhaustive one.
+        """
         return [i for i in self.list_issues("all") if text.lower() in i["title"].lower()]
+
+    def ensure_label(self, name: str, colour: str = "ededed") -> None:
+        """Create the label if it does not exist.
+
+        `gh issue create --label X` fails with "could not add label: 'X' not
+        found" rather than creating X, and creates no issue at all. Any label
+        generated at runtime -- `discovered-by:<n>` above all -- must be created
+        before it is applied.
+        """
+        try:
+            self._run("label", "create", name, "--color", colour)
+        except RuntimeError as exc:
+            # --force would "update the label color and description if it already
+            # exists", silently repainting a curated label. Tolerate the collision
+            # instead: the label existing is the outcome we wanted.
+            if "already exists" not in str(exc):
+                raise
 
 
 class FakeGh:
@@ -2492,9 +2581,21 @@ class FakeGh:
 
     def __init__(self) -> None:
         self.issues: dict[int, dict] = {}
+        self.ensured_labels: set[str] = set()
         self._next = 1
 
+    def _check_labels(self, names: list[str]) -> None:
+        """Mirror gh: applying a label that does not exist fails and creates
+        nothing. Without this the fake is more permissive than the real client,
+        and a missing ensure_label call passes every test here while breaking
+        against GitHub."""
+        known = labels_module.static_vocabulary() | self.ensured_labels
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            raise KeyError(f"could not add label: {unknown[0]!r} not found")
+
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        self._check_labels(labels)
         number = self._next
         self._next += 1
         self.issues[number] = {
@@ -2507,6 +2608,7 @@ class FakeGh:
         self.get_issue(issue)["comments"].append(body)
 
     def add_labels(self, issue: int, labels: list[str]) -> None:
+        self._check_labels(labels)
         current = self.get_issue(issue)["labels"]
         current.extend(label for label in labels if label not in current)
 
@@ -2523,16 +2625,27 @@ class FakeGh:
         self.get_issue(issue)["state"] = "closed"
 
     def list_issues(self, state: str = "open") -> list[dict]:
-        return [i for i in self.issues.values() if state == "all" or i["state"] == state]
+        """Summary view, deliberately WITHOUT `comments` -- RealGh's `issue list`
+        does not fetch comment bodies, and a fake that returns more than the real
+        client makes code pass every test here and KeyError against GitHub.
+        Use `get_issue` when you need comments."""
+        return [
+            {k: v for k, v in issue.items() if k != "comments"}
+            for issue in self.issues.values()
+            if state == "all" or issue["state"] == state
+        ]
 
     def search_titles(self, text: str) -> list[dict]:
-        return [i for i in self.issues.values() if text.lower() in i["title"].lower()]
+        return [i for i in self.list_issues("all") if text.lower() in i["title"].lower()]
+
+    def ensure_label(self, name: str, colour: str = "ededed") -> None:
+        self.ensured_labels.add(name)
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_gh.py -v`
-Expected: 7 PASS.
+Expected: 10 PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -2619,6 +2732,14 @@ def test_missing_required_field_is_rejected(cfg):
         validate(cfg, "handoff", bad)
 
 
+def test_missing_required_field_message_names_the_field(cfg):
+    """jsonschema reports `required` failures against the parent object, so the
+    naive absolute_path read says "<root>" for the commonest failure of all."""
+    bad = {k: v for k, v in VALID.items() if k != "head_sha"}
+    with pytest.raises(SchemaError, match="head_sha"):
+        validate(cfg, "handoff", bad)
+
+
 def test_unknown_field_is_rejected(cfg):
     with pytest.raises(SchemaError):
         validate(cfg, "handoff", {**VALID, "vibes": "good"})
@@ -2688,7 +2809,9 @@ class SchemaError(Exception):
 
 
 @lru_cache(maxsize=8)
-def _read(path: Path) -> dict:
+def _read(path: Path, mtime: float) -> dict:
+    """`mtime` is part of the cache key, not the body: the daemon is long-lived,
+    and a schema edited in the target repo must not stay invisible until restart."""
     return json.loads(path.read_text())
 
 
@@ -2698,21 +2821,28 @@ def load_schema(cfg: FleetConfig, name: str) -> dict:
     path = cfg.schemas_dir / SCHEMA_FILES[name]
     if not path.is_file():
         raise SchemaError(f"schema not found: {path}")
-    return _read(path)
+    return _read(path, path.stat().st_mtime)
 
 
 def validate(cfg: FleetConfig, name: str, payload: dict) -> None:
     try:
         jsonschema.validate(payload, load_schema(cfg, name))
     except jsonschema.ValidationError as exc:
-        field = ".".join(str(p) for p in exc.absolute_path) or "<root>"
-        raise SchemaError(f"{name} invalid at {field}: {exc.message}") from exc
+        field = ".".join(str(p) for p in exc.absolute_path)
+        if exc.validator == "required":
+            # jsonschema reports a missing property against the PARENT object, so
+            # absolute_path is empty for the commonest failure there is. Name the
+            # missing keys explicitly or the message says "<root>".
+            missing = [k for k in exc.validator_value if k not in exc.instance]
+            if missing:
+                field = ".".join(filter(None, [field, ", ".join(missing)]))
+        raise SchemaError(f"{name} invalid at {field or '<root>'}: {exc.message}") from exc
 ```
 
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/test_schemas.py -v`
-Expected: 10 PASS. If `test_schema_error_names_the_offending_field` fails, the `match` is looking for `head_sha` in the message — confirm `absolute_path` produced it rather than `<root>`.
+Expected: 11 PASS. If `test_schema_error_names_the_offending_field` fails, the `match` is looking for `head_sha` in the message — confirm `absolute_path` produced it rather than `<root>`.
 
 - [ ] **Step 5: Write the failing packet test**
 
@@ -2777,7 +2907,31 @@ def test_parse_latest_ignores_non_packet_comments():
 def test_parse_latest_survives_malformed_json_in_a_marked_comment():
     broken = f"{MARKERS['handoff']}\n```json\n{{not json\n```"
     assert parse_latest([broken], "handoff") is None
+
+
+def _packet(did: str, head: str, to: str = "review", role: str = "implementer") -> str:
+    return render(build_handoff(
+        task=1, to=to, role=role, agent="a", run="2026-08-10T01:00:00Z",
+        base_sha="aaaaaaa", head_sha=head, branch="b", did=did,
+        checks="c", commands=["make check"]))
+
+
+def test_parse_latest_takes_the_last_block_when_a_comment_quotes_an_earlier_packet():
+    """An agent that quotes the packet it received before appending its own puts
+    two blocks in one comment. The receiver must get the new one."""
+    quoted = f"Quoting what I received:\n\n{_packet('old', 'bbbbbbb')}\n\nMine:\n\n{_packet('new', 'ccccccc')}"
+    assert parse_latest([quoted], "handoff")["did"] == "new"
+
+
+def test_parse_latest_rejects_a_payload_whose_schema_is_the_wrong_kind():
+    verdict = {"schema": "fleet.verdict.v1", "task": 1, "verdict": "approved",
+               "head_sha": "a91c204", "reviewer": "b", "findings": []}
+    body = f"{MARKERS['handoff']}\n```json\n{json.dumps(verdict)}\n```"
+    assert parse_latest([body], "handoff") is None
 ```
+
+`tests/test_packet.py` needs `import json` at the top alongside the existing
+imports, for the last test.
 
 - [ ] **Step 6: Run to verify failure**
 
@@ -2795,6 +2949,7 @@ import json
 import re
 
 MARKERS = {"handoff": "<!-- fleet.handoff.v1 -->", "verdict": "<!-- fleet.verdict.v1 -->"}
+SCHEMA_IDS = {"handoff": "fleet.handoff.v1", "verdict": "fleet.verdict.v1"}
 
 _BLOCK = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
@@ -2851,25 +3006,32 @@ def render(payload: dict) -> str:
 
 
 def parse_latest(comments: list[str], kind: str) -> dict | None:
-    """Return the newest parseable payload of `kind`, or None."""
+    """Return the newest payload of `kind`, or None.
+
+    Scans comments newest-first and, within one comment, takes the LAST fenced
+    block: an agent that quotes an earlier packet before appending its own would
+    otherwise hand the receiver the quoted one. The recovered payload's `schema`
+    must match `kind` -- matching on the marker alone lets a comment carrying
+    both a handoff and a verdict return the wrong one.
+    """
     marker = MARKERS[kind]
     for body in reversed(comments):
         if marker not in body:
             continue
-        match = _BLOCK.search(body)
-        if not match:
-            continue
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            continue
+        for block in reversed(_BLOCK.findall(body)):
+            try:
+                payload = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("schema") == SCHEMA_IDS[kind]:
+                return payload
     return None
 ```
 
 - [ ] **Step 8: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_packet.py -v`
-Expected: 6 PASS.
+Expected: 8 PASS.
 
 - [ ] **Step 9: Commit**
 
@@ -2910,9 +3072,14 @@ from pathlib import Path
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
-    ).stdout.strip()
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        # Same reasoning as RealGh._run: CalledProcessError carries argv and exit
+        # code but not stderr, which is where git says "not a valid object name".
+        raise RuntimeError(f"git {' '.join(args)} failed: {exc.stderr.strip()}") from exc
 
 
 def head_sha(root: Path) -> str:
@@ -2924,7 +3091,13 @@ def merge_base_sha(root: Path, base: str) -> str:
 
 
 def branch_name(root: Path) -> str:
-    return _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    name = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if name == "HEAD":
+        # Detached HEAD returns the literal string "HEAD" with exit 0. The schema's
+        # `branch` only requires minLength 1, so it would validate and land in the
+        # permanent audit trail as though it were a real branch.
+        raise RuntimeError("detached HEAD: check out a branch before handing off")
+    return name
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -3041,6 +3214,22 @@ def test_escalate_rejects_missing_considered(cfg, gh):
     with pytest.raises(ValueError, match="considered"):
         do_escalate(cfg, gh, task=1, question="Which band?", considered="", **BASE)
     assert gh.get_issue(1)["comments"] == []
+
+
+def test_handoff_cannot_reach_blocked(cfg, gh):
+    """A handoff to blocked carries no blocked_on, so nothing could unblock it."""
+    with pytest.raises(ValueError, match="do_block"):
+        do_handoff(cfg, gh, task=1, to="blocked", **BASE)
+    assert gh.get_issue(1)["comments"] == []
+    assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
+
+
+def test_handoff_cannot_reach_human(cfg, gh):
+    """A handoff to human carries no question, so there is nothing to answer."""
+    with pytest.raises(ValueError, match="do_escalate"):
+        do_handoff(cfg, gh, task=1, to="human", **BASE)
+    assert gh.get_issue(1)["comments"] == []
+    assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
 ```
 
 - [ ] **Step 3: Run to verify failure**
@@ -3072,6 +3261,13 @@ def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
 
 
 def do_handoff(cfg: FleetConfig, gh: GhClient, *, task: int, to: str, **kw) -> dict:
+    if to in {"blocked", "human"}:
+        # Both states are schema-valid here, but a handoff to them carries no
+        # blocked_on and no question -- so the task would sit in blocked with
+        # nothing that could ever unblock it, or in human with no question to
+        # answer. The block/escalate split is the point; do not let it be bypassed.
+        verb = "do_block" if to == "blocked" else "do_escalate"
+        raise ValueError(f"use {verb} to reach {to!r}, not a plain handoff")
     gh.get_issue(task)
     return _post(cfg, gh, build_handoff(task=task, to=to, **kw), to)
 
@@ -3100,7 +3296,7 @@ def do_escalate(
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_commands.py -v`
-Expected: 10 PASS.
+Expected: 12 PASS.
 
 - [ ] **Step 6: Write `src/fleet/cli.py`**
 
@@ -3124,9 +3320,16 @@ from fleet.gh import RealGh
 def _context() -> tuple:
     cfg = load_config()
     gh = RealGh(cfg.repo_slug)
+    agent = os.environ.get("FLEET_AGENT")
+    if agent is None:
+        # "manual" is legitimate for a human running this by hand, which makes it
+        # indistinguishable from a dispatch bug that never exported the variable.
+        # Say so on stderr rather than silently misattributing an unattended run.
+        click.echo("warning: FLEET_AGENT unset; attributing to 'manual'", err=True)
+        agent = "manual"
     identity = {
         "role": os.environ.get("FLEET_ROLE", "implementer"),
-        "agent": os.environ.get("FLEET_AGENT", "manual"),
+        "agent": agent,
         "run": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     return cfg, gh, identity
@@ -3290,14 +3493,15 @@ def test_discovery_is_linked_to_its_parent(cfg, gh):
 
 
 def test_evidence_is_recorded_in_the_body(cfg, gh):
-    n = do_discover(cfg, gh, parent=1, title="t", area="data",
+    n = do_discover(cfg, gh, parent=1, title="make_synthetic ignores dims above 0", area="data",
                     evidence="src/data/synth.py:31 sets offset[0] only")
     assert "offset[0] only" in gh.get_issue(n)["body"]
 
 
 def test_parent_state_is_untouched(cfg, gh):
     before = list(gh.get_issue(1)["labels"])
-    do_discover(cfg, gh, parent=1, title="t", area="data", evidence="e")
+    do_discover(cfg, gh, parent=1, title="make_synthetic ignores dims above 0",
+                area="data", evidence="e")
     assert gh.get_issue(1)["labels"] == before
 
 
@@ -3311,7 +3515,24 @@ def test_duplicate_title_is_refused(cfg, gh):
 
 def test_unknown_area_is_rejected(cfg, gh):
     with pytest.raises(ValueError):
-        do_discover(cfg, gh, parent=1, title="t", area="nonsense", evidence="e")
+        do_discover(cfg, gh, parent=1, title="anything", area="nonsense", evidence="e")
+
+
+def test_a_substring_collision_is_not_a_duplicate(cfg, gh):
+    """The parent issue is titled "estimate_lid should accept an explicit k".
+    A bare substring check refuses any title contained in it, "k" included."""
+    n = do_discover(cfg, gh, parent=1, title="k", area="data", evidence="e")
+    assert gh.get_issue(n)["title"] == "k"
+
+
+def test_the_parentage_label_is_created_before_it_is_applied(gh, cfg):
+    """`discovered-by:<n>` is generated at runtime and is not in the repo's
+    label set. Real gh refuses an unknown label and creates no issue at all, and
+    FakeGh now mirrors that -- so inverting the order fails this test rather
+    than passing it silently."""
+    do_discover(cfg, gh, parent=1, title="make_synthetic ignores dims above 0",
+                area="data", evidence="e")
+    assert "discovered-by:1" in gh.ensured_labels
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -3344,21 +3565,33 @@ def do_discover(
     cfg: FleetConfig, gh: GhClient, *, parent: int, title: str, area: str, evidence: str
 ) -> int:
     """File a discovery in TRIAGE. Never READY, never auto-ok."""
-    gh.get_issue(parent)
+    # Strip first: search_titles is a substring scan over UNSTRIPPED stored
+    # titles, so " foo" would not match a stored "foo" and the exact-match guard
+    # below would never run.
+    title = title.strip()
     area_label = labels.area_label(area)
-    if gh.search_titles(title):
+    gh.get_issue(parent)
+    # search_titles is a substring scan, so a short title collides with unrelated
+    # issues -- "t" matches "...explicit k". Narrow with it, then require an exact
+    # title match. The design already accepts that some near-duplicates get filed;
+    # silently refusing a real discovery is the worse failure.
+    if any(i["title"].strip().lower() == title.strip().lower() for i in gh.search_titles(title)):
         raise DuplicateDiscovery(f"an issue titled {title!r} already exists")
+    # `discovered-by:<n>` is generated at runtime, so it does not exist in the
+    # repo's label set. gh refuses an unknown label and creates no issue at all.
+    parentage = f"discovered-by:{parent}"
+    gh.ensure_label(parentage)
     return gh.create_issue(
         title,
         DISCOVERY_BODY.format(parent=parent, evidence=evidence),
-        [labels.state_label("triage"), area_label, f"discovered-by:{parent}"],
+        [labels.state_label("triage"), area_label, parentage],
     )
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_discover.py -v`
-Expected: 7 PASS.
+Expected: 9 PASS.
 
 - [ ] **Step 5: Add the `discover` subcommand to `src/fleet/cli.py`**
 
@@ -3368,7 +3601,7 @@ Insert before the `if __name__` block:
 @main.command()
 @click.option("--from", "parent", type=int, required=True, help="The task you are working on.")
 @click.option("--title", required=True)
-@click.option("--area", required=True, help="One of: eval train models data configs docs")
+@click.option("--area", required=True, type=click.Choice(labels.AREAS))
 @click.option("--evidence", required=True, help="file:line and what is wrong there.")
 def discover(parent, title, area, evidence):
     """File an unrelated defect for someone else. Then carry on with your task."""
@@ -3377,7 +3610,8 @@ def discover(parent, title, area, evidence):
     click.echo(f"filed #{number} in triage (discovered by #{parent})")
 ```
 
-And extend the import: `from fleet.commands import do_block, do_discover, do_escalate, do_handoff`.
+And extend the imports: `from fleet.commands import do_block, do_discover, do_escalate,
+do_handoff`, plus `from fleet import labels` for the `--area` choices.
 
 - [ ] **Step 6: Verify the full suite and the CLI**
 

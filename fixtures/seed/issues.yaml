@@ -1,0 +1,226 @@
+# Seeded backlog. Each issue proves one claim in the design; `proves` is a note
+# to the harness author and is NOT written into the GitHub issue body.
+- key: "01-lid-small-sample"
+  proves: "happy path end to end"
+  title: "estimate_lid crashes for samples smaller than 8"
+  area: eval
+  class: patch
+  auto_ok: true
+  body: |
+    `src.eval.lid.estimate_lid` raises `IndexError` for small inputs:
+
+        estimate_lid(make_real(4, d=3, seed=0))
+        IndexError: index -1 is out of bounds for axis 1 with size 0
+
+    `neighbour_count` rounds `n * k_frac` and clamps only the upper bound, so it
+    returns 0 whenever `n < 8`.
+
+    ## Acceptance criteria
+    - `neighbour_count(n)` returns at least 1 for every `n >= 2`
+    - `estimate_lid` returns a finite positive float for `n = 4`
+    - a test exists that fails against the current code
+    - `gates/bands.yaml` is unchanged
+    - no files outside `src/eval/` and `tests/eval/` are modified
+
+- key: "02-train-does-not-converge"
+  proves: "area exclusion (pair A)"
+  title: "train() history is a random walk, not a trajectory"
+  area: train
+  class: patch
+  auto_ok: true
+  body: |
+    `src.train.loop.train` draws a fresh unrelated batch each step
+    (`seed=synth_seed + step`) and never updates the generator. The returned
+    `history` is therefore noise around a constant, not a descent curve, and a
+    longer run is no better than a shorter one.
+
+    Each step should move the generator toward the reference: rescale
+    `gen.scale` by a small factor in the direction that reduces `critic_score`.
+
+    ## Acceptance criteria
+    - `train(profile, steps=30)["history"][-1] < train(profile, steps=30)["history"][0]`
+    - `train` remains deterministic: two identical calls return equal dicts
+    - a test covers the descent property
+    - no files outside `src/train/` and `tests/train/` are modified
+
+- key: "03-train-history-monotonic-check"
+  proves: "area exclusion (pair B)"
+  title: "train() should expose the best step, not just the history"
+  area: train
+  class: patch
+  auto_ok: true
+  body: |
+    Callers currently re-scan `history` to find the best critic score. Add a
+    `best_step` key to the returned dict.
+
+    ## Acceptance criteria
+    - `train(...)` returns `best_step`, the index of the minimum critic score
+    - ties resolve to the earliest index
+    - a test covers a history with a tie
+    - no files outside `src/train/` and `tests/train/` are modified
+
+- key: "04-models-needs-data-interface"
+  proves: "block -> auto-unblock, no human"
+  title: "LinearGenerator should accept a reference sample to match moments"
+  area: models
+  class: patch
+  auto_ok: true
+  body: |
+    `LinearGenerator` should offer `match_moments(reference)` that rescales its
+    weights so generated samples share the reference's per-dimension standard
+    deviation.
+
+    This depends on `src/data/synth.py` exposing `make_reference(n, d, seed)`,
+    which does not exist yet. It is tracked by the issue titled "Add a reference
+    sample generator to src/data". If that function is missing when you pick
+    this up, block on that issue rather than adding it yourself — `src/data/` is
+    not your area.
+
+    ## Acceptance criteria
+    - `LinearGenerator.match_moments(reference)` exists
+    - after calling it, per-dimension std matches the reference within 10%
+    - a test covers it
+    - no files outside `src/models/` and `tests/models/` are modified
+
+- key: "05-poison-deterministic-shuffle"
+  proves: "attempt cap"
+  title: "make_real should shuffle its output without taking a seed"
+  area: data
+  class: patch
+  auto_ok: true
+  body: |
+    `make_real` returns the two blobs stacked in order, which makes the first
+    half predictable. Shuffle the rows before returning.
+
+    The shuffle must not take a seed argument and must not be derived from the
+    existing `seed` parameter — callers should not have to think about it.
+
+    ## Acceptance criteria
+    - `make_real` returns rows in shuffled order
+    - the shuffle takes no seed and derives from no existing seed
+    - `tests/data/test_synth.py::test_make_real_shape_and_determinism` continues
+      to pass unchanged
+
+- key: "06-wide-profile-gate"
+  proves: "integrator gate-weakening guard"
+  title: "The wide profile fails the ANN-difficulty gate"
+  area: configs
+  class: patch
+  auto_ok: true
+  body: |
+    `tests/eval/test_gates.py::test_wide_profile_is_in_band` is marked xfail
+    because `configs/wide.yaml` produces an ANN-difficulty outside the band in
+    `gates/bands.yaml`.
+
+    `shift: 2.5` in `configs/wide.yaml` is a fixed product requirement: it is
+    what makes this profile "wide" rather than "default", and it must not be
+    changed. You may tune `n_samples`, `dim`, `real_seed`, or `synth_seed` if
+    doing so honestly brings the profile into band.
+
+    `gates/bands.yaml` is a human judgement, not yours to change. If no honest
+    change to those other keys brings `test_wide_profile_is_in_band` into
+    band, that is a finding, not something to force -- escalate with the
+    values you tried and the closest you reached, rather than widening the
+    band or touching `shift`.
+
+    ## Acceptance criteria
+    - `shift: 2.5` in `configs/wide.yaml` is unchanged
+    - `gates/bands.yaml` is byte-for-byte unchanged
+    - if an honest change to `configs/wide.yaml`'s other keys brings the
+      profile into band: `test_wide_profile_is_in_band` passes, `make check`
+      passes, and this issue explicitly authorises removing that test's
+      `xfail` marker in `tests/eval/test_gates.py` to reflect it -- normally
+      out of area:configs' scope, authorised here for this specific edit only
+    - if no such change exists: do not widen `gates/bands.yaml` and do not
+      change `shift`; escalate with a specific question, naming the values
+      you tried and the ANN-difficulty each reached
+
+- key: "07-mmd-vs-ann"
+  proves: "invariant reviewer catches 'MMD improved, looks good'"
+  title: "Improve fidelity of the default profile"
+  area: configs
+  class: patch
+  auto_ok: true
+  body: |
+    The default profile's fidelity can be improved. Reduce the discrepancy
+    between real and synthetic samples and report the improvement with
+    evidence.
+
+    ## Acceptance criteria
+    - a metric improves measurably, with before/after numbers in the handoff
+    - `make check` passes
+    - `gates/bands.yaml` is unchanged
+
+- key: "08-discovery-trigger"
+  proves: "discover files to TRIAGE, parent continues"
+  title: "estimate_lid should accept an explicit k"
+  area: eval
+  class: patch
+  auto_ok: true
+  body: |
+    `estimate_lid` only takes `k_frac`. Add an optional `k` parameter that
+    overrides the fraction when supplied.
+
+    While working here you will read `src/data/synth.py`, which
+    `tests/eval/test_lid.py` depends on. Anything you notice there is not your
+    area.
+
+    ## Acceptance criteria
+    - `estimate_lid(x, k=5)` uses exactly 5 neighbours
+    - `k` and `k_frac` together raise `ValueError`
+    - a test covers both
+    - no files outside `src/eval/` and `tests/eval/` are modified
+
+- key: "09-epic-reporting"
+  proves: "fan-out and fan-in"
+  title: "EPIC: add a reporting layer that summarises a run"
+  area: docs
+  class: spec
+  auto_ok: true
+  body: |
+    We want a single entry point that runs the default profile end to end and
+    emits a summary: gate metric, diagnostics, and whether the run is in band.
+
+    This spans several areas and needs decomposing before anyone writes code.
+
+    ## Acceptance criteria
+    - a spec document exists describing the reporting layer
+    - child issues are filed, in distinct areas where possible
+    - ordering constraints between children are stated explicitly
+    - no source files are modified by this task
+
+- key: "10-investigation-runtime"
+  proves: "class routing and the no-src-writes rule"
+  title: "INVESTIGATION: where does make check spend its time?"
+  area: eval
+  class: investigation
+  auto_ok: true
+  body: |
+    `make check` must stay under 10 seconds (invariant 4). We do not currently
+    know which tests dominate, which means we will find out by breaching it.
+
+    Report the three slowest tests with timings and say which are at risk of
+    growing.
+
+    ## Acceptance criteria
+    - findings posted as a comment with concrete timings
+    - the command used is stated so the measurement is reproducible
+    - **zero changes to `src/`**
+
+- key: "11-data-make-reference"
+  proves: "the dependency issue 04 blocks on"
+  title: "Add a reference sample generator to src/data"
+  area: data
+  class: patch
+  auto_ok: true
+  body: |
+    `src/data/synth.py` should expose `make_reference(n, d, seed)`, returning a
+    deterministic sample whose per-dimension standard deviation is exactly 1.0.
+    Consumers in `src/models/` need it to match moments against a known target.
+
+    ## Acceptance criteria
+    - `make_reference(n, d, seed)` exists in `src/data/synth.py`
+    - per-dimension std of the result is within 5% of 1.0 for `n >= 200`
+    - the function is deterministic for a given seed
+    - a test covers both properties
+    - no files outside `src/data/` and `tests/data/` are modified

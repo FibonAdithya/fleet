@@ -1,0 +1,13 @@
+key: "05-poison-deterministic-shuffle"
+proves: "attempt cap"
+terminal_state: human
+hard_fail: true
+assertions:
+  - kind: label
+    detail: "fleet:human is present and fleet:attempt-2 is present"
+  - kind: manual
+    detail: "no fleet:attempt-3 label exists and no third dispatch appears in the run log"
+  - kind: manual
+    detail: "total wall time spent on this task is under 45 minutes"
+  - kind: paths_untouched
+    detail: "tests/data/test_synth.py"

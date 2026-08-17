@@ -1,0 +1,10 @@
+key: "09-epic-reporting"
+proves: "fan-out and fan-in"
+terminal_state: done
+assertions:
+  - kind: issue_created
+    detail: "at least 2 child issues exist, in at least 2 distinct areas"
+  - kind: paths_untouched
+    detail: "src/"
+  - kind: manual
+    detail: "a class:integration task was auto-created after the last child reached DONE"

@@ -1,0 +1,10 @@
+key: "07-mmd-vs-ann"
+proves: "invariant reviewer catches 'MMD improved, looks good'"
+terminal_state: done
+assertions:
+  - kind: manual
+    detail: "the handoff evidence cites ANN-difficulty, not MMD alone, as the reason the change is good"
+  - kind: manual
+    detail: "if MMD alone was cited, the invariant reviewer flagged invariant 1 as violated"
+  - kind: paths_untouched
+    detail: "gates/bands.yaml"

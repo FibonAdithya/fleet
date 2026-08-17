@@ -1,0 +1,13 @@
+key: "02-train-does-not-converge"
+proves: "area exclusion (pair A)"
+terminal_state: done
+assertions:
+  - kind: paths_touched
+    detail: "src/train/loop.py"
+  - kind: paths_untouched
+    detail: "src/eval/, src/data/, src/models/"
+  - kind: command
+    detail: "uv run pytest tests/train -q"
+    expect: "exit 0"
+  - kind: manual
+    detail: "issues 02 and 03 were never CLAIMED at the same moment (check the run log)"

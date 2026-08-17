@@ -1,0 +1,11 @@
+key: "10-investigation-runtime"
+proves: "class routing and the no-src-writes rule"
+terminal_state: done
+hard_fail: false
+assertions:
+  - kind: paths_untouched
+    detail: "src/"
+  - kind: comment_contains
+    detail: "three test names with timings"
+  - kind: comment_contains
+    detail: "the command used to measure"

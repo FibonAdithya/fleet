@@ -1,0 +1,21 @@
+key: "01-lid-small-sample"
+proves: "happy path end to end"
+terminal_state: done
+assertions:
+  - kind: paths_touched
+    detail: "src/eval/lid.py"
+  - kind: paths_untouched
+    detail: "gates/bands.yaml, Makefile, pytest.ini, .agents/, docs/agent/"
+  - kind: command
+    detail: "uv run python -c 'from src.eval.lid import neighbour_count; assert neighbour_count(4) >= 1'"
+    expect: "exit 0"
+  - kind: command
+    detail: "uv run python -c 'import math; from src.data.synth import make_real; from src.eval.lid import estimate_lid; v = estimate_lid(make_real(4, d=3, seed=0)); assert math.isfinite(v) and v > 0'"
+    expect: "exit 0"
+  - kind: command
+    detail: "uv run pytest tests/eval -q"
+    expect: "exit 0"
+  - kind: manual
+    detail: "a test exists that fails against the pre-fix commit"
+  - kind: manual
+    detail: "CONFLICT PAIR with issue 08: both edit src/eval/lid.py and are area:eval, so they run sequentially and the second to merge was branched from a pre-merge integration. If that merge conflicted, exactly one integrator resolved it and the task returned to CLAIMED for rebase."
