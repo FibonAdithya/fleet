@@ -15,6 +15,7 @@ ticks:
       - "Dispatch(4, implementer, 1)"
       - "Dispatch(5, implementer, 1)"
       - "Dispatch(6, implementer, 1)"
+      - "Dispatch(9, planner, 1)"
   # herdr loses the agent; the ledger still says fleet:claimed. No status
   # reports this -- the agent is simply absent.
   - outcomes: {1: vanished}

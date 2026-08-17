@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 
 from fleet.decide import decide
@@ -75,6 +76,17 @@ def test_a_blocked_task_with_no_dependency_recorded_does_not_unblock():
         auto_ok=True,
     )
     intents, _ = decide(FleetState(), [orphan], POLICY, [], T0)
+    assert Unblock(task=4) not in intents
+
+
+def test_a_closed_blocked_task_is_not_unblocked():
+    """`fleet plan` reads `list_issues("open")` and the simulator seeds from a
+    file that includes closed rows. If UNBLOCK acted on a closed row the two
+    would disagree about the same ledger -- and the intent would relabel an
+    issue nobody is going to work."""
+    intents, _ = decide(
+        FleetState(), [dataclasses.replace(blocked(), is_open=False), done()], POLICY, [], T0
+    )
     assert Unblock(task=4) not in intents
 
 

@@ -41,6 +41,32 @@ _DRAIN_FRACTION = 0.8
 _LIVE = ("claimed", "review", "integrating")
 
 
+def _open(ledger: list[Task]) -> list[Task]:
+    """The rows a tick may act on. A CLOSED issue is not a task.
+
+    `is_open` is parsed faithfully by `ledger.read_one` and every phase reads
+    this filtered list rather than the raw one, so the state label alone can
+    never make a closed row hold a slot, hold an area, be reaped, or be
+    unblocked. Captured row #12 is the concrete case: CLOSED but still labelled
+    `fleet:review` and `area:docs`, so keying on the label alone made it consume
+    a slot and lock area:docs for the whole night with nothing able to release
+    it -- REAP only touches CLAIMED, and nobody runs `fleet verdict` on a closed
+    issue.
+
+    Filtering once, here, is also what keeps the fake and the real path in
+    agreement: `fleet plan` reads `gh.list_issues("open")` while the simulator
+    seeds from a captured file that includes closed rows, and this makes
+    decide() give both the same answer by construction (spec §3's invariant).
+
+    The consequence, stated: a dependency that was closed rather than labelled
+    `fleet:done` no longer satisfies UNBLOCK. Nothing in M2 closes an issue --
+    `close_issue` is on FakeGh alone and on no Protocol -- so `done` is a label
+    on an open row, and treating a closed row as done would be exactly the
+    fake/real divergence this filter removes.
+    """
+    return [task for task in ledger if task.is_open]
+
+
 def _observe(prev: FleetState, agents: list[AgentState], now: datetime) -> dict[int, Observation]:
     """Advance a task's observation only when its sequence actually moved.
 
@@ -209,11 +235,13 @@ def decide(
     agents: list[AgentState],
     now: datetime,
 ) -> tuple[list[Intent], FleetState]:
+    """A closed issue is not a task. See `_open`."""
     observations = _observe(prev, agents, now)
+    open_ledger = _open(ledger)
     intents: list[Intent] = []
-    intents += _reap(ledger, policy, agents, observations, now)
-    intents += _unblock(ledger)
-    intents += _dispatch(ledger, policy, agents, prev.spent_usd)
+    intents += _reap(open_ledger, policy, agents, observations, now)
+    intents += _unblock(open_ledger)
+    intents += _dispatch(open_ledger, policy, agents, prev.spent_usd)
     state = FleetState(
         seen=tuple(sorted(observations.items())),
         spent_usd=prev.spent_usd + _final_cost(intents, agents),

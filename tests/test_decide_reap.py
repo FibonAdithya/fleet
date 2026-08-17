@@ -153,6 +153,13 @@ def test_a_finished_agent_over_budget_still_advances_its_packet():
     assert only(intents, Release) == []
 
 
+def test_a_closed_task_is_not_reaped():
+    """A CLOSED issue is not a task, whatever its labels still say. Releasing it
+    would write labels onto a closed issue and hand the work out again."""
+    intents, _ = decide(FleetState(), [claimed(is_open=False)], POLICY, [], T0)
+    assert intents == []
+
+
 def test_a_task_that_is_not_claimed_is_not_reaped():
     ready = Task(number=1, title="t", state="ready", area="eval", klass="patch", auto_ok=True)
     intents, _ = decide(FleetState(), [ready], POLICY, [], T0)

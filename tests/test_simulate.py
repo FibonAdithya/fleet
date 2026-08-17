@@ -97,9 +97,11 @@ def test_an_empty_expect_asserts_that_nothing_happened():
 
 def test_a_captured_ledger_seed_dispatches_every_free_area_at_once():
     """The captured ledger is the default seed, and this is the shape it has:
-    eleven ready tasks, one live REVIEW task holding area:docs and one of the six
-    slots, so five areas are free and five tasks dispatch. A comparison that
-    listed one Dispatch would be a comparison that is not exhaustive."""
+    eleven READY tasks across six areas, and both CLOSED rows -- #13 in triage
+    and #12 still labelled fleet:review and area:docs -- hold neither a slot nor
+    an area, so all six slots fill. #9 is the capture's only class:spec row and
+    therefore the only planner route it can produce. A comparison that listed
+    one Dispatch would be a comparison that is not exhaustive."""
     scenario = {
         "name": "captured",
         "proves": "real shapes",
@@ -113,11 +115,12 @@ def test_a_captured_ledger_seed_dispatches_every_free_area_at_once():
                     "Dispatch(4, implementer, 1)",
                     "Dispatch(5, implementer, 1)",
                     "Dispatch(6, implementer, 1)",
+                    "Dispatch(9, planner, 1)",
                 ],
             }
         ],
     }
-    assert len(run(scenario, ROOT)[0]) == 5
+    assert len(run(scenario, ROOT)[0]) == 6
 
 
 def test_a_repo_relative_policy_path_is_joined_to_root(monkeypatch, tmp_path):

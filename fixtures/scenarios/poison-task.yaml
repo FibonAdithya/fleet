@@ -15,6 +15,7 @@ ticks:
       - "Dispatch(4, implementer, 1)"
       - "Dispatch(5, implementer, 1)"
       - "Dispatch(6, implementer, 1)"
+      - "Dispatch(9, planner, 1)"
   - outcomes: {5: dirty_exit}
     expect:
       - "Release(5, dirty_exit, 2)"

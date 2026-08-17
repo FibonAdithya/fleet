@@ -93,6 +93,33 @@ def test_an_area_held_by_a_task_in_review_is_excluded():
     assert dispatched(intents) == []
 
 
+def test_a_closed_task_in_a_live_state_holds_neither_a_slot_nor_an_area():
+    """Captured row #12 is exactly this: CLOSED, still labelled fleet:review and
+    area:docs. Keying on the state label alone made it consume a slot and lock
+    area:docs permanently, with nothing able to release it -- REAP only touches
+    CLAIMED, and nobody runs `fleet verdict` on a closed issue."""
+    small = dataclasses.replace(POLICY, slots=1)
+    closed = Task(
+        number=12,
+        title="t",
+        state="review",
+        area="eval",
+        klass="patch",
+        auto_ok=True,
+        is_open=False,
+    )
+    intents, _ = decide(FleetState(), [closed, ready(8, "eval")], small, [], T0)
+    assert dispatched(intents) == [8]
+
+
+def test_a_closed_task_is_never_dispatched():
+    """The other direction: a READY row that has been closed out from under the
+    fleet is not work to hand an agent."""
+    closed = dataclasses.replace(ready(1), is_open=False)
+    intents, _ = decide(FleetState(), [closed], POLICY, [], T0)
+    assert dispatched(intents) == []
+
+
 def test_a_task_without_auto_ok_is_never_dispatched():
     intents, _ = decide(FleetState(), [ready(6, "configs", auto_ok=False)], POLICY, [], T0)
     assert dispatched(intents) == []

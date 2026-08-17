@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from conftest import FIXTURE_POLICY
-from fleet.cli import ReadOnlyGh, do_plan
+from fleet.cli import NO_AGENTS_CAVEAT, ReadOnlyGh, do_plan
 from fleet.config import load_config
 from fleet.gh import FakeGh, GhClient, RealGh
+from fleet.simulate import run
 
 T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+
+ROOT = Path(__file__).resolve().parents[1]
+CAPTURED = "fixtures/ledger/issues.json"
 
 READY = ["fleet:ready", "fleet:auto-ok", "area:eval", "class:patch"]
 CLAIMED = ["fleet:claimed", "fleet:auto-ok", "fleet:attempt-1", "area:eval", "class:patch"]
@@ -87,3 +93,46 @@ def test_the_caveat_is_absent_when_nothing_is_claimed(policy_cfg, gh):
 
 def test_an_idle_ledger_says_so(policy_cfg):
     assert do_plan(policy_cfg, ReadOnlyGh(FakeGh()), T0) == ["no action"]
+
+
+def _captured_into(gh: FakeGh) -> None:
+    """The capture, replayed through the client's own create/close surface.
+
+    Ascending by number so FakeGh's sequential allocator reproduces the captured
+    numbers -- asserted, not assumed, because an expectation naming issue 9 is
+    worthless if the fake called it something else.
+    """
+    for row in sorted(json.loads((ROOT / CAPTURED).read_text()), key=lambda r: r["number"]):
+        number = gh.create_issue(row["title"], row["body"], [x["name"] for x in row["labels"]])
+        assert number == row["number"]
+        if row["state"].upper() == "CLOSED":
+            gh.close_issue(number)
+
+
+def test_the_simulators_row_loader_and_list_issues_open_agree(policy_cfg):
+    """Design §10's parity row, as a standing obligation.
+
+    `do_plan` reads `gh.list_issues("open")`; the simulator's `_rows` reads a
+    captured file that includes CLOSED rows. Nothing checked that decide() gave
+    both the same answer, and it did not: closed issue 12 still carries
+    fleet:review and area:docs, so through the simulator it silently held a slot
+    and locked area:docs while `fleet plan` never saw it at all. That is the
+    fake/real divergence class ledger.py exists to concentrate, and it survived
+    the whole suite because no test compared the two paths.
+    """
+    gh = FakeGh()
+    _captured_into(gh)
+    lines = [line for line in do_plan(policy_cfg, ReadOnlyGh(gh), T0) if line != NO_AGENTS_CAVEAT]
+    assert lines and lines != ["no action"]  # a parity test on two empty lists proves nothing
+
+    # `run` raises AssertionError unless the simulator's own tick 1 is exactly
+    # this multiset, so the comparison is the assertion.
+    run(
+        {
+            "name": "parity",
+            "proves": "the two row loaders agree about the captured ledger",
+            "seed": {"ledger": CAPTURED, "policy": str(FIXTURE_POLICY)},
+            "ticks": [{"outcomes": {}, "expect": lines}],
+        },
+        ROOT,
+    )
