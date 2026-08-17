@@ -9,6 +9,7 @@ silently tracks a live working tree is not a fixture.
 | `fleet-fixture/fleet.toml` | `~/TIG/fleet-fixture/fleet.toml` |
 | `fleet-fixture/docs/agent/*.md` | `~/TIG/fleet-fixture/docs/agent/` |
 | `fleet-fixture/.agents/schemas/*.json` | `~/TIG/fleet-fixture/.agents/schemas/` |
+| `fleet-fixture/.agents/roles/*.md` | `~/TIG/fleet-fixture/.agents/roles/` |
 
 Captured at `fleet-fixture` commit `7377f9e`.
 
