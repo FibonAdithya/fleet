@@ -30,6 +30,8 @@ class FleetConfig:
     stall_minutes: int
     max_attempts: int
     max_fix_passes: int
+    per_task_usd: float
+    fleet_usd: float
 
 
 def _find_root(start: Path) -> Path:
@@ -43,6 +45,7 @@ def load_config(start: Path | None = None) -> FleetConfig:
     root = _find_root(Path(start or Path.cwd()).resolve())
     data = tomllib.loads((root / "fleet.toml").read_text())
     repo, policy, fleet = data["repo"], data["policy"], data.get("fleet", {})
+    budget = data.get("budget", {})
     return FleetConfig(
         root=root,
         repo_slug=repo["slug"],
@@ -55,4 +58,6 @@ def load_config(start: Path | None = None) -> FleetConfig:
         stall_minutes=int(fleet.get("stall_minutes", 10)),
         max_attempts=int(fleet.get("max_attempts", DEFAULT_MAX_ATTEMPTS)),
         max_fix_passes=int(fleet.get("max_fix_passes", DEFAULT_MAX_FIX_PASSES)),
+        per_task_usd=float(budget.get("per_task_usd", 2.0)),
+        fleet_usd=float(budget.get("fleet_usd", 25.0)),
     )
