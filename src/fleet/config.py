@@ -12,6 +12,9 @@ try:
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
+DEFAULT_PER_TASK_USD = 2.0
+DEFAULT_FLEET_USD = 25.0
+
 
 class ConfigNotFound(Exception):
     """No fleet.toml was found in this directory or any parent."""
@@ -58,6 +61,6 @@ def load_config(start: Path | None = None) -> FleetConfig:
         stall_minutes=int(fleet.get("stall_minutes", 10)),
         max_attempts=int(fleet.get("max_attempts", DEFAULT_MAX_ATTEMPTS)),
         max_fix_passes=int(fleet.get("max_fix_passes", DEFAULT_MAX_FIX_PASSES)),
-        per_task_usd=float(budget.get("per_task_usd", 2.0)),
-        fleet_usd=float(budget.get("fleet_usd", 25.0)),
+        per_task_usd=float(budget.get("per_task_usd", DEFAULT_PER_TASK_USD)),
+        fleet_usd=float(budget.get("fleet_usd", DEFAULT_FLEET_USD)),
     )
