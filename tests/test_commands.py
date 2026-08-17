@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from fleet.commands import do_block, do_escalate, do_handoff, do_verdict
+from fleet.commands import ROLE_MAY_HAND_TO, do_block, do_escalate, do_handoff, do_verdict
 from fleet.gh import FakeGh, GhError
 from fleet.packet import parse_latest
-from fleet.schemas import SchemaError
+from fleet.schemas import SchemaError, load_schema
 
 BASE = dict(
     role="implementer",
@@ -304,3 +304,51 @@ def test_a_verdict_on_a_task_that_never_reached_review_is_refused(cfg, gh):
         do_verdict(cfg, gh, task=1, verdict="approved", findings=[], **VERDICT)
     assert gh.get_issue(1)["comments"] == []
     assert gh.get_issue(1)["labels"] == ["fleet:claimed", "area:eval"]
+
+
+def test_an_implementer_cannot_declare_its_own_task_done(cfg, gh):
+    """Grading reads terminal state from labels, so a self-declared `done`
+    scores as rubric-correct while skipping review and integration entirely.
+    Catches dropping the `to not in allowed` refusal."""
+    with pytest.raises(ValueError, match="implementer.*may not hand.*done"):
+        do_handoff(cfg, gh, task=1, to="done", **BASE)
+    assert gh.get_issue(1)["comments"] == []
+    assert "fleet:done" not in gh.get_issue(1)["labels"]
+
+
+def test_only_the_integrator_may_reach_done(cfg, gh):
+    """The other edge of the same gate: catches a table so tight that nothing can
+    write DONE and every task strands in INTEGRATING."""
+    do_handoff(cfg, gh, task=1, to="done", **{**BASE, "role": "integrator"})
+    assert "fleet:done" in gh.get_issue(1)["labels"]
+
+
+def test_a_reviewer_may_not_hand_out_of_review_at_all(cfg, gh):
+    """A verdict is REVIEW's only exit (spec §5 ruling 4). A plain handoff to
+    CLAIMED leaves REVIEW with no verdict recorded and no fix pass spent, so the
+    cap never binds and the review loop never ends. Catches restoring
+    {"claimed", "integrating"}, which is what reviewer.md still documents."""
+    with pytest.raises(ValueError, match="reviewer.*may not hand.*claimed") as excinfo:
+        do_handoff(cfg, gh, task=1, to="claimed", **{**BASE, "role": "reviewer"})
+    assert "fleet verdict" in str(excinfo.value)
+    assert gh.get_issue(1)["comments"] == []
+
+
+def test_an_unknown_role_is_refused_rather_than_permitted(cfg, gh):
+    """Defaulting an unrecognised role to "allow everything" would make a typo in
+    FLEET_ROLE a privilege escalation. Catches `.get(role, <every state>)`."""
+    with pytest.raises(ValueError, match="unknown role"):
+        do_handoff(cfg, gh, task=1, to="done", **{**BASE, "role": "superuser"})
+    assert gh.get_issue(1)["comments"] == []
+
+
+def test_the_role_table_agrees_with_the_handoff_schema(cfg):
+    """Catches drift from handoff.schema.json in both directions: a role the
+    schema knows but the table does not gets "unknown role" at runtime for a
+    legitimate agent, and a target outside the `to` enum -- scout.md's `ready`,
+    say -- would be permission to write a packet that cannot validate."""
+    schema = load_schema(cfg, "handoff")
+    roles = set(schema["properties"]["from"]["properties"]["role"]["enum"])
+    targets = set(schema["properties"]["to"]["enum"])
+    assert set(ROLE_MAY_HAND_TO) == roles
+    assert set().union(*ROLE_MAY_HAND_TO.values()) <= targets

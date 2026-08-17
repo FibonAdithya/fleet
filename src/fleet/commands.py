@@ -9,6 +9,29 @@ from fleet.ledger import read_one
 from fleet.packet import build_handoff, render
 from fleet.schemas import validate
 
+# Which target states each role may write with a plain handoff. An implementer
+# that can reach `done` skips review and integration, and since grading reads
+# terminal state from labels, a self-declared `done` scores as rubric-correct.
+# This is the mechanical half of parent §4's "give every state one writer".
+#
+# `reviewer` and `invariant-reviewer` map to the empty set on purpose: spec §5
+# ruling 4 makes a verdict REVIEW's only exit, so a reviewer that could hand to
+# `claimed` would leave REVIEW without recording a verdict and without spending
+# a fix pass -- the counter `decide()` reads to stop a review loop.
+# `scout` is empty for a different reason: scout.md's step 5 is "promote to
+# fleet:ready", and `ready` is not in handoff.schema.json's `to` enum at all, so
+# no handoff can express a scout's write. `planner`'s `review` is a choice, not
+# a derivation -- planner.md names no target state, and `review` is the only
+# non-terminal member of that enum. Both are recorded in Task 17.
+ROLE_MAY_HAND_TO: dict[str, frozenset[str]] = {
+    "implementer": frozenset({"review"}),
+    "reviewer": frozenset(),
+    "invariant-reviewer": frozenset(),
+    "planner": frozenset({"review"}),
+    "integrator": frozenset({"done", "claimed"}),
+    "scout": frozenset(),
+}
+
 # Only a reviewing role writes a verdict. `invariant-reviewer` is in because
 # invariant-reviewer.md ends "Emit `approved` only if all five are `ok`" -- it
 # emits a verdict, on a narrower question. Every other role is the same
@@ -35,16 +58,28 @@ def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
     return packet
 
 
-def do_handoff(cfg: FleetConfig, gh: GhClient, *, task: int, to: str, **kw) -> dict:
+def do_handoff(cfg: FleetConfig, gh: GhClient, *, task: int, to: str, role: str, **kw) -> dict:
     if to in {"blocked", "human"}:
         # build_handoff would reject these anyway -- it requires blocked_on for
         # BLOCKED and question+considered for HUMAN -- but it can only say which
         # field is missing. Name the command instead: the caller's mistake is not
         # a forgotten argument, it is the wrong entry point.
+        #
+        # Checked before the role gate deliberately: every role may block or
+        # escalate, and "use do_block" is the more actionable message.
         verb = "do_block" if to == "blocked" else "do_escalate"
         raise ValueError(f"use {verb} to reach {to!r}, not a plain handoff")
+    allowed = ROLE_MAY_HAND_TO.get(role)
+    if allowed is None:
+        # Not a default-allow: a typo in FLEET_ROLE would otherwise be a
+        # privilege escalation rather than an error.
+        raise ValueError(f"unknown role {role!r}; cannot check what it may hand to")
+    if to not in allowed:
+        permitted = ", ".join(sorted(allowed)) or "nothing"
+        hint = " -- use `fleet verdict`" if role in VERDICT_ROLES else ""
+        raise ValueError(f"role {role!r} may not hand to {to!r}; it may hand to {permitted}{hint}")
     gh.get_issue(task)
-    return _post(cfg, gh, build_handoff(task=task, to=to, **kw), to)
+    return _post(cfg, gh, build_handoff(task=task, to=to, role=role, **kw), to)
 
 
 def do_block(cfg: FleetConfig, gh: GhClient, *, task: int, on: int, **kw) -> dict:
