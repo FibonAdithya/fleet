@@ -4,7 +4,7 @@ import dataclasses
 from datetime import datetime, timezone
 
 from fleet.decide import decide
-from fleet.model import AgentState, Dispatch, Drain, FleetState, Release, Task
+from fleet.model import AgentState, Dispatch, Drain, Escalate, FleetState, Release, Task
 from test_decide_reap import POLICY
 
 T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
@@ -301,3 +301,46 @@ def test_a_class_with_no_route_is_not_dispatched():
     core."""
     intents, _ = decide(FleetState(), [ready(9, "docs", klass="spec")], POLICY, [], T0)
     assert dispatched(intents) == []
+
+
+def test_a_ready_task_the_policy_cannot_route_is_escalated():
+    """Not dispatching it is right; saying nothing about it is not. A READY,
+    auto-ok task whose class has no route was skipped silently on every tick --
+    no intent, no runlog line, and `fleet plan` printing "no action" -- so it sat
+    in READY for the whole night with nothing able to notice. A human is the only
+    thing that can route it, so name one."""
+    intents, _ = decide(FleetState(), [ready(9, "docs", klass="spec")], POLICY, [], T0)
+    assert Escalate(task=9, reason="unroutable") in intents
+
+
+def test_a_ready_task_with_no_class_label_at_all_is_escalated():
+    """The other way to be unroutable: no `class:` label, so `route_for(None)`
+    is empty. Same silence, same fix."""
+    intents, _ = decide(FleetState(), [ready(9, "docs", klass=None)], POLICY, [], T0)
+    assert Escalate(task=9, reason="unroutable") in intents
+
+
+def test_an_unroutable_task_is_escalated_even_with_no_free_slots():
+    """The escalation is a fact about the policy, not about capacity. Catches
+    folding this into the dispatch loop, where `free <= 0` breaks out first and a
+    full fleet hides the misconfiguration for exactly as long as it is busy."""
+    small = dataclasses.replace(POLICY, slots=1)
+    agents = [AgentState(task=1, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [live(), ready(9, "docs", klass="spec")], small, agents, T0)
+    assert Escalate(task=9, reason="unroutable") in intents
+
+
+def test_an_unroutable_task_that_is_not_auto_ok_is_left_alone():
+    """auto-ok is a human's approval for unattended work. Its absence is why the
+    task is sitting in READY, so waking a human about it is noise, not signal."""
+    intents, _ = decide(
+        FleetState(), [ready(9, "docs", klass="spec", auto_ok=False)], POLICY, [], T0
+    )
+    assert intents == []
+
+
+def test_a_closed_unroutable_task_is_not_escalated():
+    """A CLOSED issue is not a task, here as everywhere else."""
+    closed = dataclasses.replace(ready(9, "docs", klass="spec"), is_open=False)
+    intents, _ = decide(FleetState(), [closed], POLICY, [], T0)
+    assert intents == []

@@ -240,6 +240,71 @@ def test_a_reaped_agents_final_cost_reaches_the_running_total():
     assert state.spent_usd == 1.5
 
 
+def test_reaping_a_task_drops_the_observation_it_no_longer_describes():
+    """An Observation describes one agent's sequence. Once that agent is reaped
+    the entry is about a process that no longer exists, and it was carried
+    forward for the rest of the night: `seen` only ever grew, and the stall timer
+    of the task's NEXT agent started from the dead one's `since` unless the
+    replacement's sequence happened to differ."""
+    prev = FleetState(seen=((1, Observation(change_seq=10, since=T0)),))
+    agents = [AgentState(task=1, status="dirty", change_seq=10)]
+    _, state = decide(prev, [claimed()], POLICY, agents, T0)
+    assert state.observation(1) is None
+
+
+def test_escalating_a_task_drops_its_observation_too():
+    """Every reaping intent ends the agent, so every one of them ends the
+    observation. Catches a prune that handles Release alone."""
+    prev = FleetState(seen=((1, Observation(change_seq=10, since=T0)),))
+    agents = [AgentState(task=1, status="dirty", change_seq=10)]
+    intents, state = decide(prev, [claimed(attempts=2)], POLICY, agents, T0)
+    assert Escalate(task=1, reason="attempts_exhausted") in intents
+    assert state.observation(1) is None
+
+
+def test_advancing_a_task_drops_its_observation():
+    task = claimed(packet={"to": "review", "head_sha": "a91c204"})
+    prev = FleetState(seen=((1, Observation(change_seq=10, since=T0)),))
+    agents = [AgentState(task=1, status="done", change_seq=10)]
+    _, state = decide(prev, [task], POLICY, agents, T0)
+    assert state.observation(1) is None
+
+
+def test_a_drift_release_keeps_the_observation_the_snapshot_merely_lost():
+    """The boundary of the prune. `no_agent` is emitted exactly when the snapshot
+    shows no agent, which is also what a herdr query racing a pane restart looks
+    like -- so pruning on every reaping intent would discard the idle clock of an
+    agent that only flickered, undoing `_observe`'s carry-forward one line later.
+    Catches a prune written as `_stopped(intents)` with no intersection."""
+    prev = FleetState(seen=((1, Observation(change_seq=10, since=T0)),))
+    intents, state = decide(prev, [claimed()], POLICY, [], T0 + timedelta(minutes=5))
+    assert Release(task=1, reason="no_agent", attempt=2) in intents
+    assert state.observation(1) == Observation(change_seq=10, since=T0)
+
+
+def test_a_live_agents_observation_survives_the_tick():
+    """The other half: pruning must not eat the timer of an agent that is still
+    running, or nothing is ever detected as stalled again."""
+    prev = FleetState(seen=((1, Observation(change_seq=10, since=T0)),))
+    agents = [AgentState(task=1, status="working", change_seq=11)]
+    _, state = decide(prev, [claimed()], POLICY, agents, T0 + timedelta(minutes=1))
+    assert state.observation(1) == Observation(change_seq=11, since=T0 + timedelta(minutes=1))
+
+
+def test_a_replacement_agent_starts_its_stall_timer_from_scratch():
+    """The consequence worth having. Release, re-dispatch, and the new agent's
+    first observation is its own -- so a replacement cannot inherit a `since`
+    that is already older than the stall threshold and be released on sight."""
+    prev = FleetState(seen=((1, Observation(change_seq=10, since=T0)),))
+    _, released = decide(prev, [claimed()], POLICY, [AgentState(1, "dirty", 10)], T0)
+    fresh = T0 + timedelta(minutes=30)
+    replacement = [AgentState(task=1, status="working", change_seq=10)]
+    intents, state = decide(released, [claimed(attempts=2)], POLICY, replacement, fresh)
+    assert state.observation(1) == Observation(change_seq=10, since=fresh)
+    assert only(intents, Release) == []
+    assert only(intents, Escalate) == []
+
+
 def test_state_is_derived_and_carries_no_authority():
     """FleetState holds observations and spend, nothing else. Anything that
     looks like task state or ownership belongs in the ledger."""

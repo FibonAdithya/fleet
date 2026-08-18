@@ -197,6 +197,31 @@ def _unblock(ledger: list[Task]) -> list[Intent]:
     ]
 
 
+def _unroutable(ledger: list[Task], policy: Policy) -> list[Intent]:
+    """READY, auto-ok tasks the policy cannot route. A human is the only fix.
+
+    Not dispatching them is right -- `route[0]` on an empty route is an
+    IndexError out of the pure core. Saying nothing about them is not: the task
+    was skipped silently on every tick, with no intent, no runlog line and
+    `fleet plan` printing "no action", so a missing `class:` label or a class
+    absent from task-classes.md parked real work in READY for the whole night
+    with nothing able to notice.
+
+    Its own phase rather than a branch in `_dispatch`, so the escalation is not
+    gated on a free slot or a free area: it is a fact about the policy, not about
+    capacity, and a full fleet would otherwise hide the misconfiguration for
+    exactly as long as it stayed busy.
+
+    `auto_ok` is required. Its absence is a human's decision not to run this task
+    unattended, which is why it is sitting in READY -- escalating that is noise.
+    """
+    return [
+        Escalate(task=task.number, reason="unroutable")
+        for task in ledger
+        if task.state == "ready" and task.auto_ok and not policy.route_for(task.klass)
+    ]
+
+
 def _dispatch(
     ledger: list[Task], policy: Policy, agents: list[AgentState], spent_usd: float
 ) -> list[Intent]:
@@ -267,13 +292,18 @@ def _dispatch(
     return intents
 
 
+def _stopped(intents: list[Intent]) -> set[int]:
+    """The tasks whose agent this tick ends. One definition, two readers: the
+    cost that becomes final and the observation that stops describing anything."""
+    return {i.task for i in intents if isinstance(i, _REAPING)}
+
+
 def _final_cost(intents: list[Intent], agents: list[AgentState]) -> float:
     """Only a reaped agent's cost is final, so only a reaped agent's cost lands
     in the running total. `AgentState.cost_usd` is cumulative per agent: adding
     every live agent every tick re-adds the same dollars, and six agents at
     $0.50 drain a $25 fleet in seven ticks of a night that spent three."""
-    stopped = {i.task for i in intents if isinstance(i, _REAPING)}
-    return sum(a.cost_usd for a in agents if a.task in stopped)
+    return sum(a.cost_usd for a in agents if a.task in _stopped(intents))
 
 
 def decide(
@@ -289,9 +319,21 @@ def decide(
     intents: list[Intent] = []
     intents += _reap(open_ledger, policy, agents, observations, now)
     intents += _unblock(open_ledger)
+    intents += _unroutable(open_ledger, policy)
     intents += _dispatch(open_ledger, policy, agents, prev.spent_usd)
+    # An observation describes one agent's sequence, so it dies with that agent:
+    # carried forward past the reap, the task's NEXT agent inherits a `since`
+    # from the dead one -- a stall timer already running before the replacement
+    # has done anything at all.
+    #
+    # Intersected with the agents actually seen this tick, not applied to every
+    # reaping intent. A `no_agent` release is emitted precisely when the snapshot
+    # shows no agent, and pruning on it would discard the timer of an agent that
+    # merely flickered -- the carry-forward in `_observe` exists to survive that
+    # exact gap, and dropping the entry here would undo it one line later.
+    stopped = _stopped(intents) & {a.task for a in agents}
     state = FleetState(
-        seen=tuple(sorted(observations.items())),
+        seen=tuple(sorted((t, o) for t, o in observations.items() if t not in stopped)),
         spent_usd=prev.spent_usd + _final_cost(intents, agents),
     )
     return intents, state
