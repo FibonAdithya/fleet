@@ -263,6 +263,31 @@ four-role patch route still ends at the integrator. M4 will still edit this
 table: an invariant-review stage needs a state label of its own. Three explicit
 rows are a better thing to edit than a positional assumption.
 
+**A continuation is not new work, and `_dispatch` has to stop treating it as
+such.** `review` and `integrating` are in `_LIVE`, so a task in either state
+already holds its area and its slot — *itself*. Left as written, every one of
+`_dispatch`'s three guards refuses it: its area is held (by it), a slot is
+consumed (by it), and at six live tasks `free` is zero. The task would never
+reach its reviewer, which is the deadlock this section exists to remove.
+
+So `_dispatch` runs in two passes. Continuations first — tasks at `review` or
+`integrating`, matched against the areas and agents of *other* live tasks, and
+not charged a slot, because the slot is one they already hold. New work second,
+from READY, under the existing area, slot and budget rules. Splitting the passes
+is also what keeps the deadlock impossible rather than merely unlikely: a full
+fleet can always finish what it started.
+
+**The integration lock widens with them.** M2 keys it on `klass == "integration"`,
+which was complete when nothing could dispatch an integrator any other way. It
+no longer is: a `class:patch` task at INTEGRATING has an integrator agent writing
+the `integration` branch, and two of those at once is precisely the collision the
+lock exists to prevent. The lock reads `klass == "integration" or state ==
+"integrating"`, and — like the area check — excludes the candidate itself.
+
+M2's existing division of the lock's two halves is preserved exactly, because
+`integration-lock.yaml` pins it: a live integrator blocks all *new* dispatch,
+while one dispatched by this tick blocks only other integrators in the same tick.
+
 ### 5.2 An agent that has handed off is never stopped
 
 Not in `m2-inputs.md`. `_reap` (`decide.py:146`) skips every task whose state is
@@ -292,6 +317,21 @@ state, because the agent already wrote the state; it joins `_REAPING`, so the
 retired agent's cost is finalised into `spent_usd` rather than being lost. REAP's
 loop widens from `claimed` to all three live states, and a `done` agent on a
 task that is no longer `claimed` retires instead of advancing.
+
+The retired agent is still in this tick's snapshot, so the next stage is
+dispatched on the **following** tick, once herdr stops reporting it. One
+`poll_seconds` per stage boundary is the cost; making it same-tick would mean
+`_dispatch` reading `_reap`'s intents, and a dispatch that depends on the order
+of phases within a tick is a worse thing to own than a minute of latency.
+
+**A reviewer or integrator that stalls or exits dirty escalates.** REAP's
+existing `_fail` is wrong for these states: `Release` relabels to READY, which
+would silently restart a task from its implementer and throw away a review that
+has already happened. `Escalate` is bounded, terminal, and honest — a stage that
+failed after the work was done is a human's problem. Without this rule the
+widened loop notices a stalled reviewer and does nothing about it, and the task
+holds its slot for the rest of the night, which is the defect §5.2 exists to
+remove rather than relocate.
 
 ### 5.3 The `_open` filter splits three ways
 
@@ -489,7 +529,8 @@ New unit coverage, each named against the mutation it catches:
 - route-position dispatch: a task at `review` dispatches the reviewer; a `spec`
   task at `review` escalates rather than raising
 - `Retire`: a `done` agent on a task at `review` is stopped, its cost finalised,
-  and the task is dispatchable on the same tick
+  and the task is dispatched on the next tick; a stalled agent on a task at
+  `review` escalates rather than releasing
 - the filter split: a CLOSED `fleet:claimed` row is released and its agent
   stopped; a closed dependency satisfies UNBLOCK; a closed row is not dispatched
 - rebase: an integrator handback releases at the *same* attempt number, and the
