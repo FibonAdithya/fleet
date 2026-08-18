@@ -11,6 +11,7 @@ from fleet.model import (
     Observation,
     Policy,
     Release,
+    Retire,
     Task,
 )
 
@@ -30,11 +31,11 @@ POLICY = Policy(
 )
 
 
-def claimed(number=1, attempts=1, **kw):
+def claimed(number=1, attempts=1, state="claimed", **kw):
     return Task(
         number=number,
         title="t",
-        state="claimed",
+        state=state,
         area="eval",
         klass="patch",
         auto_ok=True,
@@ -322,3 +323,53 @@ def test_state_is_derived_and_carries_no_authority():
     looks like task state or ownership belongs in the ledger."""
     _, state = decide(FleetState(), [claimed()], POLICY, [], T0)
     assert set(vars(state)) == {"seen", "spent_usd"}
+
+
+def test_a_finished_agent_on_a_reviewing_task_is_retired():
+    """The implementer ran `fleet handoff --to review`, which moved the label
+    itself, then exited. REAP used to skip every non-CLAIMED row, so this agent
+    was never stopped: it stayed in the snapshot, kept _dispatch's `busy` set
+    counting it, and the task could never reach a reviewer."""
+    task = claimed(number=5, state="review")
+    agents = [AgentState(task=5, status="done", change_seq=3, cost_usd=0.5)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Retire(task=5) in intents
+    assert not any(isinstance(i, (Release, Advance)) for i in intents)
+
+
+def test_a_working_agent_on_a_reviewing_task_is_left_alone():
+    """A reviewer mid-review is not a leak. Retiring on presence rather than on
+    an exited status would kill every reviewer one tick after it started."""
+    task = claimed(number=5, state="review")
+    agents = [AgentState(task=5, status="working", change_seq=3)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == []
+
+
+def test_a_stalled_reviewer_escalates_rather_than_releasing():
+    """_fail relabels to READY, which would restart the task from its
+    implementer and throw away a review that already happened. Escalate is
+    bounded and terminal; a stage that failed after the work was done is a
+    human's problem."""
+    task = claimed(number=5, state="review")
+    first = [AgentState(task=5, status="working", change_seq=3)]
+    _, state = decide(FleetState(), [task], POLICY, first, T0)
+    later = T0 + timedelta(minutes=POLICY.stall_minutes + 1)
+    intents, _ = decide(state, [task], POLICY, first, later)
+    assert intents == [Escalate(task=5, reason="stalled")]
+
+
+def test_a_dirty_integrator_escalates():
+    task = claimed(number=5, state="integrating")
+    agents = [AgentState(task=5, status="dirty", change_seq=3)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == [Escalate(task=5, reason="dirty_exit")]
+
+
+def test_a_reviewing_task_with_no_agent_is_left_alone():
+    """The gap between the implementer being retired and the reviewer starting
+    is one tick wide and entirely normal. Reading it as drift would release a
+    task that is waiting to be dispatched, burning an attempt for nothing."""
+    task = claimed(number=5, state="review")
+    intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert not any(isinstance(i, (Release, Escalate, Retire)) for i in intents)

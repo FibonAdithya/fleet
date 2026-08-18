@@ -144,9 +144,32 @@ def _reap(
     by_task = {a.task: a for a in agents}
     intents: list[Intent] = []
     for task in ledger:
-        if task.state != "claimed":
+        if task.state not in _LIVE:
             continue
         agent = by_task.get(task.number)
+        if task.state != "claimed":
+            # The agent moved the label itself -- `fleet handoff` for a review,
+            # `fleet verdict` for an integration -- and then exited. Nothing to
+            # advance and nothing to release. Retire it so the slot, the agent
+            # and the worktree come back.
+            #
+            # `agent is None` is NOT drift here: the one-tick gap between
+            # retiring one stage's agent and dispatching the next is ordinary,
+            # and reading it as drift would release a task that is merely
+            # waiting its turn.
+            if agent is None:
+                continue
+            if agent.status in ("done", "dirty"):
+                intents.append(
+                    Retire(task=task.number)
+                    if agent.status == "done"
+                    else Escalate(task=task.number, reason="dirty_exit")
+                )
+            elif _stalled(task, observations, policy, now):
+                # Not _fail: Release relabels to READY, restarting the task from
+                # its implementer and discarding a review that already happened.
+                intents.append(Escalate(task=task.number, reason="stalled"))
+            continue
         if agent is None:
             # Ledger drift, and spec §5's table states this row unconditionally:
             # herdr's state is the tiebreaker. Escalating at the attempt cap
