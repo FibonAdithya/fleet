@@ -1,0 +1,42 @@
+name: check
+
+# `make check` is the repo's whole gate -- ruff check, ruff format --check, and
+# pytest. Running it here rather than a hand-copied set of steps is deliberate:
+# a workflow that lists the commands separately drifts from the Makefile, and
+# the half that drifts is always the one nobody runs locally.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A force-push supersedes its own in-flight run rather than racing it.
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --locked, not --frozen: it fails if uv.lock disagrees with
+      # pyproject.toml rather than quietly resolving something else, so CI tests
+      # the dependency set the lockfile actually pins. rfc3339-validator is the
+      # reason that matters here -- jsonschema silently skips "date-time"
+      # format checking unless it is installed, so a resolution that dropped it
+      # would leave handoff.schema.json's `from.run` format unenforced and every
+      # test still green.
+      - name: Install the pinned dependency set
+        run: uv sync --locked --dev
+
+      - name: make check
+        run: make check
