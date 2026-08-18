@@ -13,6 +13,7 @@ AUTO_OK = "fleet:auto-ok"
 # a vocabulary that disagrees with policy is a label gh has never heard of.
 DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_MAX_FIX_PASSES = 1
+DEFAULT_MAX_REBASES = 1
 
 
 def state_label(name: str) -> str:
@@ -45,6 +46,12 @@ def fix_pass_label(n: int) -> str:
     return f"fleet:fix-pass-{n}"
 
 
+def rebase_label(n: int) -> str:
+    if n < 1:
+        raise ValueError("rebases start at 1")
+    return f"fleet:rebase-{n}"
+
+
 def all_state_labels() -> list[str]:
     return [f"fleet:{s}" for s in STATES]
 
@@ -52,6 +59,7 @@ def all_state_labels() -> list[str]:
 def static_vocabulary(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     max_fix_passes: int = DEFAULT_MAX_FIX_PASSES,
+    max_rebases: int = DEFAULT_MAX_REBASES,
 ) -> set[str]:
     """Exactly the labels created up front in the target repo. Anything outside
     this set is generated at runtime and must be created before it is applied.
@@ -70,4 +78,5 @@ def static_vocabulary(
         *(f"class:{c}" for c in CLASSES),
         *(attempt_label(n) for n in range(1, max_attempts + 1)),
         *(fix_pass_label(n) for n in range(1, max_fix_passes + 1)),
+        *(rebase_label(n) for n in range(1, max_rebases + 1)),
     }

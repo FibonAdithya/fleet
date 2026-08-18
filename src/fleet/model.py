@@ -32,6 +32,7 @@ class Task:
     auto_ok: bool
     attempts: int = 0
     fix_passes: int = 0
+    rebases: int = 0
     assignee: str | None = None
     is_open: bool = True
     blocked_on: int | None = None
@@ -94,6 +95,7 @@ class Policy:
     stall_minutes: int
     max_attempts: int
     max_fix_passes: int
+    max_rebases: int
     per_task_usd: float
     fleet_usd: float
     integration_branch: str

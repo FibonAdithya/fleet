@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES
+from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES, DEFAULT_MAX_REBASES
 
 try:
     import tomllib
@@ -56,6 +56,7 @@ class FleetConfig:
     stall_minutes: int
     max_attempts: int
     max_fix_passes: int
+    max_rebases: int
     per_task_usd: float
     fleet_usd: float
 
@@ -84,6 +85,7 @@ def load_config(start: Path | None = None) -> FleetConfig:
         stall_minutes=int(fleet.get("stall_minutes", 10)),
         max_attempts=int(fleet.get("max_attempts", DEFAULT_MAX_ATTEMPTS)),
         max_fix_passes=int(fleet.get("max_fix_passes", DEFAULT_MAX_FIX_PASSES)),
+        max_rebases=int(fleet.get("max_rebases", DEFAULT_MAX_REBASES)),
         per_task_usd=_positive(
             float(budget.get("per_task_usd", DEFAULT_PER_TASK_USD)), "per_task_usd"
         ),

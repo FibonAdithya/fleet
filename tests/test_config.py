@@ -84,6 +84,22 @@ BUDGET_TOML = (
 )
 
 
+def test_max_rebases_defaults_to_one(tmp_path):
+    (tmp_path / "fleet.toml").write_text(
+        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
+        'roles = "r"\nschemas = "s"\n'
+    )
+    assert load_config(tmp_path).max_rebases == 1
+
+
+def test_max_rebases_is_read_from_fleet_toml(tmp_path):
+    (tmp_path / "fleet.toml").write_text(
+        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
+        'roles = "r"\nschemas = "s"\n[fleet]\nmax_rebases = 3\n'
+    )
+    assert load_config(tmp_path).max_rebases == 3
+
+
 def test_a_zero_fleet_budget_is_refused(tmp_path):
     """decide() used to guard the drain with `fleet_usd > 0`, so zero meant the
     rule never fired and an overnight run had no fleet-wide ceiling at all -- a

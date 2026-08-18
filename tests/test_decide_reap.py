@@ -24,6 +24,7 @@ POLICY = Policy(
     stall_minutes=10,
     max_attempts=2,
     max_fix_passes=1,
+    max_rebases=1,
     per_task_usd=2.0,
     fleet_usd=25.0,
 )

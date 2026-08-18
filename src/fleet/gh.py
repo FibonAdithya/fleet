@@ -131,6 +131,7 @@ class FakeGh:
         self,
         max_attempts: int = labels_module.DEFAULT_MAX_ATTEMPTS,
         max_fix_passes: int = labels_module.DEFAULT_MAX_FIX_PASSES,
+        max_rebases: int = labels_module.DEFAULT_MAX_REBASES,
     ) -> None:
         self.issues: dict[int, dict] = {}
         self._next = 1
@@ -138,7 +139,7 @@ class FakeGh:
         # A fake standing in for a repo seeded under a different policy needs the
         # same counters that repo was seeded with, or its idea of "this label
         # exists" diverges from the real one. See labels.static_vocabulary.
-        self.vocabulary = labels_module.static_vocabulary(max_attempts, max_fix_passes)
+        self.vocabulary = labels_module.static_vocabulary(max_attempts, max_fix_passes, max_rebases)
 
     def _check_labels(self, names: list[str]) -> None:
         """Mirror gh: naming a label that does not exist fails the whole edit and
