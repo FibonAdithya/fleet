@@ -143,6 +143,7 @@ def test_no_intent_or_effect_exists_that_nothing_emits():
         "Escalate",
         "Unblock",
         "Advance",
+        "Retire",
         "Drain",
     }
     assert {t.__name__ for t in get_args(Effect)} == {

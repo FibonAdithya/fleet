@@ -26,12 +26,13 @@ from fleet.model import (
     Observation,
     Policy,
     Release,
+    Retire,
     Task,
     Unblock,
 )
 
 # Intents whose expansion stops the agent, so that agent's cost is final.
-_REAPING = (Advance, Release, Escalate)
+_REAPING = (Advance, Release, Escalate, Retire)
 
 _DRAIN_FRACTION = 0.8
 

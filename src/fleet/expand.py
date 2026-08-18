@@ -20,6 +20,7 @@ from fleet.model import (
     Intent,
     Policy,
     Release,
+    Retire,
     SetLabels,
     StartAgent,
     StopAgent,
@@ -86,6 +87,13 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
 
     if isinstance(intent, Unblock):
         return [_to_state(intent.task, "ready")]
+
+    if isinstance(intent, Retire):
+        # StopAgent for the same reason Advance carries one: an agent left in the
+        # executor's live set keeps reporting cost every tick, and the budget
+        # drain is computed from live agents. Assign(None) because the allocator
+        # is the sole writer of ownership and this task no longer has an owner.
+        return [StopAgent(task=intent.task), Assign(task=intent.task, owner=None)]
 
     if isinstance(intent, Advance):
         if intent.to not in labels_module.STATES:

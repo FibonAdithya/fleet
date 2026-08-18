@@ -241,6 +241,17 @@ def test_a_reaped_agents_final_cost_reaches_the_running_total():
     assert state.spent_usd == 1.5
 
 
+def test_a_retired_agent_s_cost_is_final():
+    """Cost is finalised by _REAPING membership. Left out, a whole stage's spend
+    -- every implementer that ever handed off -- is silently never counted, and
+    the fleet ceiling is short by that much for the entire night."""
+    from fleet.decide import _final_cost
+    from fleet.model import Retire
+
+    agents = [AgentState(task=5, status="done", change_seq=9, cost_usd=1.25)]
+    assert _final_cost([Retire(task=5)], agents) == 1.25
+
+
 def test_reaping_a_task_drops_the_observation_it_no_longer_describes():
     """An Observation describes one agent's sequence. Once that agent is reaped
     the entry is about a process that no longer exists, and it was carried

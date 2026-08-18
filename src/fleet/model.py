@@ -148,11 +148,28 @@ class Advance:
 
 
 @dataclass(frozen=True)
+class Retire:
+    """Stop an agent that has already written its own state transition.
+
+    An implementer ends its stage by running `fleet handoff --to review`, which
+    moves the label itself, and then exits. There is nothing to advance -- the
+    move already happened -- and nothing to release, because the task did not
+    fail. Without this intent the exited agent stays in herdr's snapshot, keeps
+    `_dispatch`'s `busy` set counting it, and holds the slot for the night.
+
+    No state field on purpose: this intent must not be able to express a
+    relabel, because the label is the one thing the agent got right.
+    """
+
+    task: int
+
+
+@dataclass(frozen=True)
 class Drain:
     reason: str
 
 
-Intent = Dispatch | Release | Escalate | Unblock | Advance | Drain
+Intent = Dispatch | Release | Escalate | Unblock | Advance | Retire | Drain
 
 
 # ---------------------------------------------------------------- effects

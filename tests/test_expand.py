@@ -11,6 +11,7 @@ from fleet.model import (
     Drain,
     Escalate,
     Release,
+    Retire,
     SetLabels,
     StartAgent,
     StopAgent,
@@ -133,6 +134,15 @@ def test_advance_refuses_a_state_outside_the_vocabulary():
     necessarily a state this repo's label set contains."""
     with pytest.raises(ValueError, match="unknown state"):
         expand(Advance(task=1, to="merged"), POLICY)
+
+
+def test_retire_stops_the_agent_and_changes_no_state():
+    """The agent wrote the state itself with `fleet handoff`. A SetLabels here
+    would overwrite the handoff's target with whatever the allocator last saw --
+    turning a task that reached REVIEW back into a CLAIMED one."""
+    effects = expand(Retire(task=5), POLICY)
+    assert effects == [StopAgent(task=5), Assign(task=5, owner=None)]
+    assert not any(isinstance(e, SetLabels) for e in effects)
 
 
 def test_drain_produces_no_effects():

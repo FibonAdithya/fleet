@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from conftest import FIXTURE_POLICY
-from fleet.model import Advance, Dispatch, Release
+from fleet.model import Advance, Dispatch, Release, Retire
 from fleet.runlog import RunLog
 from fleet.runlog import read as read_runlog
 from fleet.simulate import ScenarioError, load_scenario, render_intent, run
@@ -314,6 +314,17 @@ def test_a_seed_naming_both_a_ledger_and_inline_issues_is_refused():
 def test_render_intent_drops_base_and_nothing_else():
     intent = Dispatch(task=5, role="implementer", base="integration", attempt=2)
     assert render_intent(intent) == "Dispatch(5, implementer, 2)"
+
+
+def test_a_rendered_retire_is_a_recognized_intent_shape():
+    """decide() does not emit Retire yet -- Task 3 does -- but a scenario's
+    `expect:` list is checked against `_shape`, which refuses any name absent
+    from `_INTENTS`. Without Retire in that list, the first scenario Task 3
+    writes to prove it dies with `'Retire' is not an intent` before its
+    assertion is even compared."""
+    from fleet.simulate import _shape
+
+    assert _shape(render_intent(Retire(task=5))) == ("Retire", ("5",))
 
 
 def test_load_scenario_reads_yaml(tmp_path):
