@@ -1,0 +1,28 @@
+name: stall-releases
+proves: >-
+  parent §10 silent stall and parent §11 "stalled agent → released, attempt
+  incremented". Both halves are asserted: the release carries attempt 2, and the
+  re-dispatch a tick later carries it again, read back off the label.
+seed:
+  ledger: fixtures/ledger/issues.json
+  policy: fixtures/policy/fleet-fixture
+ticks:
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 1)"
+      - "Dispatch(2, implementer, 1)"
+      - "Dispatch(4, implementer, 1)"
+      - "Dispatch(5, implementer, 1)"
+      - "Dispatch(6, implementer, 1)"
+      - "Dispatch(9, planner, 1)"
+  # A first-seen agent has idle == 0, so a stall needs two frozen ticks. This is
+  # why spec §7's five-tick example escalates one tick early: its §5 rule binds,
+  # its example does not.
+  - outcomes: {1: stall}
+    expect: []
+  - outcomes: {1: stall}
+    expect:
+      - "Release(1, stalled, 2)"
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 2)"

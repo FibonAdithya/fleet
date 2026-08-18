@@ -1,5 +1,7 @@
 # Inputs to M2, carried out of M0–M1.5
 
+> Items resolved by M2 are marked inline. The rest carry forward to M3.
+
 Everything here was found by *executing* M0–M1.5, not by reading the plan. It is
 the agenda for the next milestone and for whatever re-planning precedes it.
 
@@ -15,6 +17,7 @@ exposed that **there is no way to record an approval**:
 `handoff`, `discover`, `block`, `escalate` and no `verdict`.
 
 - **Add `fleet verdict`** writing `verdict.schema.json` to the ledger.
+  **Resolved, M2 Task 6.**
 - **Amend `reviewer.md`** to say how an approval is recorded, once it exists.
 - **Amend `implementer.md`**: require recording a *resolved* ambiguity in
   `open_questions`. Agent A silently resolved a real contradiction in issue #1's
@@ -31,6 +34,9 @@ exposed that **there is no way to record an approval**:
 `auto-ok` eligibility — issue #6 is legitimately `area:configs` + `auto-ok`
 precisely because its criteria forbid touching `gates/`. An allocator that gates
 on area will either wrongly refuse #6 or wrongly permit a `gates/` edit.
+
+**Resolved, M2 Task 10** — `decide()` gates on the `fleet:auto-ok` label alone;
+path enforcement is the scout's and the integrator's.
 
 ## 3. Fixture validity — what the final review found
 
@@ -65,6 +71,10 @@ Still open:
 - **Rubric 04 asserts a label that will not be there at grade time.**
   `fleet:blocked` is removed by the next transition; only the timeline API or the
   run log can answer "was it ever applied".
+  **Mechanism resolved, M2 Task 13** — the run log records every intent as it
+  is applied, so `Unblock(4)` survives the transition that removes
+  `fleet:blocked`. The rubric still has to be rewritten to read the log
+  instead of the final ledger.
 - **Rubric 09 says 2 child issues; spec §4 says 3.**
 
 ### The grading mechanism needs rework before it can grade
@@ -98,9 +108,15 @@ for a reason unrelated to the orchestrator.
 - **Nothing binds a handoff's target state to the caller's role.** An implementer
   can hand its own task to `done`, skipping review and integration. Grading reads
   terminal state from labels, so a self-declared `done` scores as correct.
+  **Resolved, M2 Task 7.**
 - **`_post` can leave an issue with no state label.** It removes all eight then
   adds one; a failure between the two strands the task invisible to any label
   query. `gh issue edit --add-label X --remove-label Y` is one call.
+  **Resolved, M2 Tasks 6 and 11** — `expand()` emits one `SetLabels` carrying
+  both halves, so nothing the allocator writes has the window, and Task 6
+  moves the CLI's own label changes through `_move_state`, which carries a
+  state and its counter label in one `add_labels` call so a counter cannot
+  land without its state.
 - **No dirty-worktree check before a handoff.** An implementer that forgets to
   commit hands the reviewer a `head_sha` that does not contain the work, and both
   packet and verdict validate.
@@ -108,6 +124,7 @@ for a reason unrelated to the orchestrator.
   (`Path.home() / "TIG/fleet-fixture/.agents/schemas"`) and validates against that
   repo's *working tree*. Vendor a copy or skip when absent. It is now in
   `tests/conftest.py` only, so that is a one-line change rather than three.
+  **Resolved, M2 Task 1.**
 - **`discover` cannot file what `planner.md` requires** — it accepts only
   parent/title/area/evidence with a fixed body template, but a planner must give
   each child a class and acceptance criteria. Issue 9 is not completable as
@@ -144,3 +161,154 @@ M2 builds `decide()` and tests it against both the fake and captured real
 fixtures (`fixtures/ledger/issues.json`). **That is exactly where this class of
 defect does its damage.** The plan for M2 should treat "does the fake still
 behave like the real client" as a standing test obligation, not a review finding.
+
+## 7. What M2 deliberately did not cover
+
+Each of these is a claim the design asks for and M2 cannot honestly make. They
+are written down rather than left to be rediscovered by whoever counts seven
+scenario files against ten claims.
+
+- **Conflict storm** (parent §10). `FakeExecutor` scripted a `conflict` outcome
+  that arrived at `decide()` as a dirty exit — same status, same everything — so
+  no assertion could distinguish the two and a conflict scenario would have
+  proved only what the dirty-exit scenario already proves. The outcome was
+  removed rather than kept as coverage that is not coverage. The row needs an
+  executor that can report a reason: `HerdrExecutor`, in M3.
+- **Orphaned worktree** (parent §10). There are no worktrees and no reaper in
+  M2; `HerdrExecutor` is an explicit spec §1 non-goal.
+- **Duplicate discoveries** (parent §10). Not an allocator rule at all —
+  `fleet discover` searches existing issues first, and `tests/test_discover.py`
+  covers it. `decide()` never sees the case.
+- **Epic fan-in** (parent §11, "last epic child closes → integration task
+  auto-created"). `CreateIntegrationTask` and `CreateIssue` were defined in
+  `model.py` and emitted by nothing, which forces either a dead branch in
+  `expand()` or an unhandled member of the `Intent` union; both types were
+  removed. Fan-in needs `parent_epic` populated and nothing writes it —
+  `discover` cannot file a child with a class or a parent link (§5 above).
+  **M3 re-adds the two intents if it wants them.** Carrying unused types forward
+  would only make the gap look closed.
+- **The REVIEW exit is unit-tested, not scenario-tested.** `fleet verdict`
+  performs the transition, not `decide()`: approved → `fleet:integrating`,
+  `changes_required` → `fleet:ready` plus `fleet:fix-pass-N`, or `fleet:human`
+  once the cap is spent. Spec §5 ruling 4 is therefore covered by
+  `tests/test_commands.py`, and no scenario drives an approval or a fix pass,
+  because a scenario replays `decide()` and never runs a CLI command. The
+  consequence a scenario author has to know: a task that reaches `fleet:review`
+  during a simulated night stays there, holding its area and its slot, because
+  nothing in the simulation can issue the verdict that would move it.
+- **`slots` binds in no scenario independently of area exclusion.** The captured
+  ledger's first tick dispatches six tasks with six free areas and six free
+  slots, so either rule alone explains the number.
+  `tests/test_decide_dispatch.py` pins the bound directly; a scenario cannot,
+  because nothing lets a scenario override a policy field.
+- **The `investigation` route drops a prose constraint.** `task-classes.md`
+  writes that route as ``implementer, forbidden from writing `src/` ``.
+  `parse_routes` takes the leading role token and discards the rest: the
+  constraint is a role-prompt rule, not an allocator input, and a route
+  resolving to a "role" named ``implementer, forbidden from writing `src/` ``
+  is a role no `roles_dir` contains. Enforcing it stays with `implementer.md`
+  and the reviewer, which is where it already was.
+- **`Assign` has no executor.** `expand()` emits it — with `owner=None`, on
+  `Release` and `Escalate` — but no `GhClient` method can carry it out;
+  `FakeExecutor.apply` reacts only to `StartAgent`/`StopAgent` and drops every
+  `SetLabels` and `Assign` it is handed. M3's executor, which knows its own
+  identity, owns the assigning half.
+- **Two entries in `ROLE_MAY_HAND_TO` are choices, not derivations.**
+  `commands.py` maps `scout` to the empty set and `planner` to `{review}`, and
+  neither follows from a role prompt. `scout.md`'s step 5 is "promote to
+  `fleet:ready`", but `ready` is not in `handoff.schema.json`'s `to` enum at
+  all, so no handoff can express a scout's write and the empty set is the only
+  honest mapping — a scout promotes by relabelling, not by handing over.
+  `planner.md` names no target state whatsoever; `review` was chosen because it
+  is the only non-terminal member of that enum, `done` being the state parent §4
+  reserves for the integrator. If M3 gives either role a real target, it comes
+  from amending the schema's enum in the fixture repo, not from widening the map
+  here.
+- **`integrator → claimed` collides with the drift rule.** `commands.py` lets an
+  integrator hand a task back to CLAIMED for a rebase, faithfully implementing
+  `integrator.md`. But nothing starts an agent at that moment, so the next tick
+  reads the task as ledger drift and `_reap` releases it — spending a dispatch
+  attempt and inflating `fleet:attempt-N`, which is exactly what the grader's
+  "no task exceeds 2 attempts" hard fail reads. It is the same collision
+  `_verdict_target` routes around by targeting READY rather than CLAIMED.
+  **The behaviour is deliberately unchanged in M2**: `ready` is not in the
+  handoff schema's `to` enum, so routing there is not schema-legal without
+  editing the fixture repo, which is out of bounds for this milestone. M3
+  resolves it either by adding `ready` to the enum or by not treating a
+  just-handed-back task as drift.
+- **`Task.packet` carries no binding to the attempt it came from.**
+  `FakeExecutor` drops a task's packet on `StartAgent`, so a re-dispatched task
+  cannot advance on the failed attempt's packet. `Task` has no field a real
+  shell could use to make the same guarantee, and M3's shell will fetch the last
+  handoff comment off an issue that persists across attempts — so a stale packet
+  from attempt 1 is readable on attempt 2 and would advance work that never
+  happened. **This is a contract M3's shell must honour**: either carry the
+  attempt number on the packet and refuse one that does not match the task's
+  current `fleet:attempt-N`, or fetch only comments written after the current
+  attempt's dispatch.
+- **A closed dependency no longer satisfies UNBLOCK.** `_open`
+  (`src/fleet/decide.py`) filters closed issues out of the ledger before all
+  three phases. For REAP and DISPATCH that is correct and is what parity with
+  `list_issues("open")` requires. For UNBLOCK it is a narrowing: a blocker
+  that is `fleet:done` *and* closed — the ordinary end state of a completed
+  task — is dropped from the ledger before `_unblock` builds its `done` set,
+  so the task it should release is never released. Nothing else can move a
+  BLOCKED row: REAP touches only CLAIMED, DISPATCH only READY. The task holds
+  no slot and no area, so the fleet does not deadlock; that one task simply
+  never runs.
+
+  Inert in M2 for two independent reasons — not the parity argument the
+  `_open` docstring frames it under, which forces the filter for REAP and
+  DISPATCH but buys UNBLOCK nothing. What actually keeps it harmless: nothing
+  in the repo can close an issue (`close_issue` is on `FakeGh` alone, absent
+  from the `GhClient` Protocol and from `RealGh` — confirmed, §5 above already
+  says as much), and only the simulator supplies packets at all —
+  `do_plan` (`src/fleet/cli.py`) calls `ledger.read(gh.list_issues("open"))`
+  with no `packets` argument, so every `Task.blocked_on` is `None` and
+  UNBLOCK is unreachable through the CLI regardless of the filter.
+
+  M3 removes both accidents on day one: its shell fetches handoff comments,
+  so `blocked_on` is populated, and closing an issue on completion is
+  ordinary. The smallest correct change:
+
+  ```python
+  def _unblock(ledger: list[Task], all_rows: list[Task]) -> list[Intent]:
+      done = {t.number for t in all_rows if t.state == "done" or not t.is_open}
+  ```
+
+  called as `_unblock(open_ledger, ledger)` — a closed issue IS a satisfied
+  dependency whatever label it still carries. The query-side half is easy to
+  miss: once M3's shell fetches packets, its ledger query must be `all`, not
+  `open`, or the CLI reintroduces the same wedge from the query side.
+- **A CLOSED row still labelled `fleet:claimed` leaks its agent.** Same
+  filter, a second consequence, unrecorded until now. Because `_open` runs
+  before `_reap`, a closed row still carrying `fleet:claimed` produces no
+  `Release` and therefore no `StopAgent` — the agent runs on. A ledger of
+  `[#5 CLOSED fleet:claimed area:eval, #8 OPEN fleet:ready area:eval]` with a
+  live agent on #5 yields `Dispatch(8, implementer, 1)`: a second agent starts
+  in an area an agent is still live in, and #5's agent is never stopped. Its
+  cost still counts toward the fleet ceiling while nothing can stop it.
+  Before this filter existed, #5 would have been released and its agent
+  stopped — REAP used to see every CLAIMED row regardless of open state.
+
+  Unreachable in M2 for the same two reasons as the UNBLOCK finding above,
+  plus one more specific to this path: the simulator's row fold applies only
+  `SetLabels` (`src/fleet/simulate.py`), so no scenario can close a row
+  mid-run — there is no way to construct the ledger this needs even inside
+  the harness.
+
+  M3 inherits it the same day it inherits the UNBLOCK narrowing: once closing
+  an issue on completion is real, a REAP pass that skips closed rows before
+  checking for a live agent stops being "correct behaviour on an unreachable
+  case" and becomes a leak. REAP needs to see a closed-but-still-claimed row
+  in order to release it, even though DISPATCH and UNBLOCK must not act on a
+  closed row at all — the filter cannot stay a single blanket `_open()` call
+  shared by all three phases.
+- **The fixture repo's `reviewer.md` is now stale.** It still instructs
+  `fleet handoff --task <n> --to claimed`, which this milestone refuses — a
+  reviewer's allowed handoff targets are the empty set, and the refusal names
+  `fleet verdict` instead. That file lives in `~/TIG/fleet-fixture`, a
+  different repo from this one; do not edit it here, and do not edit the
+  vendored copy in `fixtures/policy/fleet-fixture` either, since either edit
+  would break the fidelity of the capture. It must be updated in the fixture
+  repo itself before an overnight run.

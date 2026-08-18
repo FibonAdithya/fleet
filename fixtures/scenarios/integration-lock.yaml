@@ -1,0 +1,45 @@
+name: integration-lock
+proves: >-
+  harness amendment 2: while a class:integration task is live the allocator
+  dispatches nothing new, in any area. Hand-written because
+  fixtures/ledger/issues.json contains no class:integration task -- the fixture
+  repo has never run an integration. Tick 1 is the positive control, tick 3 is
+  the lock with two free areas and five free slots, tick 5 is dispatch resuming
+  once the integrator finishes.
+seed:
+  policy: fixtures/policy/fleet-fixture
+  issues:
+    - {number: 1, title: "estimate_lid crashes for small samples", state: OPEN, assignees: [],
+       labels: ["fleet:ready", "fleet:auto-ok", "area:eval", "class:patch"]}
+    - {number: 2, title: "train() history is a random walk", state: OPEN, assignees: [],
+       labels: ["fleet:ready", "fleet:auto-ok", "area:train", "class:patch"]}
+    - {number: 20, title: "integrate the reporting epic", state: OPEN, assignees: [],
+       labels: ["fleet:ready", "fleet:auto-ok", "class:integration"]}
+ticks:
+  # The lock is on tasks already live, so all three start together. An
+  # integration task carries no area and holds none.
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 1)"
+      - "Dispatch(2, implementer, 1)"
+      - "Dispatch(20, integrator, 1)"
+  # Reaping is not suppressed by the lock; dispatching is.
+  - outcomes: {1: dirty_exit, 2: dirty_exit}
+    expect:
+      - "Release(1, dirty_exit, 2)"
+      - "Release(2, dirty_exit, 2)"
+  # The load-bearing tick: #1 and #2 are READY again, area:eval and area:train
+  # are free, five slots are free, and nothing is dispatched -- because the
+  # integrator touches every area by definition and per-area exclusion does not
+  # cover it.
+  - outcomes: {}
+    expect: []
+  - outcomes: {20: clean_exit}
+    packets: {20: {to: done}}
+    expect:
+      - "Advance(20, done)"
+  # The lock lifts and both areas resume, at the attempt each task had reached.
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 2)"
+      - "Dispatch(2, implementer, 2)"

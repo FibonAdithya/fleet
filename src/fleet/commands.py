@@ -5,29 +5,87 @@ from __future__ import annotations
 from fleet import labels
 from fleet.config import FleetConfig
 from fleet.gh import GhClient
+from fleet.ledger import read_one
 from fleet.packet import build_handoff, render
 from fleet.schemas import validate
+
+# Which target states each role may write with a plain handoff. An implementer
+# that can reach `done` skips review and integration, and since grading reads
+# terminal state from labels, a self-declared `done` scores as rubric-correct.
+# This is the mechanical half of parent §4's "give every state one writer".
+#
+# `reviewer` and `invariant-reviewer` map to the empty set on purpose: spec §5
+# ruling 4 makes a verdict REVIEW's only exit, so a reviewer that could hand to
+# `claimed` would leave REVIEW without recording a verdict and without spending
+# a fix pass -- the counter `decide()` reads to stop a review loop.
+# `scout` is empty for a different reason: scout.md's step 5 is "promote to
+# fleet:ready", and `ready` is not in handoff.schema.json's `to` enum at all, so
+# no handoff can express a scout's write. `planner`'s `review` is a choice, not
+# a derivation -- planner.md names no target state, and `review` is the only
+# non-terminal member of that enum. Both are recorded in docs/m2-inputs.md §7.
+#
+# `integrator`'s `claimed` is faithful to integrator.md -- a rebase hands the
+# task back -- but nothing starts an agent at that moment, so the next tick
+# reads it as ledger drift and spends an attempt. Left as-is in M2 and recorded
+# in the same section: routing to `ready` instead is not schema-legal without
+# editing the fixture repo.
+ROLE_MAY_HAND_TO: dict[str, frozenset[str]] = {
+    "implementer": frozenset({"review"}),
+    "reviewer": frozenset(),
+    "invariant-reviewer": frozenset(),
+    "planner": frozenset({"review"}),
+    "integrator": frozenset({"done", "claimed"}),
+    "scout": frozenset(),
+}
+
+# Only a reviewing role writes a verdict. `invariant-reviewer` is in because
+# invariant-reviewer.md ends "Emit `approved` only if all five are `ok`" -- it
+# emits a verdict, on a narrower question. Every other role is the same
+# integrity hole ROLE_MAY_HAND_TO closes, arriving by the other door.
+VERDICT_ROLES = frozenset({"reviewer", "invariant-reviewer"})
+
+
+def _move_state(gh: GhClient, issue: int, state: str, add: list[str] | None = None) -> None:
+    """Move the task's state label, carrying any counter label with it.
+
+    Removing all eight and adding one is how the ledger keeps its "exactly one
+    state label" invariant. `add` rides in the same `add_labels` call so a
+    counter (`fleet:fix-pass-N`) cannot land without the state it belongs to.
+    """
+    gh.remove_labels(issue, labels.all_state_labels())
+    gh.add_labels(issue, [labels.state_label(state), *(add or [])])
 
 
 def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
     validate(cfg, "handoff", packet)
     issue = packet["task"]
     gh.comment(issue, render(packet))
-    gh.remove_labels(issue, labels.all_state_labels())
-    gh.add_labels(issue, [labels.state_label(state)])
+    _move_state(gh, issue, state)
     return packet
 
 
-def do_handoff(cfg: FleetConfig, gh: GhClient, *, task: int, to: str, **kw) -> dict:
+def do_handoff(cfg: FleetConfig, gh: GhClient, *, task: int, to: str, role: str, **kw) -> dict:
     if to in {"blocked", "human"}:
         # build_handoff would reject these anyway -- it requires blocked_on for
         # BLOCKED and question+considered for HUMAN -- but it can only say which
         # field is missing. Name the command instead: the caller's mistake is not
         # a forgotten argument, it is the wrong entry point.
+        #
+        # Checked before the role gate deliberately: every role may block or
+        # escalate, and "use do_block" is the more actionable message.
         verb = "do_block" if to == "blocked" else "do_escalate"
         raise ValueError(f"use {verb} to reach {to!r}, not a plain handoff")
+    allowed = ROLE_MAY_HAND_TO.get(role)
+    if allowed is None:
+        # Not a default-allow: a typo in FLEET_ROLE would otherwise be a
+        # privilege escalation rather than an error.
+        raise ValueError(f"unknown role {role!r}; cannot check what it may hand to")
+    if to not in allowed:
+        permitted = ", ".join(sorted(allowed)) or "nothing"
+        hint = " -- use `fleet verdict`" if role in VERDICT_ROLES else ""
+        raise ValueError(f"role {role!r} may not hand to {to!r}; it may hand to {permitted}{hint}")
     gh.get_issue(task)
-    return _post(cfg, gh, build_handoff(task=task, to=to, **kw), to)
+    return _post(cfg, gh, build_handoff(task=task, to=to, role=role, **kw), to)
 
 
 def do_block(cfg: FleetConfig, gh: GhClient, *, task: int, on: int, **kw) -> dict:
@@ -49,6 +107,94 @@ def do_escalate(
         task=task, to="human", question=question.strip(), considered=considered.strip(), **kw
     )
     return _post(cfg, gh, packet, "human")
+
+
+def _verdict_target(verdict: str, fix_passes: int, max_fix_passes: int) -> tuple[str, list[str]]:
+    """Where a verdict sends a task, and which counter label rides along.
+
+    Spec §5 ruling 4: approved -> INTEGRATING; `changes_required` -> another
+    implementer pass with fix passes += 1, or NEEDS_HUMAN once the cap is spent.
+    The counter IS the label -- `decide()` reads `fleet:fix-pass-N` back off the
+    ledger, so a round that does not write one is a round the allocator cannot
+    see, and an unattended run then cycles review -> ready -> review until the
+    stall timer or the budget stops it.
+
+    The fix-pass target is READY, not CLAIMED, though the spec's prose says
+    "back to CLAIMED". CLAIMED means an agent holds the task, and nothing starts
+    one at this moment; REAP reads a CLAIMED task with no live agent as ledger
+    drift and releases it, which spends an attempt. Spec §5 ruling 2 says a fix
+    pass costs no attempt, so CLAIMED here would break the rule this function
+    exists to enforce. READY leaves DISPATCH to pick it up with `attempt`
+    unchanged and leaves no window where a task is claimed by nobody.
+    """
+    if verdict == "approved":
+        return "integrating", []
+    if fix_passes >= max_fix_passes:
+        return "human", []
+    return "ready", [labels.fix_pass_label(fix_passes + 1)]
+
+
+def do_verdict(
+    cfg: FleetConfig,
+    gh: GhClient,
+    *,
+    task: int,
+    verdict: str,
+    head_sha: str,
+    reviewer: str,
+    role: str,
+    findings: list[dict],
+    checks_rerun: str | None = None,
+    packet_was_sufficient: bool | None = None,
+) -> tuple[dict, str]:
+    """Record a review verdict and move the task. REVIEW's only legal exit.
+
+    Returns the payload and the state the task landed in: `changes_required`
+    reaches two different states depending on the fix-pass counter, and the
+    reviewer is owed the answer.
+    """
+    if role not in VERDICT_ROLES:
+        # Without this an implementer approves its own task and reaches
+        # INTEGRATING having had nobody read the diff -- the grading-integrity
+        # hole ROLE_MAY_HAND_TO closes for handoffs, arriving by the other door.
+        raise ValueError(
+            f"role {role!r} may not write a verdict; only {', '.join(sorted(VERDICT_ROLES))} may"
+        )
+    if verdict == "changes_required" and not findings:
+        # The schema allows an empty findings array, correctly -- an approval has
+        # nothing to list. But "changes required" with nothing to change is a
+        # task the implementer cannot action, and it spends the one bounded fix
+        # pass. Refuse it here, where the state is known.
+        raise ValueError("a changes_required verdict needs at least one finding")
+    # read_one, not a local label scan: the write path and `decide()` then read
+    # the same vocabulary through the same parser, so they cannot disagree about
+    # what state a task is in or how many fix passes it has spent. It also
+    # raises GhError for an issue that does not exist.
+    current = read_one(gh.get_issue(task))
+    if current.state != "review":
+        # A verdict is REVIEW's exit, not a general relabelling tool. Without
+        # this, `fleet verdict --verdict approved` on a task still CLAIMED walks
+        # it straight past review into INTEGRATING.
+        raise ValueError(
+            f"task {task} is in {current.state!r}, not review; a verdict only exits REVIEW"
+        )
+    payload: dict = {
+        "schema": "fleet.verdict.v1",
+        "task": task,
+        "verdict": verdict,
+        "head_sha": head_sha,
+        "reviewer": reviewer,
+        "findings": findings,
+    }
+    if checks_rerun is not None:
+        payload["checks_rerun"] = checks_rerun
+    if packet_was_sufficient is not None:
+        payload["packet_was_sufficient"] = packet_was_sufficient
+    validate(cfg, "verdict", payload)
+    state, extra = _verdict_target(verdict, current.fix_passes, cfg.max_fix_passes)
+    gh.comment(task, render(payload))
+    _move_state(gh, task, state, extra)
+    return payload, state
 
 
 class DuplicateDiscovery(Exception):

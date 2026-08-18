@@ -15,11 +15,10 @@ import pytest
 
 from fleet.config import load_config
 
-# Still an absolute path into the fixture repo's working tree, so the suite
-# validates against whatever is checked out there. docs/m2-inputs.md §5 tracks
-# vendoring a copy or skipping when absent; it is now a one-line change here
-# rather than three.
-FIXTURE_SCHEMAS = Path.home() / "TIG/fleet-fixture/.agents/schemas"
+# Vendored, not a live path into another repo's working tree. See
+# fixtures/policy/README.md for why that distinction cost us a merge.
+FIXTURE_POLICY = Path(__file__).resolve().parents[1] / "fixtures/policy/fleet-fixture"
+FIXTURE_SCHEMAS = FIXTURE_POLICY / ".agents/schemas"
 
 FLEET_TOML = (
     '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'

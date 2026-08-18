@@ -1,0 +1,19 @@
+[repo]
+slug = "FibonAdithya/fleet-fixture"
+integration_branch = "integration"
+
+[policy]
+ownership = "docs/agent/ownership.md"
+task_classes = "docs/agent/task-classes.md"
+roles = ".agents/roles"
+schemas = ".agents/schemas"
+
+[budget]
+per_task_usd = 2.0
+fleet_usd = 25.0
+
+[fleet]
+slots = 6
+stall_minutes = 10
+max_attempts = 2
+max_fix_passes = 1

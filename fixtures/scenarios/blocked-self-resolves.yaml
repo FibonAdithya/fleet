@@ -1,0 +1,27 @@
+name: blocked-self-resolves
+proves: >-
+  parent §11 "blocked task's dependency closes → requeued with no human
+  involvement"; harness §7 hard fail, issue 4. Hand-written rather than seeded
+  from fixtures/ledger/issues.json because the capture holds no BLOCKED task and
+  no intent decide() emits can create one -- `fleet block` is an agent's CLI
+  action, not an allocator output. blocked_on rides on the packet: there is no
+  fleet:blocked-on-N label, and inventing one would be a label gh has never
+  heard of.
+seed:
+  policy: fixtures/policy/fleet-fixture
+  packets:
+    4: {to: blocked, blocked_on: 11}
+  issues:
+    - {number: 4, title: "LinearGenerator should match moments", state: OPEN, assignees: [],
+       labels: ["fleet:blocked", "fleet:auto-ok", "area:models", "class:patch"]}
+    - {number: 11, title: "Add a reference sample generator", state: OPEN, assignees: [],
+       labels: ["fleet:done", "fleet:auto-ok", "area:data", "class:patch"]}
+ticks:
+  # No human is woken and nothing is escalated. #4 is not dispatched in the same
+  # tick it is unblocked -- it is still fleet:blocked when DISPATCH runs.
+  - outcomes: {}
+    expect:
+      - "Unblock(4)"
+  - outcomes: {}
+    expect:
+      - "Dispatch(4, implementer, 1)"

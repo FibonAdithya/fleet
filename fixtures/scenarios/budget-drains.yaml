@@ -1,0 +1,39 @@
+name: budget-drains
+proves: >-
+  parent §10 runaway cost, both halves, and parent §11 "budget exhausted →
+  drains, does not kill". Tick 2 is the per-task ceiling; ticks 3 and 4 are the
+  fleet-wide 80% rule -- nine READY tasks and four free slots and no dispatch,
+  while the agents still in flight are left alone and allowed to finish.
+seed:
+  ledger: fixtures/ledger/issues.json
+  policy: fixtures/policy/fleet-fixture
+ticks:
+  - outcomes: {}
+    expect:
+      - "Dispatch(1, implementer, 1)"
+      - "Dispatch(2, implementer, 1)"
+      - "Dispatch(4, implementer, 1)"
+      - "Dispatch(5, implementer, 1)"
+      - "Dispatch(6, implementer, 1)"
+      - "Dispatch(9, planner, 1)"
+  # Four agents run away at three times the per-task ceiling; #6 and #9 stay
+  # healthy. 4 x 3 x per_task_usd is past 80% of fleet_usd, so the drain begins
+  # in the same tick the four are released.
+  - outcomes: {1: over_budget, 2: over_budget, 4: over_budget, 5: over_budget}
+    expect:
+      - "Release(1, over_budget, 2)"
+      - "Release(2, over_budget, 2)"
+      - "Release(4, over_budget, 2)"
+      - "Release(5, over_budget, 2)"
+      - "Drain(budget)"
+  # Drain, do not kill: #6 and #9 are still running and are not touched, and the
+  # four released tasks are not re-dispatched.
+  - outcomes: {}
+    expect:
+      - "Drain(budget)"
+  # In-flight work finishes during the drain rather than being discarded.
+  - outcomes: {6: clean_exit}
+    packets: {6: {to: review}}
+    expect:
+      - "Advance(6, review)"
+      - "Drain(budget)"
