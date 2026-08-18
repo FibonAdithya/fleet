@@ -96,3 +96,46 @@ def test_unblocking_wakes_no_human():
     could have resolved themselves at 3am."""
     intents, _ = decide(FleetState(), [blocked(), done()], POLICY, [], T0)
     assert not [i for i in intents if isinstance(i, Escalate)]
+
+
+def test_a_closed_dependency_satisfies_unblock():
+    """The ordinary end state of a completed task is CLOSED and fleet:done, and
+    _open dropped it from the ledger before _unblock built its `done` set -- so
+    the task it should release was never released. The fleet does not deadlock
+    (a BLOCKED task holds no slot and no area); that one task simply never runs."""
+    blocker = Task(
+        number=2, title="t", state="done", area="data", klass="patch", auto_ok=True, is_open=False
+    )
+    waiting = Task(
+        number=4,
+        title="t",
+        state="blocked",
+        area="models",
+        klass="patch",
+        auto_ok=True,
+        blocked_on=2,
+        packet={"blocked_on": 2},
+    )
+    intents, _ = decide(FleetState(), [blocker, waiting], POLICY, [], T0)
+    assert Unblock(task=4) in intents
+
+
+def test_a_closed_dependency_satisfies_unblock_even_without_the_done_label():
+    """A closed issue IS a satisfied dependency whatever label it still carries.
+    Keying on the label alone leaves a task blocked forever behind an issue a
+    human closed by hand."""
+    blocker = Task(
+        number=2, title="t", state="review", area="data", klass="patch", auto_ok=True, is_open=False
+    )
+    waiting = Task(
+        number=4,
+        title="t",
+        state="blocked",
+        area="models",
+        klass="patch",
+        auto_ok=True,
+        blocked_on=2,
+        packet={"blocked_on": 2},
+    )
+    intents, _ = decide(FleetState(), [blocker, waiting], POLICY, [], T0)
+    assert Unblock(task=4) in intents

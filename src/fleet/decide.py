@@ -60,11 +60,10 @@ def _open(ledger: list[Task]) -> list[Task]:
     seeds from a captured file that includes closed rows, and this makes
     decide() give both the same answer by construction (spec §3's invariant).
 
-    The consequence, stated: a dependency that was closed rather than labelled
-    `fleet:done` no longer satisfies UNBLOCK. Nothing in M2 closes an issue --
-    `close_issue` is on FakeGh alone and on no Protocol -- so `done` is a label
-    on an open row, and treating a closed row as done would be exactly the
-    fake/real divergence this filter removes.
+    Three phases, three different answers about a closed row, so this is no
+    longer applied to all of them: DISPATCH and `_unroutable` take this filtered
+    list, UNBLOCK takes it for candidates but computes `done` over every row, and
+    REAP takes the unfiltered ledger. See `decide` for why each is what it is.
     """
     return [task for task in ledger if task.is_open]
 
@@ -144,6 +143,15 @@ def _reap(
     by_task = {a.task: a for a in agents}
     intents: list[Intent] = []
     for task in ledger:
+        if not task.is_open:
+            # The issue was closed under the fleet -- by a human, or by our own
+            # Advance-to-done on a previous tick. Whatever the label says, the
+            # work is over. Stop the agent if there still is one; do not
+            # relabel, because a closed row put back to fleet:ready advertises
+            # itself as available work that nothing will ever pick up.
+            if task.number in by_task:
+                intents.append(Retire(task=task.number))
+            continue
         if task.state not in _LIVE:
             continue
         agent = by_task.get(task.number)
@@ -204,13 +212,38 @@ def _reap(
         # paid for.
         if agent.cost_usd > policy.per_task_usd:
             intents.append(_fail(task, "over_budget", policy))
+    # An orphaned agent: its task sits on a row in READY, DONE or BLOCKED, or
+    # has no ledger row at all. The per-row loop above only ever visits rows,
+    # so none of its branches can see this agent -- it holds a slot and an
+    # area forever, unstoppable, because nothing else in decide() looks at
+    # agents rather than rows. Walking `agents` directly is the only way to
+    # catch a task number the ledger has never heard of.
+    #
+    # Guarded against the loop above: a closed row in a non-live state (say
+    # DONE) with a working agent is retired by the closed-row rule, and that
+    # same task number is also absent from every live row -- the orphan
+    # condition, verbatim. Without excluding a task already producing an
+    # intent this pass, that shape doubles the Retire.
+    handled = {i.task for i in intents}
+    live_rows = {task.number for task in ledger if task.state in _LIVE}
+    for agent in agents:
+        if agent.task in handled or agent.task in live_rows:
+            continue
+        intents.append(Retire(task=agent.task))
     return intents
 
 
-def _unblock(ledger: list[Task]) -> list[Intent]:
+def _unblock(ledger: list[Task], all_rows: list[Task]) -> list[Intent]:
     """BLOCKED tasks whose dependency reached DONE. No human is involved -- that
-    is the entire reason `block` is kept distinct from `escalate`."""
-    done = {t.number for t in ledger if t.state == "done"}
+    is the entire reason `block` is kept distinct from `escalate`.
+
+    `done` is computed over EVERY row, including closed ones, while the tasks
+    considered for release come from the open list. A closed issue is a satisfied
+    dependency whatever label it still carries: closing on completion is ordinary
+    from M3 on, and `fleet:done` on a closed row is the normal end state, not an
+    exception.
+    """
+    done = {t.number for t in all_rows if t.state == "done" or not t.is_open}
     return [
         Unblock(task=t.number)
         for t in ledger
@@ -341,8 +374,12 @@ def decide(
     observations = _observe(prev, agents, now)
     open_ledger = _open(ledger)
     intents: list[Intent] = []
-    intents += _reap(open_ledger, policy, agents, observations, now)
-    intents += _unblock(open_ledger)
+    # REAP sees EVERY row. A CLOSED row still labelled fleet:claimed has a live
+    # agent that nothing else can stop, and its cost counts against the ceiling
+    # until something does. DISPATCH and UNBLOCK must not act on a closed row,
+    # so the filter cannot stay one blanket call shared by all three phases.
+    intents += _reap(ledger, policy, agents, observations, now)
+    intents += _unblock(open_ledger, ledger)
     intents += _unroutable(open_ledger, policy)
     intents += _dispatch(open_ledger, policy, agents, prev.spent_usd)
     # An observation describes one agent's sequence, so it dies with that agent:

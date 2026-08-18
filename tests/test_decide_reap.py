@@ -6,6 +6,7 @@ from fleet.decide import decide
 from fleet.model import (
     Advance,
     AgentState,
+    Dispatch,
     Escalate,
     FleetState,
     Observation,
@@ -373,3 +374,97 @@ def test_a_reviewing_task_with_no_agent_is_left_alone():
     task = claimed(number=5, state="review")
     intents, _ = decide(FleetState(), [task], POLICY, [], T0)
     assert not any(isinstance(i, (Release, Escalate, Retire)) for i in intents)
+
+
+def test_a_closed_row_with_a_working_agent_is_retired():
+    """Because _open ran before _reap, a closed row still carrying fleet:claimed
+    produced no Release and therefore no StopAgent -- the agent ran on, its cost
+    still counting against the fleet ceiling, with nothing able to stop it.
+
+    Note the agent is WORKING, not done or stalled. Seeing the row is not
+    enough: none of REAP's existing branches fire for a healthy agent, so
+    widening the filter alone leaves the leak exactly where it was. A closed row
+    needs a rule of its own.
+
+    Retire rather than Release: the issue is closed, so relabelling it back to
+    fleet:ready would leave a closed row advertising itself as available work."""
+    closed = Task(
+        number=5,
+        title="t",
+        state="claimed",
+        area="eval",
+        klass="patch",
+        auto_ok=True,
+        is_open=False,
+    )
+    agents = [AgentState(task=5, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [closed], POLICY, agents, T0)
+    assert intents == [Retire(task=5)]
+
+
+def test_a_closed_row_with_no_agent_produces_nothing():
+    """The ordinary end state of every completed task. Emitting an intent for
+    each of them would refill the run log with noise every tick, forever."""
+    closed = Task(
+        number=5, title="t", state="done", area="eval", klass="patch", auto_ok=True, is_open=False
+    )
+    intents, _ = decide(FleetState(), [closed], POLICY, [], T0)
+    assert intents == []
+
+
+def test_a_closed_claimed_row_is_reaped_before_its_area_is_reused():
+    """m2-inputs §7's concrete case. The closed row is invisible to DISPATCH, so
+    #8 goes out in the same tick -- which is correct ONLY because the reap
+    precedes it and StopAgent lands before StartAgent."""
+    closed = Task(
+        number=5,
+        title="t",
+        state="claimed",
+        area="eval",
+        klass="patch",
+        auto_ok=True,
+        is_open=False,
+    )
+    open_row = Task(number=8, title="t", state="ready", area="eval", klass="patch", auto_ok=True)
+    agents = [AgentState(task=5, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [closed, open_row], POLICY, agents, T0)
+    stops = [n for n, i in enumerate(intents) if getattr(i, "task", None) == 5]
+    starts = [n for n, i in enumerate(intents) if isinstance(i, Dispatch) and i.task == 8]
+    assert stops and starts and stops[0] < starts[0]
+
+
+def test_an_agent_on_a_non_live_row_is_orphaned_and_retired():
+    """No phase reads a row in READY, DONE or BLOCKED as agent-bearing, so an
+    agent sitting on one of those rows is invisible to every branch above --
+    it holds a slot and an area forever, unstoppable, because nothing in this
+    function's per-row loop ever looks at it. The rule this test pins lives
+    after that loop: it walks the AGENTS, not the rows."""
+    task = claimed(number=5, state="ready")
+    agents = [AgentState(task=5, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == [Retire(task=5)]
+
+
+def test_an_agent_whose_task_has_no_ledger_row_at_all_is_orphaned_and_retired():
+    """The same leak, one step further: not merely a row REAP's per-row loop
+    skips, but no row at all -- a worktree for a task number the ledger has
+    never heard of. Nothing but a walk over the agents themselves can catch
+    this; there is no row to iterate."""
+    agents = [AgentState(task=42, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [], POLICY, agents, T0)
+    assert intents == [Retire(task=42)]
+
+
+def test_an_orphan_already_reaped_this_pass_is_not_retired_twice():
+    """A closed row in a non-live state (DONE, not CLAIMED) with a working agent
+    is reaped by the closed-row rule above, in the per-row loop -- and that same
+    task number is also absent from every live row, which is exactly the
+    orphan condition. Without an explicit guard against a task the per-row loop
+    already emitted for, this shape doubles the Retire and StopAgent lands
+    twice for one agent."""
+    closed = Task(
+        number=5, title="t", state="done", area="eval", klass="patch", auto_ok=True, is_open=False
+    )
+    agents = [AgentState(task=5, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [closed], POLICY, agents, T0)
+    assert intents == [Retire(task=5)]
