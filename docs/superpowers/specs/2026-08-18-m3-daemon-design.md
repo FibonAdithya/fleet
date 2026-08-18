@@ -358,11 +358,19 @@ NEEDS_HUMAN for having conflicted twice.
 
 Fixed here rather than by adding `ready` to the fixture repo's handoff enum, so
 the captured policy fixtures keep their fidelity. REAP recognises a CLAIMED task
-whose newest packet is an integrator handback and emits
-`Release(task, reason="rebase", attempt=task.attempts)` — the same number, so
-the label does not advance — and DISPATCH picks it up from READY as normal. No
-new intent type; the distinction lives in the reason, which is also what the run
-log records.
+whose newest packet is an integrator handback — `to: claimed`, `from.role:
+integrator` — and emits `Rebase(task, rebase=task.rebases + 1)`, which lands the
+task in READY carrying its *existing* attempt label and an incremented rebase
+label. DISPATCH then picks it up from READY as normal.
+
+A distinct intent rather than a reason string on `Release`, for two mechanical
+reasons. `expand` has to write `fleet:rebase-N` and only the intent can carry
+that number — `expand` never sees the task. And `simulate.render_intent` prints
+every field of an intent in declaration order, so a fourth field on `Release`
+would rewrite the expected output of every scenario that asserts one. A separate
+intent renders as `Rebase(4, 1)`, changes no existing line, and makes the run log
+distinguish a conflict from a failure — which is a distinction the grader wants
+anyway.
 
 **A rebase that costs no attempt has to cost something else, or it loops.** An
 integrator that conflicts, hands back, gets re-dispatched, and conflicts again
