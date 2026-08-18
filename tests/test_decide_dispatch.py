@@ -177,6 +177,66 @@ def test_a_task_in_integrating_holds_its_slot_and_its_area():
     assert dispatched(intents) == []
 
 
+# The shared POLICY routes `patch` alone, which is enough to prove the lock
+# against a task that is already live -- a live task needs no route. Dispatching
+# an integration task does need one.
+ROUTES_INTEGRATION = dataclasses.replace(
+    POLICY, routes=(*POLICY.routes, ("integration", ("integrator",)))
+)
+
+
+def test_only_one_integration_task_starts_in_a_tick():
+    """The other half of amendment 2's lock, and the half the live-task test
+    above cannot reach. `any(t.klass == "integration" for t in live)` is computed
+    once, before the loop, off tasks that were ALREADY live -- so two READY
+    integration tasks and nothing live arms nothing, and both are dispatched into
+    the same tick. Two integrators rebasing onto the integration branch at once
+    is precisely the conflict the lock exists to prevent, and per-area exclusion
+    cannot catch it because an integration task carries no area."""
+    intents, _ = decide(
+        FleetState(),
+        [ready(20, area=None, klass="integration"), ready(21, area=None, klass="integration")],
+        ROUTES_INTEGRATION,
+        [],
+        T0,
+    )
+    assert dispatched(intents) == [20]
+
+
+def test_a_second_integration_task_does_not_block_the_rest_of_the_tick():
+    """The lock is one integrator at a time, not one dispatch at a time. Catches
+    a fix that `break`s out of the loop on the second integration task and so
+    silently drops every ordinary task numbered above it."""
+    backlog = [
+        ready(20, area=None, klass="integration"),
+        ready(21, area=None, klass="integration"),
+        ready(22, "eval"),
+    ]
+    intents, _ = decide(FleetState(), backlog, ROUTES_INTEGRATION, [], T0)
+    assert dispatched(intents) == [20, 22]
+
+
+def test_a_task_that_already_has_a_live_agent_is_not_dispatched_again():
+    """Slots and exclusion are counted off the ledger's labels, while REAP and
+    the budget drain read the agent list. When the two disagree -- a StopAgent
+    that failed while its SetLabels landed, so the row reads READY under a
+    running agent -- nothing notices, and the allocator starts a SECOND agent on
+    a task that already has one, in the same worktree."""
+    agents = [AgentState(task=1, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [ready(1, "eval")], POLICY, agents, T0)
+    assert dispatched(intents) == []
+
+
+def test_a_running_agent_consumes_a_slot_whatever_its_row_says():
+    """`slots` bounds concurrent agents, so an agent the ledger has lost track of
+    still costs one. Catches counting free slots off live LABELS alone, which
+    lets drift push the fleet past its own ceiling."""
+    small = dataclasses.replace(POLICY, slots=1)
+    agents = [AgentState(task=1, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [ready(1, "eval"), ready(2, "train")], small, agents, T0)
+    assert dispatched(intents) == []
+
+
 def test_slots_bound_the_number_of_dispatches():
     small = dataclasses.replace(POLICY, slots=2)
     backlog = [ready(1, "eval"), ready(2, "train"), ready(3, "models"), ready(4, "data")]

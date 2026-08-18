@@ -95,6 +95,32 @@ def test_a_packet_with_no_target_escalates_rather_than_raising():
     assert Escalate(task=1, reason="packet_without_target") in intents
 
 
+def test_a_packet_naming_a_state_that_does_not_exist_escalates_rather_than_raising():
+    """The sibling of the test above, for a target that is present but wrong.
+    decide() guards the MISSING key and hands the bad VALUE straight through as
+    Advance(to=...), which expand() then refuses with ValueError -- out of the
+    tick, taking every other task's intents with it. A packet arrives from an
+    issue comment, so its `to` is exactly as trustworthy as the absent one."""
+    task = claimed(packet={"to": "shipped", "head_sha": "a91c204"})
+    agents = [AgentState(task=1, status="done", change_seq=10)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Escalate(task=1, reason="packet_target_unknown") in intents
+    assert only(intents, Advance) == []
+
+
+def test_every_advance_decide_emits_can_be_expanded():
+    """Binds the two halves: whatever `to` values decide() is willing to emit,
+    expand() must be able to write. Catches the pair drifting apart again."""
+    from fleet.expand import expand
+
+    for target in ("review", "integrating", "done", "blocked", "human", "claimed"):
+        task = claimed(packet={"to": target, "head_sha": "a91c204"})
+        agents = [AgentState(task=1, status="done", change_seq=10)]
+        intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+        for intent in intents:
+            expand(intent, POLICY)
+
+
 def test_a_dirty_exit_releases_and_names_the_next_attempt():
     """Catches a Release that carries no attempt number, which is how the
     counter ended up with two writers disagreeing about it."""

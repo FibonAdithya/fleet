@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from fleet import labels as labels_module
 from fleet.model import (
     Advance,
     AgentState,
@@ -110,6 +111,15 @@ def _advance(task: Task) -> list[Intent]:
         # an unguarded task.packet["to"] would raise KeyError out of the pure
         # core instead, taking the whole tick down with it.
         return [Escalate(task=task.number, reason="packet_without_target")]
+    if target not in labels_module.STATES:
+        # The same fact, one step further in: a target that is present but names
+        # no state this repo has a label for. `expand` refuses it with ValueError
+        # (expand.py:91), and that raises out of the whole tick rather than out
+        # of one task -- every other task's intents are discarded with it. The
+        # vocabulary is checked against labels.STATES precisely because that is
+        # the set `expand` can write, so decide() never emits an Advance the
+        # effect layer cannot express.
+        return [Escalate(task=task.number, reason="packet_target_unknown")]
     return [Advance(task=task.number, to=target)]
 
 
@@ -207,15 +217,34 @@ def _dispatch(
         return []
 
     held = {t.area for t in live if t.area}
-    free = policy.slots - len(live)
+    # A running agent occupies a slot whatever its row says. Counting off live
+    # LABELS alone lets the two sources of truth disagree -- REAP and the drain
+    # read `agents`, this read the ledger -- and drift in that gap pushed the
+    # fleet past its own ceiling AND started a second agent on a task that
+    # already had one, in the same worktree.
+    busy = {a.task for a in agents}
+    free = policy.slots - len({t.number for t in live} | busy)
+    # An integration task dispatched by THIS tick arms the lock for the rest of
+    # it. The check above only sees tasks that were already live, so two READY
+    # integration tasks armed nothing and both went out together -- two
+    # integrators rebasing onto the integration branch at once, which is the
+    # collision the lock exists to prevent. Tracked like `held` rather than
+    # short-circuiting the loop: the lock is one integrator at a time, not one
+    # dispatch at a time, and tick 1 of integration-lock.yaml pins that an
+    # integrator and ordinary tasks may still start together.
+    integrating = False
     intents: list[Intent] = []
     for task in sorted(ledger, key=lambda t: t.number):
         if free <= 0:
             break
         if task.state != "ready" or not task.auto_ok:
             continue
+        if task.number in busy:
+            continue
         route = policy.route_for(task.klass)
         if not route:
+            continue
+        if task.klass == "integration" and integrating:
             continue
         if task.area is not None and task.area in held:
             continue
@@ -232,6 +261,8 @@ def _dispatch(
         )
         if task.area is not None:
             held.add(task.area)
+        if task.klass == "integration":
+            integrating = True
         free -= 1
     return intents
 
