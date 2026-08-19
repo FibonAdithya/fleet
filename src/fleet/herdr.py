@@ -83,16 +83,35 @@ def error_code(stderr: str) -> str | None:
     The last non-empty line as well as the whole buffer, since a warning
     printed before the body is ordinary and would otherwise take the code with
     it.
+
+    Every shape that is not exactly `{"error": {"code": "<name>"}}` answers
+    None rather than raising, and the type checks below are not defensive
+    decoration. This function is called from inside `_subprocess`'s `except
+    CalledProcessError`, while building the HerdrError -- so an exception here
+    means no HerdrError is ever raised, and whatever escapes instead sails past
+    every `except HerdrError` in the executor and takes down the whole tick.
+    `{"error": "boom"}` was enough to do it: `.get` on a str. None is also the
+    right answer on its own terms, because no code means the cautious path --
+    leave the worktree alone rather than delete it under an agent that may
+    still be running.
     """
     for candidate in (stderr.strip(), stderr.strip().splitlines()[-1] if stderr.strip() else ""):
         try:
             payload = json.loads(candidate)
         except ValueError:
             continue
-        if isinstance(payload, dict):
-            code = (payload.get("error") or {}).get("code")
-            if code:
-                return str(code)
+        if not isinstance(payload, dict):
+            continue
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            continue
+        code = error.get("code")
+        # A str, and not `str(code)` on whatever turns up: a number or a nested
+        # object is a shape herdr's vocabulary has no meaning for, and
+        # stringifying it would put something that reads like a real code into
+        # the runlog and into every comparison against AGENT_ABSENT_CODES.
+        if isinstance(code, str) and code:
+            return code
     return None
 
 

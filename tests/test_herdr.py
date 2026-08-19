@@ -663,6 +663,46 @@ def test_a_plain_text_herdr_failure_has_no_code():
     assert error_code("") is None
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error": "boom"}',  # `error` present, but a string rather than an object
+        '{"error": null}',
+        '{"error": ["boom"]}',
+        '{"error": {"message": "no code in here"}}',
+        '{"code": "agent_not_found"}',  # a code, but not under `error`
+        "[]",
+        '"just a string"',
+        "123",
+        "null",
+    ],
+    ids=lambda b: b,
+)
+def test_json_that_is_not_herdrs_error_shape_yields_no_code(body):
+    """Every caller of this reads the answer inside an `except HerdrError`, and
+    the raise that builds that HerdrError is where this is called from. So a
+    shape this does not recognise has to answer None, not raise: an exception
+    here escapes `_subprocess`'s own handler, no HerdrError is raised at all,
+    and an AttributeError sails past every `except HerdrError` in the executor
+    -- taking down the whole tick, which is worse than the wrong-but-caught
+    decision the code exists to prevent.
+
+    None is also the safe answer on its own terms: no code means the cautious
+    path, which leaves a worktree alone rather than deleting it under an agent
+    that may still be running."""
+    assert error_code(body) is None
+
+
+def test_a_code_that_is_not_a_string_is_not_a_code():
+    """`str(code)` on whatever turns up would hand the executor `{'a': 1}` as a
+    code to compare against AGENT_ABSENT_CODES -- never equal, so harmless
+    today, but it is a value the vocabulary has no meaning for and it would
+    read as a real code in the runlog."""
+    assert error_code('{"error": {"code": 42}}') is None
+    assert error_code('{"error": {"code": {"nested": true}}}') is None
+    assert error_code('{"error": {"code": ""}}') is None
+
+
 def test_a_code_is_read_from_the_last_line_of_a_noisy_stderr():
     """Warnings on stderr before the body are ordinary. Parsing only the whole
     buffer would drop the code the moment anything else printed first."""

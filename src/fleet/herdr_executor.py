@@ -184,11 +184,13 @@ class HerdrExecutor:
           expand turns it into this effect. Raising here would crash on the
           drift the effect exists to clear -- and skip the worktree removal,
           which is the half that still had work to do.
-        * `remove_worktree` raises when a checkout exists on disk with no herdr
-          workspace to remove it through. Nothing this process can do fixes
-          that; the message names the `git worktree remove` a human runs. The
-          task will fail its next dispatch on the occupied path, which is one
-          task -- an exception out of `apply` is every task in the batch.
+        * `remove_worktree` clears a checkout that has no herdr workspace by
+          falling back to `git worktree remove --force`, and raises only when
+          that fails too -- a checkout on a filesystem that is gone, say. At
+          that point nothing is left to try: the message names the path and the
+          command a human runs, the task will fail its next dispatch on the
+          occupied path, and that is one task, where an exception out of
+          `apply` is every task in the batch.
 
         The failure is recorded and logged rather than swallowed. Silence here
         would make a fleet-wide herdr outage look like a quiet night.
