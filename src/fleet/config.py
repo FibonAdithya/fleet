@@ -74,9 +74,17 @@ def _prices(raw: dict) -> dict[str, dict[str, float]]:
     hole as an unpriced model: the missing rate prices those tokens at nothing,
     and cache reads are most of what an agent spends.
 
-    An absent [prices] table is an empty mapping, not an error. `fleet plan
-    --dry-run` starts no agents and needs no prices; only the daemon does, and
-    it fails loudly at the first agent it cannot price.
+    An absent [prices] table is an empty mapping, not an error *here*. `fleet
+    plan` starts no agents and needs no prices, and requiring the table would
+    refuse every fleet.toml written before it existed, on a key only the daemon
+    reads.
+
+    It is not permission to run unpriced. An empty mapping prices nothing, so
+    `cost.price_transcript` raises `UnpricedModel` for the first agent whose
+    transcript names any model at all, `RealHerdr.agents` records that in
+    `unpriced()`, and `Daemon.tick` turns a non-empty `unpriced()` into a
+    Drain. The refusal is the daemon's, at the moment it would otherwise spend,
+    and it is loud there rather than here.
     """
     out: dict[str, dict[str, float]] = {}
     for model, table in raw.items():

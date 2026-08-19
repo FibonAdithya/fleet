@@ -1111,3 +1111,44 @@ def test_both_clients_answer_unpriced(tmp_path):
 
     for cls in (FakeHerdr, RealHerdr, Herdr):
         assert callable(getattr(cls, "unpriced", None)), cls
+
+
+def test_an_empty_price_table_makes_every_priceable_agent_unpriced(tmp_path):
+    """The shape spec §4.5 exists to prevent, arriving through the door nobody
+    wrote a case for: not an unknown model, but no `[prices]` table at all.
+
+    `if ... and prices:` treated an empty dict as "do not price", so every
+    agent read as `cost_usd = 0.0`, `unpriced()` stayed empty, the daemon never
+    drained, and `per_task_usd` could never fire either -- a whole night with
+    the budget ceiling switched off and nothing to say so. An empty table
+    prices nothing, which is exactly the condition `UnpricedModel` names, so it
+    must arm the drain the same way an unknown model does.
+    """
+    session = "33333333-3333-3333-3333-333333333333"
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": "claude-opus-4", "usage": {"input_tokens": 1}}}) + "\n"
+    )
+    agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    unpriced: set[str] = set()
+    parsed = parse_snapshot(
+        _snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices={}, unpriced=unpriced
+    )
+    assert unpriced, "an empty [prices] table priced an agent at nothing, silently"
+    assert parsed[0].cost_usd == 0.0
+
+
+def test_an_empty_price_table_raises_when_nobody_is_collecting(tmp_path):
+    """Same rule, no collector: the exception propagates rather than being
+    defaulted to zero. A caller that forgot the argument must not get a fleet of
+    free agents just because the table happened to be empty rather than wrong."""
+    session = "44444444-4444-4444-4444-444444444444"
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": "claude-opus-4", "usage": {"input_tokens": 1}}}) + "\n"
+    )
+    agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    with pytest.raises(UnpricedModel):
+        parse_snapshot(_snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices={})

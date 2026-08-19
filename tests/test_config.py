@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from fleet.config import ConfigError, ConfigNotFound, load_config
+from fleet.cost import UnpricedModel, price_lines
 
 TOML = """
 [repo]
@@ -144,15 +146,32 @@ def test_a_price_table_missing_a_counter_is_refused(tmp_path):
     assert "cache_write" in str(caught.value)
 
 
-def test_no_prices_table_is_an_empty_mapping_not_a_crash(tmp_path):
-    """`fleet plan --dry-run` starts no agents and needs no prices. Requiring
-    the table would break every existing fleet.toml on a key only the daemon
-    reads."""
+def test_no_prices_table_parses_but_leaves_the_daemon_unable_to_spend(tmp_path):
+    """Two halves, and the second is the one that was missing.
+
+    Config still parses: `fleet plan` starts no agents and needs no prices, and
+    requiring the table would refuse every fleet.toml written before it existed.
+
+    But an empty mapping is not permission to run unpriced. It prices NOTHING,
+    so the daemon must refuse the same way it refuses an unknown model --
+    `UnpricedModel`, recorded in `unpriced()`, which `Daemon.tick` turns into a
+    Drain. The old assertion stopped at `prices == {}`, and underneath it
+    `parse_snapshot`'s `and prices` guard skipped the join entirely: every
+    `cost_usd` read 0.0, `unpriced()` stayed empty, the drain never armed and
+    `per_task_usd` could never fire. A whole night with the budget ceiling
+    switched off, through the one shape nobody wrote a case for.
+    """
     (tmp_path / "fleet.toml").write_text(
         '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
         'roles = "r"\nschemas = "s"\n'
     )
-    assert load_config(tmp_path).prices == {}
+    cfg = load_config(tmp_path)
+    assert cfg.prices == {}
+    with pytest.raises(UnpricedModel):
+        price_lines(
+            [json.dumps({"message": {"model": "claude-opus-4", "usage": {"input_tokens": 1}}})],
+            cfg.prices,
+        )
 
 
 def test_daemon_paths_default_relative_to_root_and_home(tmp_path):

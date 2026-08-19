@@ -202,7 +202,14 @@ def parse_snapshot(
         status = STATUS.get(agent.get("agent_status"), "working")
         session = (agent.get("agent_session") or {}).get("value")
         cost = 0.0
-        if session and projects_dir is not None and prices:
+        # `prices is not None`, NOT `prices` -- an empty dict is falsy, and
+        # `and prices` made a MISSING [prices] table skip the join entirely:
+        # every agent read as free, `unpriced` stayed empty, the daemon never
+        # drained, and `per_task_usd` could never fire either. An empty table
+        # prices nothing, which is precisely what `UnpricedModel` names, so it
+        # is left to `price_transcript` to raise and to the collector below to
+        # arm the drain -- the same treatment an unknown model gets.
+        if session and projects_dir is not None and prices is not None:
             path = transcript_path(session, projects_dir)
             if path is not None:
                 try:
