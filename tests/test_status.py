@@ -87,3 +87,52 @@ def test_no_held_areas_renders_a_placeholder_not_nothing():
     payload = {**PAYLOAD, "held_areas": []}
     lines = "\n".join(render(payload))
     assert any("held" in line.lower() for line in [lines])
+
+
+FAILING = {
+    **PAYLOAD,
+    "failures": [
+        "task 1: could not remove worktree (code dirty_worktree_requires_force): boom",
+        "tick 7 failed: gh issue list failed: HTTP 503",
+    ],
+}
+
+
+def test_swallowed_failures_are_rendered():
+    """The design puts every swallowed failure in `FleetSnapshot.failures` and
+    makes `fleet status` the one place an operator reads them. Nothing rendered
+    them, so a herdr that failed every worktree removal all night looked exactly
+    like a quiet night -- the failure the bounded deque exists to prevent,
+    reinstated one layer further out."""
+    lines = "\n".join(render(FAILING))
+    assert "could not remove worktree" in lines
+    assert "HTTP 503" in lines
+
+
+def test_the_failure_count_is_visible_before_the_table():
+    """Sixty-four failures rendered only at the bottom of a fifty-row table are
+    off the screen of the `watch fleet status` they are for. The count goes in
+    the header block, where the spend and the free slots are, so a glance
+    catches it and the detail is there to scroll to."""
+    lines = render(FAILING)
+    header = lines[: lines.index(_header_row(lines))]
+    assert any("2" in line and "failure" in line.lower() for line in header)
+
+
+def _header_row(lines):
+    return next(line for line in lines if line.strip().startswith("task"))
+
+
+def test_a_fleet_with_no_failures_says_nothing_about_them():
+    """Printed unconditionally it is decoration, and decoration is skipped --
+    the same rule the drain line follows."""
+    lines = "\n".join(render({**PAYLOAD, "failures": []}))
+    assert "failure" not in lines.lower()
+
+
+def test_a_payload_with_no_failures_key_at_all_still_renders():
+    """A snapshot from a daemon older than the field, served over a socket a
+    newer client connected to. Rendering must not KeyError -- the client would
+    exit non-zero and read as 'no fleet daemon', which is a different fact."""
+    payload = {k: v for k, v in PAYLOAD.items() if k != "failures"}
+    assert render(payload)
