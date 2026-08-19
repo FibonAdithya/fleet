@@ -1,0 +1,23 @@
+{
+  "result": {
+    "snapshot": {
+      "agents": [
+        {
+          "agent": "claude",
+          "agent_status": "blocked",
+          "cwd": "/tmp/claude-1000/-home-u-TIG-fleet/af02d51b-66f3-4c6d-b9ad-07a0ce53f6db/scratchpad/t11/worktrees/999-probe",
+          "focused": false,
+          "foreground_cwd": "/tmp/claude-1000/-home-u-TIG-fleet/af02d51b-66f3-4c6d-b9ad-07a0ce53f6db/scratchpad/t11/worktrees/999-probe",
+          "interactive_ready": true,
+          "name": "fleet-999",
+          "pane_id": "w3Q:p1",
+          "revision": 0,
+          "state_change_seq": 384,
+          "tab_id": "w3Q:t1",
+          "terminal_id": "term_6596370910aa612",
+          "workspace_id": "w3Q"
+        }
+      ]
+    }
+  }
+}

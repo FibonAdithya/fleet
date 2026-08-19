@@ -27,6 +27,19 @@ class GhClient(Protocol):
     def list_issues(self, state: str = "open") -> list[dict]: ...
     def search_titles(self, text: str) -> list[dict]: ...
     def ensure_label(self, name: str, colour: str = "ededed") -> None: ...
+    def assign(self, issue: int, login: str | None) -> None: ...
+    def close_issue(self, issue: int) -> None: ...
+    def reopen_issue(self, issue: int) -> None: ...
+    def list_comments(self, issue: int) -> list[dict]: ...
+    def delete_comment(self, comment_id: int) -> None: ...
+
+
+#: Seconds any one `gh` call may take. `read_ledger` makes one list call plus
+#: one view per packet-carrying row on every tick, so this multiplies -- but
+#: each call is one API round trip, and `gh` does its own retrying inside it.
+#: 60 is generous for that and still bounds the tick loop, which is the thread
+#: a wedged `gh` would otherwise stop while the socket kept answering.
+GH_TIMEOUT_SECONDS = 60
 
 
 class RealGh:
@@ -38,8 +51,14 @@ class RealGh:
     def _run(self, *args: str) -> str:
         try:
             return subprocess.run(
-                ["gh", *args, "--repo", self.repo], capture_output=True, text=True, check=True
+                ["gh", *args, "--repo", self.repo],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=GH_TIMEOUT_SECONDS,
             ).stdout
+        except subprocess.TimeoutExpired as exc:
+            raise GhError(f"gh {' '.join(args)} timed out after {GH_TIMEOUT_SECONDS}s") from exc
         except subprocess.CalledProcessError as exc:
             # CalledProcessError's message carries the argv and exit code but not
             # stderr, which is where gh puts the actual reason. Task 19 is the only
@@ -73,11 +92,16 @@ class RealGh:
     def get_issue(self, issue: int) -> dict:
         raw = json.loads(
             self._run(
-                "issue", "view", str(issue), "--json", "number,title,body,labels,state,comments"
+                "issue",
+                "view",
+                str(issue),
+                "--json",
+                "number,title,body,labels,state,comments,assignees",
             )
         )
         raw["labels"] = [label["name"] for label in raw.get("labels", [])]
         raw["comments"] = [c["body"] for c in raw.get("comments", [])]
+        raw["assignees"] = [a["login"] for a in raw.get("assignees", [])]
         return raw
 
     def list_issues(self, state: str = "open") -> list[dict]:
@@ -90,12 +114,81 @@ class RealGh:
                 "--limit",
                 "200",
                 "--json",
-                "number,title,body,labels,state",
+                "number,title,body,labels,state,assignees",
             )
         )
         for row in raw:
             row["labels"] = [label["name"] for label in row.get("labels", [])]
+            row["assignees"] = [a["login"] for a in row.get("assignees", [])]
         return raw
+
+    def assign(self, issue: int, login: str | None) -> None:
+        """`login=None` clears every assignee.
+
+        Parent §3 makes the allocator the sole writer of ownership, and the
+        clearing half is what a Release and an Escalate need: a task released
+        back to READY that still shows an owner is the drift REAP exists to
+        clear.
+        """
+        if login is None:
+            current = json.loads(self._run("issue", "view", str(issue), "--json", "assignees"))
+            logins = [a["login"] for a in current.get("assignees", [])]
+            if not logins:
+                return
+            self._run("issue", "edit", str(issue), "--remove-assignee", ",".join(logins))
+            return
+        self._run("issue", "edit", str(issue), "--add-assignee", login)
+
+    def close_issue(self, issue: int) -> None:
+        self._run("issue", "close", str(issue))
+
+    def reopen_issue(self, issue: int) -> None:
+        self._run("issue", "reopen", str(issue))
+
+    def _run_api(self, *args: str) -> str:
+        """`gh api` has no `--repo` flag at all -- confirmed live, read-only:
+        `gh api repos/{slug}/issues/1/comments --repo {slug}` fails with
+        "unknown flag: --repo" -- unlike every other subcommand `_run` calls,
+        which appends one unconditionally. The endpoint path carries the slug
+        instead, so this bypasses `_run` rather than widening it.
+        """
+        try:
+            return subprocess.run(
+                ["gh", *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=GH_TIMEOUT_SECONDS,
+            ).stdout
+        except subprocess.TimeoutExpired as exc:
+            raise GhError(f"gh {' '.join(args)} timed out after {GH_TIMEOUT_SECONDS}s") from exc
+        except subprocess.CalledProcessError as exc:
+            raise GhError(f"gh {' '.join(args)} failed: {exc.stderr.strip()}") from exc
+
+    def list_comments(self, issue: int) -> list[dict]:
+        """Ids alongside bodies, unlike get_issue's `comments` (deliberately
+        bare body strings -- packet.parse_latest, build_prompt and
+        reader.read_ledger all depend on that shape, so get_issue is not
+        touched here).
+
+        `gh issue view --json comments` also carries an `id`, but it is a
+        GraphQL node id (e.g. "IC_kwDO...Eg"), not the numeric REST id
+        `delete_comment`'s endpoint needs -- confirmed live, read-only, against
+        FibonAdithya/fleet-fixture#1: `gh issue view 1 --json comments` showed
+        `"id":"IC_kwDOT0VXU88AAAABOKnzEg"` and a `url` ending
+        `#issuecomment-5245629202`, while `gh api /repos/.../issues/1/comments`
+        returned that same comment with the numeric `"id":5245629202` --
+        exactly the id the delete endpoint below accepts. `--paginate` because
+        the REST endpoint pages at 30 and a long-lived task can carry more
+        comments than that.
+        """
+        raw = json.loads(
+            self._run_api("api", "--paginate", f"/repos/{self.repo}/issues/{issue}/comments")
+        )
+        return [{"id": c["id"], "body": c["body"]} for c in raw]
+
+    def delete_comment(self, comment_id: int) -> None:
+        self._run_api("api", "-X", "DELETE", f"/repos/{self.repo}/issues/comments/{comment_id}")
 
     def search_titles(self, text: str) -> list[dict]:
         """Case-insensitive substring match over the most recent 200 issues.
@@ -127,18 +220,33 @@ class RealGh:
 class FakeGh:
     """In-memory ledger with the same surface. The only client tests use."""
 
+    #: Logins `assign` accepts when no explicit set is given. Real `gh` resolves
+    #: an assignee against the repo's actual collaborators; a fake that accepts
+    #: any string is the M1 divergence class docs/m2-inputs.md §6 warns about --
+    #: it would pass this whole offline suite and fail the first live write.
+    DEFAULT_KNOWN_LOGINS = frozenset({"FibonAdithya"})
+
     def __init__(
         self,
         max_attempts: int = labels_module.DEFAULT_MAX_ATTEMPTS,
         max_fix_passes: int = labels_module.DEFAULT_MAX_FIX_PASSES,
+        max_rebases: int = labels_module.DEFAULT_MAX_REBASES,
+        known_logins: set[str] | frozenset[str] = DEFAULT_KNOWN_LOGINS,
     ) -> None:
         self.issues: dict[int, dict] = {}
         self._next = 1
+        # Comment ids, monotonic across the whole fake -- not scoped per issue
+        # -- because delete_comment's real endpoint
+        # (/repos/{slug}/issues/comments/{id}) takes only the comment id, no
+        # issue number, so a fake that reused ids per-issue could not tell two
+        # issues' comment 1 apart the way delete_comment must not either.
+        self._next_comment_id = 1
         self.ensured_labels: set[str] = set()
         # A fake standing in for a repo seeded under a different policy needs the
         # same counters that repo was seeded with, or its idea of "this label
         # exists" diverges from the real one. See labels.static_vocabulary.
-        self.vocabulary = labels_module.static_vocabulary(max_attempts, max_fix_passes)
+        self.vocabulary = labels_module.static_vocabulary(max_attempts, max_fix_passes, max_rebases)
+        self.known_logins = set(known_logins)
 
     def _check_labels(self, names: list[str]) -> None:
         """Mirror gh: naming a label that does not exist fails the whole edit and
@@ -174,11 +282,32 @@ class FakeGh:
             "labels": list(labels),
             "state": "OPEN",
             "comments": [],
+            "assignees": [],
         }
         return number
 
     def comment(self, issue: int, body: str) -> None:
-        self._get(issue)["comments"].append(body)
+        # Stored as {id, body}, not a bare string: list_comments needs the id
+        # to give delete_comment something to delete. get_issue still strips
+        # this back down to a bare body string -- its shape is not this
+        # task's to change; see get_issue.
+        self._get(issue)["comments"].append({"id": self._next_comment_id, "body": body})
+        self._next_comment_id += 1
+
+    def list_comments(self, issue: int) -> list[dict]:
+        return [dict(c) for c in self._get(issue)["comments"]]
+
+    def delete_comment(self, comment_id: int) -> None:
+        """Mirrors the real DELETE endpoint's shape: one global id, no issue
+        number. Raises on an id that does not exist anywhere, the same way a
+        404 would -- a fake that silently no-oped here would hide a reset that
+        raced or double-deleted, which real gh would not let pass unnoticed."""
+        for record in self.issues.values():
+            before = len(record["comments"])
+            record["comments"] = [c for c in record["comments"] if c["id"] != comment_id]
+            if len(record["comments"]) != before:
+                return
+        raise GhError(f"no such comment: {comment_id}")
 
     def add_labels(self, issue: int, labels: list[str]) -> None:
         if not labels:
@@ -201,16 +330,39 @@ class FakeGh:
         JSON every call, so a caller mutating what it gets back is a no-op
         against GitHub. Returning the stored record directly here would let that
         same mutation silently corrupt the fake's ledger -- passing every test
-        while doing nothing live. Copy `labels` and `comments` too: they are
-        lists, and a shallow dict copy would still share them with the store."""
+        while doing nothing live. Copy `labels`, `comments` and `assignees` too:
+        they are lists, and a shallow dict copy would still share them with the
+        store."""
         record = self._get(issue)
         copy = dict(record)
         copy["labels"] = list(record["labels"])
-        copy["comments"] = list(record["comments"])
+        # Bare body strings, matching RealGh's get_issue -- comments are
+        # stored internally as {id, body} now (list_comments needs the id),
+        # but that shape is not this method's to leak. See list_comments for
+        # the id-carrying view.
+        copy["comments"] = [c["body"] for c in record["comments"]]
+        copy["assignees"] = list(record["assignees"])
         return copy
+
+    def assign(self, issue: int, login: str | None) -> None:
+        """`login=None` clears the assignee. Mirrors RealGh: an unrecognised
+        login fails the whole edit and changes nothing, the same guard
+        `_check_labels` enforces for a label gh has never heard of -- a fake
+        that accepted any string here would pass this whole offline suite and
+        fail against GitHub."""
+        record = self._get(issue)
+        if login is None:
+            record["assignees"] = []
+            return
+        if login not in self.known_logins:
+            raise GhError(f"could not assign issue: {login!r} not found")
+        record["assignees"] = [login]
 
     def close_issue(self, issue: int) -> None:
         self._get(issue)["state"] = "CLOSED"
+
+    def reopen_issue(self, issue: int) -> None:
+        self._get(issue)["state"] = "OPEN"
 
     def list_issues(self, state: str = "open") -> list[dict]:
         """Summary view, deliberately WITHOUT `comments` -- RealGh's `issue list`
@@ -225,13 +377,17 @@ class FakeGh:
         from both callers and gh.
 
         Each row is a snapshot, for the same reason get_issue's is: a dict
-        comprehension is a shallow copy, so handing back the stored `labels`
-        list would let a caller that builds a label list in place corrupt this
-        ledger -- passing every test here and doing nothing against GitHub,
-        which returns freshly-parsed JSON every call."""
+        comprehension is a shallow copy, so handing back the stored `labels` or
+        `assignees` list would let a caller that builds either list in place
+        corrupt this ledger -- passing every test here and doing nothing
+        against GitHub, which returns freshly-parsed JSON every call."""
         normalized = state.upper()
         return [
-            {**{k: v for k, v in issue.items() if k != "comments"}, "labels": list(issue["labels"])}
+            {
+                **{k: v for k, v in issue.items() if k != "comments"},
+                "labels": list(issue["labels"]),
+                "assignees": list(issue["assignees"]),
+            }
             for issue in self.issues.values()
             if normalized == "ALL" or issue["state"] == normalized
         ]

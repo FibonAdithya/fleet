@@ -9,9 +9,10 @@ become tests.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Protocol
 
-from fleet.model import AgentState, Effect, StartAgent, StopAgent
+from fleet.model import AgentState, CloseIssue, Effect, StartAgent, StopAgent
 
 # `conflict` is deliberately absent. At this seam it is a dirty exit -- same
 # status, same everything -- so decide() cannot distinguish the two and no
@@ -39,8 +40,8 @@ _DRIP_FRACTION = 0.01
 
 
 class Executor(Protocol):
-    """What decide()'s shell needs. `script`/`tick`/`packets` are the fake's
-    simulation surface and are deliberately not part of it."""
+    """What decide()'s shell needs. `script`/`tick`/`packets`/`seed` are the
+    fake's simulation surface and are deliberately not part of it."""
 
     def apply(self, effects: list[Effect]) -> None: ...
     def agents(self) -> list[AgentState]: ...
@@ -61,6 +62,25 @@ class FakeExecutor:
         self._live: dict[int, AgentState] = {}
         self._packets: dict[int, dict] = {}
         self._seq = 0
+
+    def seed(self, agents: Iterable[AgentState]) -> None:
+        """Scenario-only: put an agent decide() must see on the very first
+        tick, before anything in this run ever started one -- a worktree
+        surviving a daemon restart, or a human's `herdr agent start`.
+
+        Bypasses `apply()`/`StartAgent` on purpose. Nothing decide() itself
+        can ever emit reaches this method; only a scenario's `seed.agents`
+        does (simulate.py), which is exactly the point -- an orphan is, by
+        definition, an agent decide() did not create.
+
+        `_seq` is raised to at least the seeded value so a later tick's
+        default-healthy advance (`tick()` below) never hands out a
+        `change_seq` lower than the one this agent already carries -- the
+        same monotonic guarantee every other agent gets from `_seq` alone.
+        """
+        for agent in agents:
+            self._live[agent.task] = agent
+            self._seq = max(self._seq, agent.change_seq)
 
     def script(self, task: int, outcome: str, packet: dict | None = None) -> None:
         if outcome not in OUTCOMES:
@@ -88,6 +108,14 @@ class FakeExecutor:
                     task=effect.task, status="working", change_seq=self._seq, cost_usd=0.0
                 )
             elif isinstance(effect, StopAgent):
+                self._live.pop(effect.task, None)
+                self._packets.pop(effect.task, None)
+            elif isinstance(effect, CloseIssue):
+                # Belt and suspenders: `Advance` always emits a `StopAgent`
+                # before this, but nothing in this type guarantees a caller
+                # applies them together, and a live agent left on a closed
+                # issue would keep reporting cost every tick for a task that
+                # is already over.
                 self._live.pop(effect.task, None)
                 self._packets.pop(effect.task, None)
 

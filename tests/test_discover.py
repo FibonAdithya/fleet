@@ -117,3 +117,30 @@ def test_the_parentage_label_is_created_before_it_is_applied(gh, cfg):
         cfg, gh, parent=1, title="make_synthetic ignores dims above 0", area="data", evidence="e"
     )
     assert "discovered-by:1" in gh.ensured_labels
+
+
+def test_a_closed_discovery_does_not_block_re_filing_it(cfg):
+    """Single-use fixture, in one line. Run 1 files the discovery and the reset
+    closes it; run 2's discover then refuses as a duplicate, exits 1, and rubric
+    08 fails for a reason that has nothing to do with the orchestrator."""
+    gh = FakeGh()
+    parent = gh.create_issue("parent", "b", ["fleet:claimed", "area:eval"])
+    first = do_discover(
+        cfg, gh, parent=parent, title="lid rounds early", area="eval", evidence="src/eval/lid.py:44"
+    )
+    gh.close_issue(first)
+    again = do_discover(
+        cfg, gh, parent=parent, title="lid rounds early", area="eval", evidence="src/eval/lid.py:44"
+    )
+    assert again != first
+
+
+def test_an_open_duplicate_is_still_refused(cfg):
+    """The rule that matters is unchanged: two live issues for one defect is the
+    duplication the search exists to prevent. Without this, 'fix the false
+    refusal' becomes 'remove the check'."""
+    gh = FakeGh()
+    parent = gh.create_issue("parent", "b", ["fleet:claimed", "area:eval"])
+    do_discover(cfg, gh, parent=parent, title="lid rounds early", area="eval", evidence="e")
+    with pytest.raises(DuplicateDiscovery):
+        do_discover(cfg, gh, parent=parent, title="lid rounds early", area="eval", evidence="e")

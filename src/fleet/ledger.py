@@ -91,6 +91,7 @@ def read_one(row: dict, packet: dict | None = None, verdict: dict | None = None)
         auto_ok=labels_module.AUTO_OK in names,
         attempts=_counter(names, "fleet:attempt-"),
         fix_passes=_counter(names, "fleet:fix-pass-"),
+        rebases=_counter(names, "fleet:rebase-"),
         # gh's assignees are objects; FakeGh has no assignees at all and callers
         # that build rows by hand use bare logins. Accept all three.
         assignee=first.get("login") if isinstance(first, dict) else first,

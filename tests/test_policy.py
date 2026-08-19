@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import FIXTURE_POLICY
+from fleet import policy as policy_module
 from fleet.config import load_config
 from fleet.policy import PolicyError, known_roles, load, parse_ownership, parse_routes
 
@@ -138,6 +139,20 @@ def test_a_missing_roles_directory_raises(tmp_path):
     permissive path this module exists to close."""
     with pytest.raises(PolicyError, match="no role prompts"):
         known_roles(tmp_path / "nope")
+
+
+def test_policy_carries_max_rebases_from_config(cfg, tmp_path):
+    """A cap that stops at FleetConfig is a cap decide() cannot enforce."""
+    (tmp_path / "o.md").write_text("| Glob | Area |\n|---|---|\n| `src/eval/**` | `eval` |\n")
+    (tmp_path / "t.md").write_text(
+        "| Class | Route | Output | Unattended? |\n|---|---|---|---|\n"
+        "| `patch` | implementer → reviewer → integrator | c | yes |\n"
+    )
+    (tmp_path / ".agents" / "roles").mkdir(parents=True)
+    for role in ("implementer", "reviewer", "integrator"):
+        (tmp_path / ".agents" / "roles" / f"{role}.md").write_text("x")
+    loaded = policy_module.load(load_config(tmp_path))
+    assert loaded.max_rebases == 1
 
 
 def test_load_reads_the_vendored_fixture_policy():

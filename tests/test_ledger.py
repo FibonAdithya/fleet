@@ -158,6 +158,25 @@ def test_the_assignee_is_read_from_gh_s_object_shape():
     assert ledger.read_one(row()).assignee is None
 
 
+def test_rebases_are_counted_from_labels():
+    """The maximum N present, not the count -- rebase-1 is not removed when
+    rebase-2 is added, exactly as attempts and fix passes accumulate."""
+    task = ledger.read_one(
+        {
+            "number": 4,
+            "title": "t",
+            "state": "OPEN",
+            "labels": ["fleet:claimed", "fleet:rebase-1", "fleet:rebase-2"],
+        }
+    )
+    assert task.rebases == 2
+
+
+def test_a_task_with_no_rebase_label_has_none():
+    task = ledger.read_one({"number": 4, "title": "t", "state": "OPEN", "labels": ["fleet:ready"]})
+    assert task.rebases == 0
+
+
 def test_blocked_on_comes_from_the_packet_not_a_label():
     """Catches inventing a fleet:blocked-on-N label -- one gh has never heard of,
     so applying it would fail the whole edit. The dependency lives in the handoff

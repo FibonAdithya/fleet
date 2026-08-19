@@ -6,10 +6,10 @@ import pytest
 import yaml
 
 from conftest import FIXTURE_POLICY
-from fleet.model import Advance, Dispatch, Release
+from fleet.model import Advance, CloseIssue, Continue, Dispatch, Rebase, Release, Retire
 from fleet.runlog import RunLog
 from fleet.runlog import read as read_runlog
-from fleet.simulate import ScenarioError, load_scenario, render_intent, run
+from fleet.simulate import ScenarioError, _apply_to_rows, load_scenario, render_intent, run
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,6 +37,71 @@ INLINE = {
 def test_an_inline_scenario_dispatches():
     ticks = run(INLINE, ROOT)
     assert Dispatch(task=1, role="implementer", base="integration", attempt=1) in ticks[0]
+
+
+def test_a_seeded_agent_is_visible_to_the_very_first_decide_call():
+    """`seed.agents` exists to give decide() an agent it never started itself
+    -- proof that seeding actually reaches the first tick, not merely that
+    the schema accepts the key. #1 is READY and its seeded agent is
+    "working": decide() cannot see it as a healthy continuation of anything
+    (READY is not a live state), so the only way it is accounted for at all
+    is Task 4's orphan pass -- and `_dispatch` also treats the task as busy,
+    so no Dispatch competes with the Retire. `cost_usd` is left out of the
+    seed on purpose: `AgentState.cost_usd` already defaults to 0.0, so this
+    also proves the harness does not need every field to seed successfully."""
+    scenario = {
+        **INLINE,
+        "seed": {**INLINE["seed"], "agents": {1: {"status": "working", "change_seq": 1}}},
+        "ticks": [{"outcomes": {}, "expect": ["Retire(1)"]}],
+    }
+    assert run(scenario, ROOT)[0] == [Retire(task=1)]
+
+
+def test_omitting_the_agents_seed_key_is_identical_to_an_explicit_empty_one():
+    """Protects the other seven scenarios, none of which name `agents:` at
+    all. `_numbered(None)` and `_numbered({})` both yield `{}`, and
+    `FakeExecutor.seed` on an empty iterable is a no-op -- so the two must
+    produce the exact same intents, not merely "similar" ones."""
+    omitted = run(INLINE, ROOT)
+    explicit = run({**INLINE, "seed": {**INLINE["seed"], "agents": {}}}, ROOT)
+    want = [[Dispatch(task=1, role="implementer", base="integration", attempt=1)]]
+    assert omitted == explicit == want
+
+
+def test_a_seeded_agent_with_an_unknown_key_is_refused():
+    """As strict as every other seed shape in this module: an unknown field
+    on a seeded agent is a typo nobody would otherwise notice."""
+    bad = {
+        **INLINE,
+        "seed": {
+            **INLINE["seed"],
+            "agents": {1: {"status": "working", "change_seq": 1, "role": "implementer"}},
+        },
+    }
+    with pytest.raises(ScenarioError, match="unknown key"):
+        run(bad, ROOT)
+
+
+def test_a_seeded_agent_missing_change_seq_is_refused():
+    """`AgentState.change_seq` has no default -- a scenario that omits it is
+    asking the harness to invent a fact about a herdr snapshot, which is
+    exactly the "quiet stub" the schema exists to refuse."""
+    bad = {**INLINE, "seed": {**INLINE["seed"], "agents": {1: {"status": "working"}}}}
+    with pytest.raises(ScenarioError, match="missing"):
+        run(bad, ROOT)
+
+
+def test_a_seeded_agent_with_an_unknown_status_is_refused():
+    """`AgentState.status` is `"working" | "done" | "dirty"` by comment only
+    (model.py) -- a fourth value here is a status no real herdr snapshot can
+    report, and a scenario asserting on it would be asserting on a fake more
+    permissive than the real client, which the global constraints forbid."""
+    bad = {
+        **INLINE,
+        "seed": {**INLINE["seed"], "agents": {1: {"status": "sleeping", "change_seq": 1}}},
+    }
+    with pytest.raises(ScenarioError, match="unknown status"):
+        run(bad, ROOT)
 
 
 def test_expectations_are_checked_not_merely_recorded():
@@ -179,7 +244,7 @@ def test_a_clean_exit_advances_the_task_to_its_packets_target():
             {"outcomes": {}, "expect": ["Dispatch(1, implementer, 1)"]},
             {
                 "outcomes": {1: "clean_exit"},
-                "packets": {1: {"to": "review", "head_sha": "a91c204"}},
+                "packets": {1: {"to": "review", "attempt": 1, "head_sha": "a91c204"}},
                 "expect": ["Advance(1, review)"],
             },
         ],
@@ -250,6 +315,28 @@ def test_the_rows_carry_the_last_ticks_labels_into_the_next():
     run(scenario, ROOT)
 
 
+def test_apply_to_rows_closes_the_row_on_close_issue():
+    """CloseIssue is an effect, not merely a label move -- a fold that only
+    watches SetLabels leaves the row's `state` at OPEN forever. That `state` is
+    what `ledger.read_one` turns into `is_open`, the field `_reap`'s own
+    comment names 'our own Advance-to-done on a previous tick' as one of the
+    two ways a row goes stale under -- and it is what makes Task 22 able to
+    seed a scenario that carries a closed row from one tick into the next."""
+    rows = [{"number": 1, "title": "t", "state": "OPEN", "labels": [], "assignees": []}]
+    updated = _apply_to_rows(rows, [CloseIssue(task=1)])
+    assert updated[0]["state"] == "CLOSED"
+
+
+def test_apply_to_rows_leaves_other_rows_open_on_close_issue():
+    rows = [
+        {"number": 1, "title": "t", "state": "OPEN", "labels": [], "assignees": []},
+        {"number": 2, "title": "t", "state": "OPEN", "labels": [], "assignees": []},
+    ]
+    updated = _apply_to_rows(rows, [CloseIssue(task=1)])
+    assert updated[0]["state"] == "CLOSED"
+    assert updated[1]["state"] == "OPEN"
+
+
 def test_an_unknown_scenario_key_is_refused():
     with pytest.raises(ScenarioError, match="unknown key"):
         run({**INLINE, "tickz": []}, ROOT)
@@ -316,7 +403,101 @@ def test_render_intent_drops_base_and_nothing_else():
     assert render_intent(intent) == "Dispatch(5, implementer, 2)"
 
 
+def test_a_rendered_retire_is_a_recognized_intent_shape():
+    """decide() does not emit Retire yet -- Task 3 does -- but a scenario's
+    `expect:` list is checked against `_shape`, which refuses any name absent
+    from `_INTENTS`. Without Retire in that list, the first scenario Task 3
+    writes to prove it dies with `'Retire' is not an intent` before its
+    assertion is even compared."""
+    from fleet.simulate import _shape
+
+    assert _shape(render_intent(Retire(task=5))) == ("Retire", ("5",))
+
+
+def test_a_rendered_continue_is_a_recognized_intent_shape():
+    """A continuation is an intent a scenario must be able to `expect:`, and
+    `_shape` refuses any name absent from `_INTENTS`. Without Continue in that
+    list every scenario that carries a task past REVIEW dies with `'Continue' is
+    not an intent` before its assertion is compared -- which is the whole of M3's
+    vertical slice."""
+    from fleet.simulate import _shape
+
+    rendered = render_intent(Continue(task=5, role="reviewer", base="integration"))
+    assert rendered == "Continue(5, reviewer)"
+    assert _shape(rendered) == ("Continue", ("5", "reviewer"))
+
+
+def test_a_rendered_rebase_is_a_recognized_intent_shape():
+    """decide() emits Rebase for an integrator's handback (Task 6), and Task
+    20's rebase-storm scenario asserts one with `expect:`. `_shape` refuses any
+    name absent from `_INTENTS`; without Rebase in that list the scenario dies
+    with `'Rebase' is not an intent` before its assertion is even compared."""
+    from fleet.simulate import _shape
+
+    rendered = render_intent(Rebase(task=4, rebase=1))
+    assert rendered == "Rebase(4, 1)"
+    assert _shape(rendered) == ("Rebase", ("4", "1"))
+
+
 def test_load_scenario_reads_yaml(tmp_path):
     path = tmp_path / "s.yaml"
     path.write_text(yaml.safe_dump(INLINE))
     assert load_scenario(path)["name"] == "one-dispatch"
+
+
+# --------------------------------------------------- the agent moves the label
+
+
+def test_a_tick_can_relabel_a_row_the_way_an_agent_does():
+    """The shell's ordinary path, and until now inexpressible here.
+
+    An agent ends a stage by running `fleet handoff --to <state>`, and
+    `commands._post` moves the label itself -- so the allocator's next tick
+    reads a row that has already moved. `_apply_to_rows` folds only the
+    allocator's OWN effects, so a scenario could previously describe a label
+    move only by having decide() make it, which is the shape the real shell
+    rarely takes. #1 starts READY and is dispatched; its agent then moves the
+    label to REVIEW itself and goes, so tick 2 reads a REVIEW row with no agent
+    and continues it to the reviewer. Without the relabel the row is still
+    CLAIMED and tick 2 releases it as ledger drift instead.
+    """
+    scenario = {
+        **INLINE,
+        "ticks": [
+            {"outcomes": {}, "expect": ["Dispatch(1, implementer, 1)"]},
+            {
+                "relabel": {1: "review"},
+                "outcomes": {1: "vanished"},
+                "expect": ["Continue(1, reviewer)"],
+            },
+        ],
+    }
+    assert run(scenario, ROOT)[1] == [Continue(task=1, role="reviewer", base="integration")]
+
+
+def test_a_relabel_replaces_the_old_state_label_rather_than_adding_to_it():
+    """Two state labels on one row is a ledger `ledger.read_one` cannot read
+    honestly, and it is what a relabel that only appends would produce. Written
+    exactly as `expand._to_state` writes one: every other state label off."""
+    scenario = {
+        **INLINE,
+        "ticks": [
+            {"outcomes": {}, "expect": ["Dispatch(1, implementer, 1)"]},
+            # If `fleet:ready` survived the move, #1 would still look
+            # dispatchable and tick 2 would try to start a second agent on it.
+            {"relabel": {1: "human"}, "outcomes": {}, "expect": ["Retire(1)"]},
+        ],
+    }
+    assert run(scenario, ROOT)[1] == [Retire(task=1)]
+
+
+def test_a_relabel_to_a_state_with_no_label_is_refused():
+    """As strict as every other shape in this schema. A typo would move a row
+    to a state nothing reads, and the tick would then assert an absence it
+    produced by accident rather than by policy."""
+    bad = {
+        **INLINE,
+        "ticks": [{"relabel": {1: "finished"}, "outcomes": {}, "expect": []}],
+    }
+    with pytest.raises(ScenarioError, match="unknown state"):
+        run(bad, ROOT)

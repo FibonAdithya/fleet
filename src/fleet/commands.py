@@ -57,8 +57,16 @@ def _move_state(gh: GhClient, issue: int, state: str, add: list[str] | None = No
 
 
 def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
-    validate(cfg, "handoff", packet)
     issue = packet["task"]
+    # The issue outlives the attempt, so a packet that does not name its attempt
+    # cannot be told apart from a previous one by anything reading the comments.
+    # Read off the ledger row, not an argument: an agent that could set this
+    # itself could re-validate a stale packet onto a fresh attempt -- exactly
+    # the move Task 7's binding in decide._advance exists to prevent. `_post`
+    # is reached only through build_handoff's callers (do_handoff, do_block,
+    # do_escalate), so this never touches a verdict.
+    packet["attempt"] = max(read_one(gh.get_issue(issue)).attempts, 1)
+    validate(cfg, "handoff", packet)
     gh.comment(issue, render(packet))
     _move_state(gh, issue, state)
     return packet
@@ -233,7 +241,21 @@ def do_discover(
     # issues -- "t" matches "...explicit k". Narrow with it, then require an exact
     # title match. The design already accepts that some near-duplicates get filed;
     # silently refusing a real discovery is the worse failure.
-    if any(i["title"].strip().lower() == title.strip().lower() for i in gh.search_titles(title)):
+    #
+    # OPEN only, though search_titles ("most recent 200, all states" -- other
+    # callers rely on that contract, so the filter lives here instead) scans
+    # every state: a closed discovery from a prior graded run must not block
+    # re-filing it after a reset, or every run past the first exits 1 on a
+    # rediscovery for a reason that has nothing to do with the orchestrator.
+    # Two OPEN issues for one defect is the duplication this guard exists to
+    # prevent; a closed one and a fresh one are not that. Case-folded through
+    # .upper() for the same reason FakeGh.list_issues is: gh returns
+    # OPEN/CLOSED and hand-built rows use open/closed.
+    if any(
+        i["title"].strip().lower() == title.strip().lower()
+        and str(i.get("state", "OPEN")).upper() == "OPEN"
+        for i in gh.search_titles(title)
+    ):
         raise DuplicateDiscovery(f"an issue titled {title!r} already exists")
     # `discovered-by:<n>` is generated at runtime, so it does not exist in the
     # repo's label set. gh refuses an unknown label and creates no issue at all.

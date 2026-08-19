@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from conftest import git
@@ -33,3 +35,22 @@ def test_escalate_and_block_stay_reachable_from_a_detached_head(repo):
 
 def test_merge_base_is_resolved_against_the_integration_branch(repo):
     assert fleet_git.merge_base_sha(repo, "integration") == fleet_git.head_sha(repo)
+
+
+def test_a_hung_git_call_times_out(repo, monkeypatch):
+    """`_git` shells out with no bound. `merge_base_sha` runs on every handoff,
+    and a git that never returns -- an index lock held by a crashed process, a
+    filesystem that has gone -- hangs the agent's `fleet handoff` forever with
+    no output at all."""
+    import fleet.git as git_module
+
+    monkeypatch.setattr(git_module, "GIT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(
+        git_module.subprocess,
+        "run",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(cmd="git", timeout=kw["timeout"])
+        ),
+    )
+    with pytest.raises(RuntimeError, match="timed out"):
+        git_module.head_sha(repo)

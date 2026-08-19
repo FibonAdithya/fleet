@@ -3,20 +3,34 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import click
 
-from fleet import git, labels
-from fleet import ledger as ledger_module
+from fleet import git, labels, statesocket
 from fleet import policy as policy_module
+from fleet import runlog as runlog_module
+from fleet import status as status_module
 from fleet.commands import do_block, do_discover, do_escalate, do_handoff, do_verdict
 from fleet.config import load_config
+from fleet.daemon import Daemon, stop_on_signals
 from fleet.decide import decide
 from fleet.gh import RealGh
+from fleet.herdr import RealHerdr
+from fleet.herdr_executor import HerdrExecutor
 from fleet.model import FleetState
+from fleet.reader import read_ledger
+from fleet.runlog import RunLog
 from fleet.simulate import render_intent
+
+#: Seconds `gh api user` may take. One tiny call, made once at startup before
+#: the first tick, and its failure already answers None -- so this only bounds
+#: how long `fleet run` can sit saying nothing before it starts.
+GH_LOGIN_TIMEOUT_SECONDS = 30
 
 ROLE_UNSET = (
     "FLEET_ROLE is unset. It decides which state transitions you may write, so there is "
@@ -65,11 +79,26 @@ class ReadOnlyGh:
 def do_plan(cfg, gh, now: datetime) -> list[str]:
     """One tick of decide() against a live ledger, rendered.
 
+    Read through `reader.read_ledger`, the daemon's own ledger read, and not
+    through `gh.list_issues("open")`. A preview that disagrees with the thing it
+    previews is worse than no preview, and this one disagreed in three
+    directions at once. `Task.blocked_on` comes from a handoff packet and
+    nothing else, so with no packets fetched every one was None and UNBLOCK was
+    unreachable; `_is_rebase_handback` reads the packet too, so an integrator's
+    handback rendered as `Release(no_agent)` where the daemon emits `Rebase`;
+    and an open-only query drops the closed dependency that satisfies an
+    UNBLOCK. Task 21 uses this command as the pre-flight check before a graded
+    run, which is the worst possible place for a systematically different
+    answer.
+
+    The cost is `gh issue view` per row in a packet-carrying state, which is
+    what the daemon already pays every tick.
+
     Separate from the command because inside it -- behind `RealGh(cfg.repo_slug)`
-    -- the only wiring of ledger.read, policy.load and decide() in the CLI is
+    -- the only wiring of read_ledger, policy.load and decide() in the CLI is
     reachable by no test that does not talk to GitHub.
     """
-    tasks = ledger_module.read(gh.list_issues("open"))
+    tasks = read_ledger(gh)
     intents, _ = decide(FleetState(), tasks, policy_module.load(cfg), [], now)
     lines: list[str] = []
     if any(task.state == "claimed" for task in tasks):
@@ -264,18 +293,164 @@ def verdict(task, decision, head_sha, checks_rerun, findings, packet_was_suffici
 
 
 @main.command()
-@click.option("--dry-run/--no-dry-run", default=True, help="Print the plan; write nothing.")
-def plan(dry_run):
-    """Print what the allocator would do right now."""
-    if not dry_run:
-        # Refused before load_config, or `fleet plan --no-dry-run` outside a
-        # fleet repo complains about a missing fleet.toml instead of saying
-        # which half of the flag is unimplemented.
-        raise click.ClickException("only --dry-run is implemented; the daemon lands in M3")
+def plan():
+    """Print what the allocator would do right now. Reads only; writes nothing.
+
+    Every row is read through the daemon's own ledger read, so this is the same
+    answer the next tick would give.
+    """
     cfg = load_config()
+    # No `--no-dry-run`. It selected an unwrapped, writing client for a body
+    # that makes no write at all -- `do_plan` reads and renders -- so the flag
+    # was accepted and did nothing, which is worse than either refusing or
+    # writing: an operator who passes it believes something happened. The test
+    # that claimed to pin it monkeypatched `do_plan` away and so could never
+    # have seen that. The command previews; the wrapper is what makes "writes
+    # nothing" a property of the code path rather than of having read it.
     gh = ReadOnlyGh(RealGh(cfg.repo_slug))
     for line in do_plan(cfg, gh, datetime.now(timezone.utc)):
         click.echo(line)
+
+
+#: The minted run id's shape. Sortable, filename-safe, and second-resolution --
+#: two daemons started in the same second would share a night, which is what
+#: `--run-id` and `--new-run` exist to settle explicitly.
+RUN_ID_FORMAT = "%Y-%m-%dT%H-%M-%SZ"
+
+
+def resolve_run_id(
+    runlog_path: Path, run_id: str | None, new_run: bool, now: datetime
+) -> tuple[str, str]:
+    """The night this process belongs to, and how it decided. Never guesses.
+
+    Resuming is the default because the alternative is worse in the direction
+    that costs money. `Daemon` recovers `spent_usd` by summing the run log for
+    ITS run id, so a freshly minted id at every start filters on an id that
+    appears in zero lines and resumes at zero -- a 2am restart hands the fleet a
+    second full budget and parent §10's drain never fires. That is spec §8's
+    named failure, and it was reachable through the only command a human uses
+    to start a daemon.
+
+    The cost of resuming by default is the mirror case: last night's id is still
+    the last line in the log tonight, so tonight would start already drained.
+    That is loud and safe -- the fleet dispatches nothing and says why -- and
+    `--new-run` is one flag away, which is not true of a night quietly spending
+    twice its ceiling.
+
+    Returns the id and a phrase naming the choice, because the operator has to
+    be able to read which of the three happened off one line at 2am.
+    """
+    if run_id and new_run:
+        raise click.ClickException(
+            "--run-id and --new-run contradict each other: one names a night to "
+            "rejoin, the other starts a new one. Pass exactly one."
+        )
+    if run_id:
+        return run_id, "given on the command line"
+    if not new_run:
+        previous = runlog_module.latest_run_id(runlog_path)
+        if previous:
+            return previous, "resumed from the run log"
+    return now.strftime(RUN_ID_FORMAT), "new run"
+
+
+@main.command()
+@click.option("--once", is_flag=True, help="One tick, then exit. For a supervised slice.")
+@click.option("--poll-seconds", type=int, default=None)
+@click.option(
+    "--run-id",
+    default=None,
+    help="Rejoin this night by name, whatever the run log's last line says.",
+)
+@click.option(
+    "--new-run",
+    is_flag=True,
+    help="Start a new night rather than resuming the run log's last one. "
+    "Without it, a restart resumes -- and inherits what that night already spent.",
+)
+def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool) -> None:
+    """Start the allocator daemon."""
+    cfg = load_config()
+    policy = policy_module.load(cfg)
+    gh = RealGh(cfg.repo_slug)
+    herdr = RealHerdr(
+        worktree_root=cfg.worktree_root,
+        projects_dir=Path.home() / ".claude" / "projects",
+        prices=cfg.prices,
+        repo_root=cfg.root,
+    )
+    owner = _gh_login()
+    executor = HerdrExecutor(herdr, gh, cfg, owner=owner)
+    run_id, origin = resolve_run_id(cfg.runlog_path, run_id, new_run, datetime.now(timezone.utc))
+    log = RunLog(cfg.runlog_path, run_id=run_id)
+    daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id)
+
+    stop = threading.Event()
+    # PULL-based: the socket calls back into the daemon's own last snapshot on
+    # every connection, so this is wired directly to the attribute rather than
+    # through `Daemon.run`'s `publish` callback -- that callback is a push and
+    # does not fit a client that connects, reads once, and disconnects.
+    thread = statesocket.serve(cfg.socket_path, lambda: daemon.snapshot, stop)
+    # One line, three facts: which night this is, how that was decided, and what
+    # this process believes that night has already spent. The third is the one
+    # that was unreadable before -- a daemon resuming at $0.00 against a night
+    # that spent $20 looks exactly like a daemon starting a fresh night, and the
+    # difference is the whole of the fleet ceiling.
+    click.echo(
+        f"fleet run: run_id={run_id} ({origin}) "
+        f"spent=${daemon.state.spent_usd:.2f} socket={cfg.socket_path}"
+    )
+    try:
+        # SIGTERM as well as SIGINT: a supervisor stopping the daemon must get
+        # the same clean shutdown a Ctrl-C gives, or the socket file is left
+        # behind. `stop_on_signals` installs both and restores the previous
+        # handlers on the way out.
+        with stop_on_signals(stop):
+            if once:
+                daemon.tick(datetime.now(timezone.utc))
+                click.echo("\n".join(status_module.render(daemon.snapshot.to_json())))
+            else:
+                daemon.run(cfg.poll_seconds if poll_seconds is None else poll_seconds, stop)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
+@main.command()
+def status() -> None:
+    """Print the last completed tick."""
+    cfg = load_config()
+    try:
+        payload = statesocket.request(cfg.socket_path)
+    except statesocket.NotRunning as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("\n".join(status_module.render(payload)))
+
+
+def _gh_login() -> str | None:
+    """The login `gh` is authenticated as -- the fleet's own identity.
+
+    Parent §3 makes the allocator the sole writer of ownership, and `fleet-1` is
+    not a GitHub login: gh fails the whole edit on an assignee it cannot resolve.
+    None rather than a guess if gh cannot say, because a wrong assignee fails
+    every label edit that rides along with it.
+    """
+    try:
+        return (
+            subprocess.run(
+                ["gh", "api", "user", "--jq", ".login"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=GH_LOGIN_TIMEOUT_SECONDS,
+            ).stdout.strip()
+            or None
+        )
+    # TimeoutExpired is neither an OSError nor a CalledProcessError, so without
+    # it here a wedged `gh` at startup takes `fleet run` down with a traceback
+    # rather than falling to the None this handler already means.
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
 
 
 if __name__ == "__main__":

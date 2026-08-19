@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES
+from fleet.cost import PRICE_KEYS
+from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES, DEFAULT_MAX_REBASES
 
 try:
     import tomllib
@@ -56,8 +57,46 @@ class FleetConfig:
     stall_minutes: int
     max_attempts: int
     max_fix_passes: int
+    max_rebases: int
     per_task_usd: float
     fleet_usd: float
+    prices: dict[str, dict[str, float]]
+    socket_path: Path
+    runlog_path: Path
+    worktree_root: Path
+    poll_seconds: int
+
+
+def _prices(raw: dict) -> dict[str, dict[str, float]]:
+    """Dollars per million tokens, by model.
+
+    Every table must carry all four counters. Three of four is the same silent
+    hole as an unpriced model: the missing rate prices those tokens at nothing,
+    and cache reads are most of what an agent spends.
+
+    An absent [prices] table is an empty mapping, not an error *here*. `fleet
+    plan` starts no agents and needs no prices, and requiring the table would
+    refuse every fleet.toml written before it existed, on a key only the daemon
+    reads.
+
+    It is not permission to run unpriced. An empty mapping prices nothing, so
+    `cost.price_transcript` raises `UnpricedModel` for the first agent whose
+    transcript names any model at all, `RealHerdr.agents` records that in
+    `unpriced()`, and `Daemon.tick` turns a non-empty `unpriced()` into a
+    Drain. The refusal is the daemon's, at the moment it would otherwise spend,
+    and it is loud there rather than here.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for model, table in raw.items():
+        missing = [key for key in PRICE_KEYS if key not in table]
+        if missing:
+            raise ConfigError(
+                f"[prices.{model!r}] is missing {', '.join(missing)}. "
+                "A rate left out prices those tokens at zero, which is the hole "
+                "the ceiling exists to close."
+            )
+        out[model] = {key: float(table[key]) for key in PRICE_KEYS}
+    return out
 
 
 def _find_root(start: Path) -> Path:
@@ -72,6 +111,7 @@ def load_config(start: Path | None = None) -> FleetConfig:
     data = tomllib.loads((root / "fleet.toml").read_text())
     repo, policy, fleet = data["repo"], data["policy"], data.get("fleet", {})
     budget = data.get("budget", {})
+    daemon = data.get("daemon", {})
     return FleetConfig(
         root=root,
         repo_slug=repo["slug"],
@@ -84,8 +124,17 @@ def load_config(start: Path | None = None) -> FleetConfig:
         stall_minutes=int(fleet.get("stall_minutes", 10)),
         max_attempts=int(fleet.get("max_attempts", DEFAULT_MAX_ATTEMPTS)),
         max_fix_passes=int(fleet.get("max_fix_passes", DEFAULT_MAX_FIX_PASSES)),
+        max_rebases=int(fleet.get("max_rebases", DEFAULT_MAX_REBASES)),
         per_task_usd=_positive(
             float(budget.get("per_task_usd", DEFAULT_PER_TASK_USD)), "per_task_usd"
         ),
         fleet_usd=_positive(float(budget.get("fleet_usd", DEFAULT_FLEET_USD)), "fleet_usd"),
+        prices=_prices(data.get("prices", {})),
+        socket_path=Path(daemon.get("socket", root / ".fleet" / "fleet.sock")).expanduser(),
+        runlog_path=Path(daemon.get("runlog", root / ".fleet" / "run.jsonl")).expanduser(),
+        worktree_root=Path(daemon.get("worktrees", "~/.fleet/worktrees")).expanduser(),
+        # Parent §8 writes 60. A tick fetches comments for every live task, so
+        # this is more gh calls than M2's single list and secondary rate limits
+        # are real -- instrument before lowering it.
+        poll_seconds=int(daemon.get("poll_seconds", 60)),
     )

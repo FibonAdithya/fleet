@@ -7,10 +7,15 @@ from fleet.labels import static_vocabulary
 from fleet.model import (
     Advance,
     Assign,
+    Close,
+    CloseIssue,
+    Continue,
     Dispatch,
     Drain,
     Escalate,
+    Rebase,
     Release,
+    Retire,
     SetLabels,
     StartAgent,
     StopAgent,
@@ -113,6 +118,34 @@ def test_a_zero_attempt_raises_rather_than_being_rounded_up():
         expand(Release(task=1, reason="stalled", attempt=0), POLICY)
 
 
+def test_rebase_lands_in_ready_with_its_counter_and_no_new_attempt():
+    """The attempt label is the one already on the task. A rebase that bumped it
+    would inflate fleet:attempt-N, which is exactly what the grader's `no task
+    exceeds 2 attempts` hard fail reads -- a task could reach NEEDS_HUMAN for
+    having conflicted twice."""
+    effects = expand(Rebase(task=4, rebase=1), POLICY)
+    labelling = [e for e in effects if isinstance(e, SetLabels)]
+    assert len(labelling) == 1
+    assert "fleet:ready" in labelling[0].add
+    assert "fleet:rebase-1" in labelling[0].add
+    assert not any(label.startswith("fleet:attempt-") for label in labelling[0].add)
+    assert effects[0] == StopAgent(task=4)
+
+
+def test_rebase_never_emits_a_counter_label_beyond_the_cap():
+    """Clamped for the same reason `_attempt_label` is: labels.static_vocabulary
+    is sized from `max_rebases`, so `fleet:rebase-(cap+1)` is a label gh has
+    never heard of, and gh refuses an unknown label and changes nothing at all.
+    decide() never emits a Rebase past the cap -- it escalates instead -- but
+    expand() has no way to know that about its caller, and a rebase number
+    handed straight to `labels.rebase_label` without clamping would raise
+    ValueError past `max_rebases` labels in the static vocabulary."""
+    effects = expand(Rebase(task=4, rebase=5), POLICY)
+    add = [e for e in effects if isinstance(e, SetLabels)][0].add
+    assert not any(label.startswith("fleet:rebase-") and label != "fleet:rebase-1" for label in add)
+    assert "fleet:rebase-1" in add
+
+
 def test_escalate_reaches_human_and_stops_the_agent():
     effects = expand(Escalate(task=1, reason="attempts_exhausted"), POLICY)
     assert StopAgent(task=1) in effects
@@ -128,11 +161,42 @@ def test_advance_moves_to_the_named_state_and_stops_the_finished_agent():
     assert "fleet:review" in labels_of(effects)[0].add
 
 
+def test_advancing_to_done_closes_the_issue():
+    """Closing on completion is what makes the UNBLOCK fix load-bearing: a
+    closed issue is a satisfied dependency, and until something closes one that
+    rule never fires."""
+    effects = expand(Advance(task=5, to="done"), POLICY)
+    assert CloseIssue(task=5) in effects
+    assert effects.index(CloseIssue(task=5)) == len(effects) - 1
+
+
+def test_advancing_to_review_does_not_close_the_issue():
+    effects = expand(Advance(task=5, to="review"), POLICY)
+    assert not any(isinstance(e, CloseIssue) for e in effects)
+
+
 def test_advance_refuses_a_state_outside_the_vocabulary():
     """A packet's `to` reaches here from an issue comment, so it is not
     necessarily a state this repo's label set contains."""
     with pytest.raises(ValueError, match="unknown state"):
         expand(Advance(task=1, to="merged"), POLICY)
+
+
+def test_retire_stops_the_agent_and_changes_no_state():
+    """The agent wrote the state itself with `fleet handoff`. A SetLabels here
+    would overwrite the handoff's target with whatever the allocator last saw --
+    turning a task that reached REVIEW back into a CLAIMED one."""
+    effects = expand(Retire(task=5), POLICY)
+    assert effects == [StopAgent(task=5), Assign(task=5, owner=None)]
+    assert not any(isinstance(e, SetLabels) for e in effects)
+
+
+def test_continue_starts_an_agent_and_touches_no_label():
+    """A SetLabels here relabels a REVIEW task to CLAIMED, which destroys the
+    state the continuation was dispatched for and routes the next lookup back to
+    the implementer."""
+    effects = expand(Continue(task=5, role="reviewer", base="integration"), POLICY)
+    assert effects == [StartAgent(task=5, role="reviewer", base="integration")]
 
 
 def test_drain_produces_no_effects():
@@ -148,3 +212,32 @@ def test_every_label_written_is_within_the_static_vocabulary():
         for effect in labels_of(expand(intent, POLICY)):
             assert set(effect.add) <= vocabulary
             assert set(effect.remove) <= vocabulary
+
+
+def test_close_closes_the_issue_and_stops_the_agent():
+    """Spec §6's close, on the path the real shell actually takes: the agent
+    moved the label to `fleet:done` itself, so there is nothing to relabel and
+    only the close is left. StopAgent for the same reason Advance carries one --
+    an agent left in the executor's live set keeps reporting cost every tick."""
+    assert expand(Close(task=5), POLICY) == [CloseIssue(task=5), StopAgent(task=5)]
+
+
+def test_close_writes_no_labels_at_all():
+    """The label is the one thing the agent got right, and this intent must not
+    be able to express a relabel -- the same property `Retire` has. A SetLabels
+    here would let a close rewrite a terminal state an agent chose."""
+    assert not [e for e in expand(Close(task=5), POLICY) if isinstance(e, SetLabels)]
+
+
+def test_close_closes_before_it_stops_so_a_failed_close_can_be_retried():
+    """Order, not just membership, and the opposite order from Advance-to-done.
+
+    `decide` emits Close only while the row is OPEN and its agent is live, so
+    those two facts ARE the retry condition. Stopping first spends the agent on
+    an attempt that then fails its close, and the row sits OPEN at `fleet:done`
+    for the rest of the night with nothing left to re-arm it. The reverse
+    failure -- close lands, stop fails -- is already covered: that is a CLOSED
+    row with an agent, which `_reap`'s closed-row rule retires.
+    """
+    effects = expand(Close(task=5), POLICY)
+    assert effects.index(CloseIssue(task=5)) < effects.index(StopAgent(task=5))

@@ -13,13 +13,18 @@ from fleet import labels as labels_module
 from fleet.model import (
     Advance,
     Assign,
+    Close,
+    CloseIssue,
+    Continue,
     Dispatch,
     Drain,
     Effect,
     Escalate,
     Intent,
     Policy,
+    Rebase,
     Release,
+    Retire,
     SetLabels,
     StartAgent,
     StopAgent,
@@ -60,21 +65,39 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         return []
 
     if isinstance(intent, Dispatch):
-        # No Assign: `fleet-1` is not a GitHub login, and gh fails the whole
-        # edit on an assignee it cannot resolve. Nothing in M2 knows the
-        # identity the executor runs agents as -- fleet.toml names none and
-        # GhClient has no assignee method -- so ownership is written in M3 by
-        # the executor that does.
+        # No Assign: `fleet-1` is not a GitHub login, and this layer has no way
+        # to learn the one `gh` is authenticated as. HerdrExecutor writes
+        # ownership when it starts the agent -- see herdr_executor.apply.
         return [
             _to_state(intent.task, "claimed", (_attempt_label(intent.attempt, policy),)),
             StartAgent(task=intent.task, role=intent.role, base=intent.base),
         ]
+
+    if isinstance(intent, Continue):
+        # StartAgent alone. The state label is already what this stage needs --
+        # the previous stage's agent wrote it -- and no counter moves, because
+        # nothing failed.
+        return [StartAgent(task=intent.task, role=intent.role, base=intent.base)]
 
     if isinstance(intent, Release):
         return [
             StopAgent(task=intent.task),
             Assign(task=intent.task, owner=None),
             _to_state(intent.task, "ready", (_attempt_label(intent.attempt, policy),)),
+        ]
+
+    if isinstance(intent, Rebase):
+        # No attempt label: the task keeps the one it already carries. Labels
+        # accumulate and `_to_state` removes only state labels, so writing none
+        # leaves the existing counter exactly where it was.
+        return [
+            StopAgent(task=intent.task),
+            Assign(task=intent.task, owner=None),
+            _to_state(
+                intent.task,
+                "ready",
+                (labels_module.rebase_label(min(intent.rebase, policy.max_rebases)),),
+            ),
         ]
 
     if isinstance(intent, Escalate):
@@ -87,6 +110,37 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
     if isinstance(intent, Unblock):
         return [_to_state(intent.task, "ready")]
 
+    if isinstance(intent, Retire):
+        # StopAgent for the same reason Advance carries one: an agent left in the
+        # executor's live set keeps reporting cost every tick, and the budget
+        # drain is computed from live agents. Assign(None) because the allocator
+        # is the sole writer of ownership and this task no longer has an owner.
+        return [StopAgent(task=intent.task), Assign(task=intent.task, owner=None)]
+
+    if isinstance(intent, Close):
+        # No SetLabels, on purpose. The row is already at `fleet:done` because
+        # the agent's own `fleet handoff --to done` put it there, and this
+        # intent must not be able to rewrite a terminal label an agent chose --
+        # the same property Retire has, kept by having no state to write.
+        #
+        # Close FIRST, stop second -- the opposite of Advance-to-done, and for a
+        # reason that only holds here. Advance writes a label, so its close goes
+        # last: an edit failing after the close would leave a closed issue with
+        # no terminal state. This intent writes no label, and what it needs
+        # instead is to be retryable.
+        #
+        # `decide` emits this only while the row is OPEN and its agent is live,
+        # so a close that fails leaves both facts true and the next tick tries
+        # again. Stopping first would spend the agent -- the only evidence the
+        # fleet ran this task -- on an attempt that then failed, and the row
+        # would sit OPEN at `fleet:done` for the rest of the night with nothing
+        # left to re-arm the retry.
+        #
+        # The reverse failure is already handled: a close that lands over a stop
+        # that fails leaves a CLOSED row with an agent, which is `_reap`'s
+        # closed-row rule, which retires it.
+        return [CloseIssue(task=intent.task), StopAgent(task=intent.task)]
+
     if isinstance(intent, Advance):
         if intent.to not in labels_module.STATES:
             # A packet's `to` arrives from an issue comment, so it is not
@@ -95,6 +149,12 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         # StopAgent because the agent that wrote the packet has exited. Left in
         # the executor's live set it keeps reporting cost every tick, and the
         # budget drain is computed from live agents.
-        return [StopAgent(task=intent.task), _to_state(intent.task, intent.to)]
+        effects: list[Effect] = [StopAgent(task=intent.task), _to_state(intent.task, intent.to)]
+        if intent.to == "done":
+            # Last, not first: the label is what a grader reads, and an edit
+            # that fails after the close would leave a closed issue with no
+            # terminal state at all.
+            effects.append(CloseIssue(task=intent.task))
+        return effects
 
     raise ValueError(f"cannot expand {intent!r}")

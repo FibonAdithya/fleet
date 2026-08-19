@@ -4,7 +4,16 @@ import dataclasses
 from datetime import datetime, timezone
 
 from fleet.decide import decide
-from fleet.model import AgentState, Dispatch, Drain, Escalate, FleetState, Release, Task
+from fleet.model import (
+    AgentState,
+    Continue,
+    Dispatch,
+    Drain,
+    Escalate,
+    FleetState,
+    Release,
+    Task,
+)
 from test_decide_reap import POLICY
 
 T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
@@ -33,8 +42,16 @@ def live(number=1, area="eval", klass="patch"):
     )
 
 
+def staged(number, state, area="eval", klass="patch"):
+    return Task(number=number, title="t", state=state, area=area, klass=klass, auto_ok=True)
+
+
 def dispatched(intents):
     return sorted(i.task for i in intents if isinstance(i, Dispatch))
+
+
+def continued(intents):
+    return sorted(i.task for i in intents if isinstance(i, Continue))
 
 
 def test_a_ready_auto_ok_task_is_dispatched_to_the_first_role_in_its_route():
@@ -90,7 +107,10 @@ def test_an_area_held_by_a_task_in_review_is_excluded():
         auto_ok=True,
     )
     intents, _ = decide(FleetState(), [reviewing, ready(8, "eval")], POLICY, [], T0)
+    # #1 is CONTINUED to its reviewer -- not new work, and not a Dispatch. #8 is
+    # the assertion that matters: the area is still excluded.
     assert dispatched(intents) == []
+    assert continued(intents) == [1]
 
 
 def test_a_closed_task_in_a_live_state_holds_neither_a_slot_nor_an_area():
@@ -161,20 +181,24 @@ def test_a_task_in_integrating_arms_the_global_lock():
     assert dispatched(intents) == []
 
 
-def test_a_task_in_integrating_holds_its_slot_and_its_area():
-    """The other half of the same membership: INTEGRATING is live, so it counts
-    against slots and excludes its area."""
+def test_a_task_in_review_holds_the_slot_it_occupies():
+    """The other half of the same membership: a live row counts against `slots`.
+
+    Pointed at a REVIEW row, not the INTEGRATING one it used to use. Any row
+    that writes the integration branch -- which `class:patch` at INTEGRATING now
+    does -- makes DISPATCH return at the global lock BEFORE `held` or `free` is
+    computed, so the identical assertion on an INTEGRATING row survives a
+    mutation to either accounting: it had become a weaker duplicate of
+    `test_a_patch_task_at_integrating_takes_the_global_lock`.
+
+    #8 is in a DIFFERENT area on purpose, so the slot is the only thing that can
+    exclude it; the area half is `test_an_area_held_by_a_task_in_review_is_excluded`."""
     small = dataclasses.replace(POLICY, slots=1)
-    integrating = Task(
-        number=20,
-        title="t",
-        state="integrating",
-        area="eval",
-        klass="patch",
-        auto_ok=True,
+    intents, _ = decide(
+        FleetState(), [staged(20, "review", area="eval"), ready(8, "train")], small, [], T0
     )
-    intents, _ = decide(FleetState(), [integrating, ready(8, "eval")], small, [], T0)
     assert dispatched(intents) == []
+    assert continued(intents) == [20]
 
 
 # The shared POLICY routes `patch` alone, which is enough to prove the lock
@@ -344,3 +368,149 @@ def test_a_closed_unroutable_task_is_not_escalated():
     closed = dataclasses.replace(ready(9, "docs", klass="spec"), is_open=False)
     intents, _ = decide(FleetState(), [closed], POLICY, [], T0)
     assert intents == []
+
+
+def test_a_task_in_review_is_continued_to_the_reviewer():
+    """route[1] of the patch route. Without this the task sits at fleet:review
+    holding its area and its slot for the rest of the night, because REAP only
+    touches CLAIMED and nothing else can move it."""
+    intents, _ = decide(FleetState(), [staged(1, "review")], POLICY, [], T0)
+    assert Continue(task=1, role="reviewer", base="integration") in intents
+
+
+def test_a_continuation_never_emits_a_dispatch():
+    """A Dispatch would relabel the task to CLAIMED. This is the assertion that
+    catches the whole class: it fails the moment someone reuses Dispatch here
+    because the two look interchangeable at the call site."""
+    intents, _ = decide(FleetState(), [staged(1, "review")], POLICY, [], T0)
+    assert dispatched(intents) == []
+
+
+def test_a_task_in_integrating_is_continued_to_the_integrator():
+    intents, _ = decide(FleetState(), [staged(1, "integrating")], POLICY, [], T0)
+    assert Continue(task=1, role="integrator", base="integration") in intents
+
+
+def test_a_continuation_is_not_charged_a_slot_it_already_holds():
+    """The deadlock this pass exists to prevent. At slots=1 the reviewing task IS
+    the one live task, so `free` is zero -- and a single-pass dispatch would
+    refuse to advance the only task the fleet is working on."""
+    small = dataclasses.replace(POLICY, slots=1)
+    intents, _ = decide(FleetState(), [staged(1, "review")], small, [], T0)
+    assert continued(intents) == [1]
+
+
+def test_a_continuation_is_not_excluded_by_the_area_it_holds_itself():
+    intents, _ = decide(FleetState(), [staged(1, "review", area="eval")], POLICY, [], T0)
+    assert continued(intents) == [1]
+
+
+def test_a_continuation_with_a_live_agent_is_not_started_twice():
+    """The reviewer is already running. Starting again puts a second agent in
+    the same worktree -- the collision `busy` exists to prevent."""
+    agents = [AgentState(task=1, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [staged(1, "review")], POLICY, agents, T0)
+    assert continued(intents) == []
+
+
+def test_a_spec_task_that_reaches_review_escalates_rather_than_raising():
+    """The `spec` route is (planner,), so route[1] does not exist. An IndexError
+    here comes out of the pure core and takes every other task's intents with
+    it; the escalation names the policy error instead."""
+    spec = staged(9, "review", klass="spec")
+    policy = dataclasses.replace(POLICY, routes=(("spec", ("planner",)),))
+    intents, _ = decide(FleetState(), [spec], policy, [], T0)
+    assert Escalate(task=9, reason="unroutable_stage") in intents
+    assert continued(intents) == []
+
+
+def test_a_one_role_route_never_sends_its_only_role_to_integrate():
+    """route[-1] on a one-role route resolves to route[0]. Unguarded, a `spec`
+    task at INTEGRATING would send a planner to merge the integration branch."""
+    spec = staged(9, "integrating", klass="spec")
+    policy = dataclasses.replace(POLICY, routes=(("spec", ("planner",)),))
+    intents, _ = decide(FleetState(), [spec], policy, [], T0)
+    assert continued(intents) == []
+    assert Escalate(task=9, reason="unroutable_stage") in intents
+
+
+def test_a_patch_task_at_integrating_takes_the_global_lock():
+    """A class:patch task at INTEGRATING has an integrator writing the same
+    branch a class:integration task would. Keying the lock on klass alone -- as
+    M2 does -- lets a second writer onto `integration`. #8 is the assertion that
+    matters: it is READY, in a free area, and must NOT go out."""
+    intents, _ = decide(FleetState(), [staged(1, "integrating"), ready(8, "train")], POLICY, [], T0)
+    assert continued(intents) == [1]
+    assert dispatched(intents) == []
+
+
+def test_two_tasks_at_integrating_start_one_integrator():
+    intents, _ = decide(
+        FleetState(),
+        [staged(1, "integrating"), staged(2, "integrating", area="train")],
+        POLICY,
+        [],
+        T0,
+    )
+    assert len(continued(intents)) == 1
+
+
+def test_the_drain_stops_continuations_too():
+    """Draining means no new agent starts, and a reviewer is a new agent. A
+    drain that only gated READY would keep spending past the ceiling for as long
+    as tasks kept reaching REVIEW."""
+    state = FleetState(spent_usd=POLICY.fleet_usd)
+    intents, _ = decide(state, [staged(1, "review")], POLICY, [], T0)
+    assert intents == [Drain(reason="budget")]
+
+
+def test_a_running_integrator_blocks_another_task_at_integrating():
+    """The protective half of the continuation lock, and the half that is a
+    DEVIATION from the brief: Pass 1 excludes integrators that are actually
+    RUNNING rather than every live INTEGRATING row, because the latter deadlocks
+    two agentless rows against each other. Nothing else pins the running set --
+    `test_two_tasks_at_integrating_start_one_integrator` is carried by the
+    within-tick flag -- so replacing it with an empty set puts a second writer
+    onto the integration branch with every test still green."""
+    agents = [AgentState(task=1, status="working", change_seq=1)]
+    intents, _ = decide(
+        FleetState(),
+        [staged(1, "integrating"), staged(2, "integrating", area="train")],
+        POLICY,
+        agents,
+        T0,
+    )
+    assert continued(intents) == []
+
+
+def test_continuations_are_bounded_by_slots():
+    """`slots` bounds concurrent agents, and a continuation starts one. The
+    brief's justification for charging continuations no slot -- they already hold
+    theirs -- is true only while live rows <= slots, which is exactly what a
+    daemon restarted against a ledger it did not build, or a human relabelling
+    rows by hand, does not guarantee. Unbounded, ten REVIEW rows started ten
+    agents in one tick against a six-slot fleet."""
+    small = dataclasses.replace(POLICY, slots=6)
+    backlog = [staged(n, "review", area=f"a{n}") for n in range(1, 11)]
+    intents, _ = decide(FleetState(), backlog, small, [], T0)
+    assert len(continued(intents)) == 6
+
+
+def test_the_only_task_in_review_still_starts_at_one_slot():
+    """The deadlock the bound must not reintroduce. At slots=1 the reviewing
+    task IS the one live row, so a bound counting LIVE ROWS would refuse the only
+    task the fleet is working on -- forever. Counting running AGENTS is what
+    keeps both properties: nothing is running, so the slot is free."""
+    small = dataclasses.replace(POLICY, slots=1)
+    intents, _ = decide(FleetState(), [staged(1, "review")], small, [], T0)
+    assert continued(intents) == [1]
+
+
+def test_a_running_agent_spends_the_slot_a_continuation_would_need():
+    """The other side of the bound: the agent on #1 is the one slot, so #2 waits
+    a tick. Catches a bound written against the started count alone, which
+    ignores every agent already running and starts `slots` MORE of them."""
+    small = dataclasses.replace(POLICY, slots=1)
+    agents = [AgentState(task=1, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [live(1), staged(2, "review")], small, agents, T0)
+    assert continued(intents) == []

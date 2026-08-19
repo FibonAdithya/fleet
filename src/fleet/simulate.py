@@ -17,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from fleet import labels as labels_module
 from fleet import ledger as ledger_module
 from fleet import policy as policy_module
 from fleet.config import load_config
@@ -25,13 +26,19 @@ from fleet.executor import FakeExecutor
 from fleet.expand import expand
 from fleet.model import (
     Advance,
+    AgentState,
+    Close,
+    CloseIssue,
+    Continue,
     Dispatch,
     Drain,
     Effect,
     Escalate,
     FleetState,
     Intent,
+    Rebase,
     Release,
+    Retire,
     SetLabels,
     Unblock,
 )
@@ -40,14 +47,21 @@ from fleet.runlog import RunLog
 START = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
 
 _KEYS = {"name", "proves", "seed", "ticks"}
-_SEED_KEYS = {"issues", "ledger", "packets", "policy"}
-_TICK_KEYS = {"expect", "outcomes", "packets"}
+_SEED_KEYS = {"agents", "issues", "ledger", "packets", "policy"}
+_TICK_KEYS = {"expect", "outcomes", "packets", "relabel"}
+_AGENT_KEYS = {"status", "change_seq", "cost_usd"}
+_AGENT_REQUIRED = {"status", "change_seq"}
+# `AgentState.status` is a bare `str` typed by comment only ("working" | "done"
+# | "dirty" -- model.py). A scenario that seeds an agent is standing in for a
+# real herdr snapshot, so the same three values are the only honest ones; a
+# fourth here would be a state no real agent can report.
+_AGENT_STATUSES = ("working", "done", "dirty")
 
 # Parsed structurally, not string-compared: pyyaml splits an unquoted
 # `[Dispatch(1, implementer, 1)]` into three scalars, and a string comparison
 # turns that into a silent mismatch instead of a complaint about the file.
 _CALL = re.compile(r"^(\w+)\((.*)\)$")
-_INTENTS = (Advance, Dispatch, Drain, Escalate, Release, Unblock)
+_INTENTS = (Advance, Close, Continue, Dispatch, Drain, Escalate, Rebase, Release, Retire, Unblock)
 _INTENT_NAMES = frozenset(cls.__name__ for cls in _INTENTS)
 
 
@@ -113,10 +127,38 @@ def _check(scenario: dict) -> None:
         # description of a ledger the run never read.
         raise ScenarioError("seed names both a ledger and inline issues; pick one")
 
+    for task, spec in _numbered(seed.get("agents")).items():
+        # As strict as every other seed shape here: an unknown key is a typo
+        # nobody would notice, and a missing one is the harness quietly
+        # inventing a fact about a herdr snapshot the scenario never stated.
+        # `cost_usd` alone is exempt -- `AgentState.cost_usd` itself defaults
+        # to 0.0, so leaving it out asks the pure model for the same default
+        # it would give any other caller, not a value this harness made up.
+        unknown = set(spec) - _AGENT_KEYS
+        if unknown:
+            raise ScenarioError(f"unknown key(s) in seeded agent {task}: {sorted(unknown)}")
+        missing = _AGENT_REQUIRED - set(spec)
+        if missing:
+            raise ScenarioError(f"seeded agent {task} is missing {sorted(missing)}")
+        if spec["status"] not in _AGENT_STATUSES:
+            raise ScenarioError(
+                f"seeded agent {task} has unknown status {spec['status']!r}; "
+                f"expected one of {_AGENT_STATUSES}"
+            )
+
     for index, tick in enumerate(scenario["ticks"], start=1):
         unknown_tick = set(tick) - _TICK_KEYS
         if unknown_tick:
             raise ScenarioError(f"unknown key(s) in tick {index}: {sorted(unknown_tick)}")
+        for task, state in _numbered(tick.get("relabel")).items():
+            # Checked against the label vocabulary for the same reason a seeded
+            # agent's status is: a typo would relabel a row to a state nothing
+            # reads and the tick would assert an absence it produced by accident.
+            if state not in labels_module.STATES:
+                raise ScenarioError(
+                    f"tick {index} relabels task {task} to unknown state {state!r}; "
+                    f"expected one of {labels_module.STATES}"
+                )
         if tick.get("expect") is None:
             # Absent meant "do not check", so one mistyped key produced a green
             # scenario proving nothing. `expect: []` is the way to assert an
@@ -147,29 +189,60 @@ def _rows(seed: dict, root: Path) -> list[dict]:
     return [dict(row, labels=_label_names(row.get("labels", []))) for row in raw]
 
 
+def _relabel(rows: list[dict], task: int, state: str) -> list[dict]:
+    """The agent writes its own state transition, before the allocator sees it.
+
+    This is the shell's ordinary path, not an exotic one: an agent ends a stage
+    by running `fleet handoff --to <state>`, and `commands._post` moves the
+    label itself. The allocator's next tick therefore reads a row that has
+    already moved, and every rule that keys on the state a row arrives in
+    depends on that being expressible here. Nothing else in this harness can
+    produce it -- `_apply_to_rows` folds only the allocator's OWN effects, so a
+    scenario could previously describe a label move only by having decide()
+    make it, which is precisely the shape the real shell rarely takes.
+
+    Written exactly as `expand._to_state` writes one: every other state label
+    off, this one on, everything else untouched.
+    """
+    label = labels_module.state_label(state)
+    updated = []
+    for row in rows:
+        if row["number"] != task:
+            updated.append(row)
+            continue
+        kept = [name for name in row["labels"] if name not in labels_module.all_state_labels()]
+        updated.append(dict(row, labels=[*kept, label]))
+    return updated
+
+
 def _numbered(mapping: dict | None) -> dict[int, dict]:
     """YAML gives `{5: ...}` an int key and `{"5": ...}` a str one."""
     return {int(key): value for key, value in (mapping or {}).items()}
 
 
 def _apply_to_rows(rows: list[dict], effects: list[Effect]) -> list[dict]:
-    """Fold this intent's label effects back into the seeded rows, so the next
-    tick reads a ledger that reflects the last one.
+    """Fold this intent's label and close effects back into the seeded rows, so
+    the next tick reads a ledger that reflects the last one.
 
-    Only `SetLabels` is folded. `decide()` reads no other field a scenario can
-    observe -- notably not `assignee` -- and a fold no assertion can see is code
-    no test can keep honest.
+    Only `SetLabels` and `CloseIssue` are folded. `decide()` reads no other
+    field a scenario can observe -- notably not `assignee` -- and a fold no
+    assertion can see is code no test can keep honest. `CloseIssue` is folded
+    because `ledger.read_one` turns a row's `state` into `Task.is_open`, which
+    `_reap` reads on its own to retire a lingering agent on a row closed by our
+    own Advance-to-done -- a fold that skipped it would leave that row OPEN
+    forever, no matter how many ticks pass.
     """
     updated = [dict(row, labels=list(row["labels"])) for row in rows]
     by_number = {row["number"]: row for row in updated}
     for effect in effects:
-        if not isinstance(effect, SetLabels):
-            continue
         target = by_number.get(effect.task)
         if target is None:
             continue
-        kept = [name for name in target["labels"] if name not in effect.remove]
-        target["labels"] = kept + [name for name in effect.add if name not in kept]
+        if isinstance(effect, SetLabels):
+            kept = [name for name in target["labels"] if name not in effect.remove]
+            target["labels"] = kept + [name for name in effect.add if name not in kept]
+        elif isinstance(effect, CloseIssue):
+            target["state"] = "CLOSED"
     return updated
 
 
@@ -185,11 +258,32 @@ def run(scenario: dict, root: Path, runlog: RunLog | None = None) -> list[list[I
     seed_packets = _numbered(seed.get("packets"))
 
     executor = FakeExecutor(per_task_usd=policy.per_task_usd)
+    # `seed.agents` puts an agent in front of the very first `decide()` call,
+    # before this run has ever issued a Dispatch or Continue of its own --
+    # the one way to give decide() a worktree it did not start. No scenario
+    # names this key today; `_numbered(None)` is `{}` and `seed()` on an empty
+    # list is a no-op, so a file without it is unaffected byte for byte.
+    executor.seed(
+        AgentState(
+            task=task,
+            status=spec["status"],
+            change_seq=spec["change_seq"],
+            cost_usd=spec.get("cost_usd", 0.0),
+        )
+        for task, spec in _numbered(seed.get("agents")).items()
+    )
     state = FleetState()
     now = START
     history: list[list[Intent]] = []
 
     for index, tick in enumerate(scenario["ticks"], start=1):
+        # Before anything else this tick: the agent moved the label at some
+        # point during the interval that just elapsed, so the allocator reads
+        # the moved row, exactly as it would in the shell.
+        # `moved_to`, not `state`: `state` is this loop's carried FleetState,
+        # and shadowing it here handed decide() a string on the next tick.
+        for task, moved_to in _numbered(tick.get("relabel")).items():
+            rows = _relabel(rows, task, moved_to)
         handovers = _numbered(tick.get("packets"))
         for task, outcome in _numbered(tick.get("outcomes")).items():
             try:

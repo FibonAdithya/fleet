@@ -1,0 +1,35 @@
+name: orphaned-worktree
+proves: >-
+  parent §10 orphaned worktree: an agent present in herdr's snapshot for a
+  task whose ledger row is not live -- READY, DONE, BLOCKED, or absent
+  entirely -- is stopped rather than left to hold a slot and an area
+  forever. Hand-written with a seeded agent because no intent decide() emits
+  can produce this shape: `expand()` pairs every state-changing intent with
+  a StopAgent for that same task, so nothing in a run's own history can
+  leave an agent alive on a row it has already moved off of. This is a
+  worktree from outside decide()'s own actions -- a daemon restarted against
+  a worktree from a previous night, or a human relabelling a row while its
+  agent still runs -- which is exactly what `seed.agents` exists to stand
+  in for.
+seed:
+  policy: fixtures/policy/fleet-fixture
+  agents:
+    7: {status: working, change_seq: 3, cost_usd: 0.1}
+  issues:
+    - {number: 7, title: "retry the flaky eval harness", state: OPEN, assignees: [],
+       labels: ["fleet:ready", "fleet:auto-ok", "area:eval", "class:patch"]}
+ticks:
+  # #7 is READY -- not a live state, so the per-row loop never looks at its
+  # agent. Nothing new dispatches to it either: `_dispatch` treats any task
+  # with a live agent as busy whatever the row says, so the orphan pass is
+  # the only phase that ever sees this agent, and it retires it.
+  - outcomes: {}
+    expect:
+      - "Retire(7)"
+  # The consequence, not just the label: Retire's effects stop the agent and
+  # clear its owner but do not touch #7's state label, so it is READY, has
+  # no agent and is no longer busy -- ordinarily dispatchable again. The
+  # slot and the area really did come back.
+  - outcomes: {}
+    expect:
+      - "Dispatch(7, implementer, 1)"

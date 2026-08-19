@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timezone
 from typing import get_args
 
@@ -27,6 +28,7 @@ def _policy(**kw) -> Policy:
         "stall_minutes": 10,
         "max_attempts": 2,
         "max_fix_passes": 1,
+        "max_rebases": 1,
         "per_task_usd": 2.0,
         "fleet_usd": 25.0,
         "integration_branch": "integration",
@@ -138,10 +140,14 @@ def test_no_intent_or_effect_exists_that_nothing_emits():
     when M3 wants these back it re-adds them together with their emitter."""
     assert {t.__name__ for t in get_args(Intent)} == {
         "Dispatch",
+        "Continue",
         "Release",
+        "Rebase",
         "Escalate",
         "Unblock",
         "Advance",
+        "Retire",
+        "Close",
         "Drain",
     }
     assert {t.__name__ for t in get_args(Effect)} == {
@@ -149,4 +155,48 @@ def test_no_intent_or_effect_exists_that_nothing_emits():
         "Assign",
         "StartAgent",
         "StopAgent",
+        "CloseIssue",
     }
+
+
+def _snapshot(**overrides):
+    from fleet.model import FleetSnapshot
+
+    payload = dict(
+        run_id="r1",
+        tick=3,
+        at="2026-08-18T02:00:00+00:00",
+        rows=({"task": 1, "state": "claimed"},),
+        spent_usd=3.5,
+        fleet_usd=25.0,
+        free_slots=5,
+        held_areas=("eval",),
+    )
+    payload.update(overrides)
+    return FleetSnapshot(**payload)
+
+
+def test_a_snapshot_is_hashable_despite_carrying_dict_rows():
+    """The `Task.packet` defect, one class further on: a frozen dataclass hashes
+    every field it compares, so an unmarked `tuple[dict, ...]` makes `hash()`
+    raise TypeError and breaks every set or dict keyed by a snapshot."""
+    assert hash(_snapshot()) == hash(_snapshot())
+
+
+def test_a_snapshots_json_is_json():
+    """Task 16 serves this over a socket. A tuple survives `json.dumps`; a
+    `dict_keys` or a Path does not, and the TypeError happens inside a thread
+    nothing is watching."""
+    payload = json.loads(json.dumps(_snapshot().to_json()))
+    assert payload["held_areas"] == ["eval"]
+    assert payload["rows"][0]["task"] == 1
+    assert payload["failures"] == []
+
+
+def test_a_snapshots_rows_are_copied_on_the_way_out():
+    """`to_json` is the published path, and its dicts are the ones a client
+    edits. Handing out the snapshot's own row would let a reader rewrite a
+    completed tick."""
+    snapshot = _snapshot()
+    snapshot.to_json()["rows"][0]["state"] = "done"
+    assert snapshot.rows[0]["state"] == "claimed"

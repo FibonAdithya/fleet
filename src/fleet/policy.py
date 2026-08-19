@@ -135,6 +135,7 @@ def load(cfg: FleetConfig) -> Policy:
         stall_minutes=cfg.stall_minutes,
         max_attempts=cfg.max_attempts,
         max_fix_passes=cfg.max_fix_passes,
+        max_rebases=cfg.max_rebases,
         per_task_usd=cfg.per_task_usd,
         fleet_usd=cfg.fleet_usd,
         integration_branch=cfg.integration_branch,
