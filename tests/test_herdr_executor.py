@@ -485,3 +485,23 @@ def test_agents_delegates_to_herdr(cfg):
     herdr = FakeHerdr()
     herdr.add_agent(task=3, status="working", change_seq=1)
     assert [a.task for a in _executor(cfg, herdr=herdr).agents()] == [3]
+
+
+def test_unpriced_is_delegated_to_herdr(cfg):
+    """The daemon holds an Executor, not a Herdr, so the price-table fact has to
+    reach it through this seam. Answering an empty set here instead would make
+    the drain unreachable in production while every offline test still passed."""
+    herdr = FakeHerdr()
+    herdr.unpriced_models = {"no price for model 'claude-new'"}
+    assert _executor(cfg, herdr=herdr).unpriced() == {"no price for model 'claude-new'"}
+
+
+def test_unpriced_is_read_fresh_rather_than_cached(cfg):
+    """A price added to fleet.toml and a daemon restarted is the fix an operator
+    makes at 3am. An executor that cached the first answer would keep the fleet
+    drained through it."""
+    herdr = FakeHerdr()
+    executor = _executor(cfg, herdr=herdr)
+    assert executor.unpriced() == set()
+    herdr.unpriced_models = {"m"}
+    assert executor.unpriced() == {"m"}

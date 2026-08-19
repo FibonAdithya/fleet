@@ -94,6 +94,60 @@ class FleetState:
 
 
 @dataclass(frozen=True)
+class FleetSnapshot:
+    """One completed tick, rendered. Derived and disposable.
+
+    Published by swapping a single reference, so the socket thread can never
+    observe a half-written tick and needs no lock. Nothing authoritative lives
+    here: losing it costs a client one refresh.
+
+    `failures` is the night's swallowed cleanup errors, bounded and carried
+    forward rather than reset each tick -- a worktree that could not be removed
+    stays un-removed, so the fact stays true until a human acts on it.
+
+    `spent_usd` is what the daemon believes it has spent tonight, which after a
+    restart is `runlog.spent_from_log` for this run id. That figure counts an
+    entry with no `cost_usd` key as zero, so a log carried over from a fleet
+    older than Task 14 makes this a silent underestimate -- see Daemon.
+    """
+
+    run_id: str
+    tick: int
+    at: str
+    # `hash=False` for the same reason `Task.packet` carries it: a frozen
+    # dataclass hashes every field it compares, and these rows are dicts, so
+    # without it `hash(snapshot)` raises TypeError -- and every set or dict
+    # keyed by a snapshot breaks. Rendered rows are dicts on purpose: they are
+    # `to_json`'s payload, and re-typing them as a frozen record would mean
+    # maintaining a second schema for a value that exists to be serialised.
+    rows: tuple[dict, ...] = field(hash=False)
+    spent_usd: float
+    fleet_usd: float
+    free_slots: int
+    held_areas: tuple[str, ...]
+    draining: bool = False
+    drain_reason: str = ""
+    failures: tuple[str, ...] = ()
+
+    def to_json(self) -> dict:
+        """Plain JSON types only. Task 16 serves this over a socket, where a
+        tuple or a Path is a TypeError inside a thread nothing is watching."""
+        return {
+            "run_id": self.run_id,
+            "tick": self.tick,
+            "at": self.at,
+            "rows": [dict(row) for row in self.rows],
+            "spent_usd": self.spent_usd,
+            "fleet_usd": self.fleet_usd,
+            "free_slots": self.free_slots,
+            "held_areas": list(self.held_areas),
+            "draining": self.draining,
+            "drain_reason": self.drain_reason,
+            "failures": list(self.failures),
+        }
+
+
+@dataclass(frozen=True)
 class Policy:
     """The parsed policy layer. `integration_branch` has no default on purpose:
     a Policy built without it fails at construction rather than dispatching every

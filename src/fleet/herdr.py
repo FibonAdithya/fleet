@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
-from fleet.cost import price_transcript, transcript_path
+from fleet.cost import UnpricedModel, price_transcript, transcript_path
 from fleet.model import AgentState
 
 # herdr's five statuses to AgentState's three.
@@ -137,6 +137,7 @@ def parse_snapshot(
     worktree_root: Path,
     projects_dir: Path | None = None,
     prices: dict[str, dict[str, float]] | None = None,
+    unpriced: set[str] | None = None,
 ) -> list[AgentState]:
     """herdr's snapshot JSON -> AgentState, cost joined.
 
@@ -170,11 +171,25 @@ def parse_snapshot(
     fallback is now belt-and-braces for the nested-worktree shape rather than
     the primary path.
 
-    Pricing an unpriced model is not swallowed here: `price_transcript` raises
-    `UnpricedModel` on purpose (a zero price would switch the budget ceiling off
-    silently), and it is left to propagate out of this call rather than caught
-    and defaulted to zero -- the caller (the daemon tick, Task 15) is specified
-    to catch it and drain.
+    Pricing an unpriced model is never silently defaulted to zero, and how it
+    is reported depends on whether anyone is collecting. `price_transcript`
+    raises `UnpricedModel` on purpose -- a zero price switches the budget
+    ceiling off with nothing to notice.
+
+    * With no `unpriced` collector the exception propagates, unchanged. A caller
+      that forgot the argument must not get a fleet of free agents; the loud
+      failure is the correct one, and `RealHerdr.agents` is the only caller in
+      the tree that passes one.
+    * With a collector the message is recorded and that agent's cost reads 0.0,
+      because raising from inside the READ takes down the whole tick -- REAP
+      included -- when the correct response is to drain: in-flight agents
+      finish, nothing new starts. It also erases every OTHER agent in the same
+      snapshot, which is a worse reading of the ledger than a stale one.
+
+    The zero is not a measurement, and nothing downstream may treat it as one.
+    It is safe only because the collector is non-empty in exactly the same
+    ticks, and `Daemon.tick` turns a non-empty collector into a Drain that
+    stops every Dispatch and every Continue.
     """
     agents = (raw.get("result") or {}).get("snapshot", {}).get("agents", [])
     out: list[AgentState] = []
@@ -190,7 +205,13 @@ def parse_snapshot(
         if session and projects_dir is not None and prices:
             path = transcript_path(session, projects_dir)
             if path is not None:
-                cost = price_transcript(path, prices)
+                try:
+                    cost = price_transcript(path, prices)
+                except UnpricedModel as exc:
+                    if unpriced is None:
+                        raise
+                    unpriced.add(str(exc))
+                    cost = 0.0
         out.append(
             AgentState(
                 task=task,
@@ -204,6 +225,7 @@ def parse_snapshot(
 
 class Herdr(Protocol):
     def agents(self) -> list[AgentState]: ...
+    def unpriced(self) -> set[str]: ...
     def create_worktree(self, task: int, slug: str, base: str) -> Path: ...
     def remove_worktree(self, task: int) -> None: ...
     def start_agent(self, task: int, role: str, prompt: str) -> None: ...
@@ -231,6 +253,10 @@ class FakeHerdr:
         self.started: list[tuple[int, str, str]] = []
         self.stopped: list[int] = []
         self.removed: list[int] = []
+        #: Seeded by a test. Empty means "every model this snapshot names has a
+        #: price", which is what an in-memory herdr with no transcripts can
+        #: honestly say -- a fake that invented one would drain every test.
+        self.unpriced_models: set[str] = set()
 
     def add_agent(self, task: int, status: str, change_seq: int, cost_usd: float = 0.0) -> None:
         if status not in ("working", "done", "dirty"):
@@ -243,6 +269,12 @@ class FakeHerdr:
 
     def agents(self) -> list[AgentState]:
         return sorted(self._agents.values(), key=lambda a: a.task)
+
+    def unpriced(self) -> set[str]:
+        # A copy, like `RealHerdr.unpriced`. The daemon reads this every tick to
+        # decide whether to drain, and handing out the live set would let a
+        # caller clear the one fact that stops the fleet spending.
+        return set(self.unpriced_models)
 
     def create_worktree(self, task: int, slug: str, base: str) -> Path:
         # Real herdr fails a create onto an existing path or branch. Silently
@@ -330,6 +362,11 @@ class RealHerdr:
         self.worktrees: dict[int, Path] = {}
         self.workspaces: dict[int, str] = {}
         self.panes: dict[int, str] = {}
+        #: Models the last `agents()` read could not price. Rebuilt by every
+        #: read rather than accumulated: accumulated, a model priced at 02:05
+        #: would keep the fleet drained until dawn, and the set would be a thing
+        #: that only ever grows across a night's worth of ticks.
+        self._unpriced: set[str] = set()
         self._run = self._subprocess
 
     def _subprocess(self, *args: str) -> str:
@@ -363,7 +400,22 @@ class RealHerdr:
 
     def agents(self) -> list[AgentState]:
         raw = self._json("herdr", "api", "snapshot")
-        return parse_snapshot(raw, self.root, self.projects_dir, self.prices)
+        # A fresh set, swapped in only once the parse has finished. Passing
+        # `self._unpriced` straight in would leave a half-filled record behind
+        # if the read raised partway, and the daemon reads this immediately
+        # after -- a drain armed by an aborted read is a drain nothing clears.
+        unpriced: set[str] = set()
+        parsed = parse_snapshot(raw, self.root, self.projects_dir, self.prices, unpriced)
+        self._unpriced = unpriced
+        return parsed
+
+    def unpriced(self) -> set[str]:
+        """The models the last read could not price. Empty before the first one.
+
+        A copy: this is the fact that stops the fleet spending, and a caller
+        holding the live set can clear it.
+        """
+        return set(self._unpriced)
 
     # -- worktrees ----------------------------------------------------------
 

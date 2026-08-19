@@ -103,12 +103,24 @@ class HerdrExecutor:
         self.cfg = cfg
         self.owner = owner
         #: Cleanup failures this executor swallowed, newest last and bounded.
-        #: Read by the daemon's runlog; a failure that is only logged is a
-        #: failure no test and no operator report can see.
+        #: A hand-off buffer, not a record: `Daemon.tick` empties it every tick
+        #: into the one bounded record the snapshot publishes, so there is
+        #: exactly one place an operator reads them and no second copy to
+        #: disagree with it. The bound is what makes a herdr that fails every
+        #: removal survivable if a tick ever dies before the drain.
         self.failures: deque[str] = deque(maxlen=_FAILURE_LIMIT)
 
     def agents(self) -> list[AgentState]:
         return self.herdr.agents()
+
+    def unpriced(self) -> set[str]:
+        """Models the last `agents()` read could not price.
+
+        Delegated rather than cached: the daemon holds an Executor and never a
+        Herdr, and this is the fact that turns into a Drain. A cached answer
+        would keep the fleet drained through the operator's own fix.
+        """
+        return self.herdr.unpriced()
 
     def apply(self, effects: list[Effect]) -> None:
         for effect in effects:

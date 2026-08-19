@@ -34,7 +34,13 @@ from fleet.model import (
 )
 
 # Intents whose expansion stops the agent, so that agent's cost is final.
-_REAPING = (Advance, Release, Rebase, Escalate, Retire)
+#
+# Public because the daemon reads it to decide which log entries carry a
+# finalised cost, and a private name copied into a second module is the shape
+# that lets the two definitions drift -- at which point the run log and
+# FleetState.spent_usd disagree, and a restart resumes on a different budget
+# from the one it stopped with.
+REAPING = (Advance, Release, Rebase, Escalate, Retire)
 
 _DRAIN_FRACTION = 0.8
 
@@ -536,7 +542,7 @@ def _dispatch(
 def _stopped(intents: list[Intent]) -> set[int]:
     """The tasks whose agent this tick ends. One definition, two readers: the
     cost that becomes final and the observation that stops describing anything."""
-    return {i.task for i in intents if isinstance(i, _REAPING)}
+    return {i.task for i in intents if isinstance(i, REAPING)}
 
 
 def _final_cost(intents: list[Intent], agents: list[AgentState]) -> float:

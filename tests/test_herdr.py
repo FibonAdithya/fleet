@@ -1006,3 +1006,108 @@ def test_real_run_raises_herdr_error_when_output_is_not_json(tmp_path):
     with pytest.raises(HerdrError) as excinfo:
         herdr.agents()
     assert "unknown option" in str(excinfo.value)
+
+
+def _unpriced_transcript(tmp_path, session, model="unpriced-model"):
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": model, "usage": {"input_tokens": 1}}}) + "\n"
+    )
+    # A non-empty table that simply lacks the model -- an empty dict is falsy
+    # and skips the join branch entirely, proving nothing.
+    return {"other-model": {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}}
+
+
+def test_an_unpriced_model_is_recorded_rather_than_raised_when_someone_is_collecting(tmp_path):
+    """The daemon's half of the same fact. Raising out of `parse_snapshot` takes
+    down the WHOLE tick -- REAP included -- when the correct response is to
+    drain: in-flight agents finish and nothing new starts. With a collector the
+    read completes, every other agent still reports, and the collector is what
+    turns into the drain."""
+    session = "33333333-3333-3333-3333-333333333333"
+    prices = _unpriced_transcript(tmp_path, session)
+    agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    unpriced: set[str] = set()
+    parsed = parse_snapshot(
+        _snapshot([agent]),
+        ROOT,
+        projects_dir=tmp_path / "projects",
+        prices=prices,
+        unpriced=unpriced,
+    )
+    assert [a.task for a in parsed] == [5]
+    assert parsed[0].cost_usd == 0.0
+    assert any("unpriced-model" in message for message in unpriced)
+
+
+def test_an_unpriced_agent_does_not_silence_the_rest_of_the_snapshot(tmp_path):
+    """The reason the exception had to stop crossing the seam: one agent on a
+    model nobody priced must not erase five agents that priced fine."""
+    session = "44444444-4444-4444-4444-444444444444"
+    prices = _unpriced_transcript(tmp_path, session)
+    agents = [
+        _agent(str(ROOT / "5-slug"), agent_session={"value": session}),
+        _agent(str(ROOT / "6-other"), agent_session={"value": "no-transcript-at-all"}),
+    ]
+    parsed = parse_snapshot(
+        _snapshot(agents), ROOT, projects_dir=tmp_path / "projects", prices=prices, unpriced=set()
+    )
+    assert [a.task for a in parsed] == [5, 6]
+
+
+def test_a_fake_herdr_reports_no_unpriced_models_by_default(tmp_path):
+    """Empty means "every model priced", which is what a fake with no seeded
+    price problem should say. A fake that reported one would drain every test."""
+    assert FakeHerdr().unpriced() == set()
+
+
+def test_a_fake_herdr_reports_the_models_a_test_seeds(tmp_path):
+    herdr = FakeHerdr()
+    herdr.unpriced_models = {"no price for model 'claude-new'"}
+    assert herdr.unpriced() == {"no price for model 'claude-new'"}
+
+
+def test_a_fake_herdr_hands_out_a_copy(tmp_path):
+    """The daemon reads this every tick. Handing out the live set lets a caller
+    clear the one fact that stops the fleet spending."""
+    herdr = FakeHerdr()
+    herdr.unpriced_models = {"m"}
+    herdr.unpriced().clear()
+    assert herdr.unpriced() == {"m"}
+
+
+def test_real_unpriced_is_empty_before_the_first_read(tmp_path):
+    """A daemon constructed and not yet ticked has learned nothing about
+    prices. Reporting an unpriced model there would drain tick 1 of every run."""
+    assert _real(tmp_path).unpriced() == set()
+
+
+def test_real_unpriced_is_rebuilt_by_every_read(tmp_path):
+    """Fresh per call, not accumulated. Accumulated, it grows all night and a
+    model priced at 02:05 keeps the fleet drained until dawn -- and the set
+    itself is then something that only ever gets bigger."""
+    session = "55555555-5555-5555-5555-555555555555"
+    prices = _unpriced_transcript(tmp_path, session)
+    root = tmp_path / "worktrees"
+    agent = _agent(str(root / "5-slug"), agent_session={"value": session})
+    run = RecordingRun({("herdr", "api", "snapshot"): json.dumps(_snapshot([agent]))})
+    herdr = _real(tmp_path, run, worktree_root=root)
+    herdr.prices = prices
+    herdr.projects_dir = tmp_path / "projects"
+    herdr.agents()
+    assert any("unpriced-model" in message for message in herdr.unpriced())
+
+    run.replies[("herdr", "api", "snapshot")] = json.dumps(_snapshot([]))
+    herdr.agents()
+    assert herdr.unpriced() == set()
+
+
+def test_both_clients_answer_unpriced(tmp_path):
+    """The Protocol is what the daemon codes against, and a method on only one
+    of the two is a fake/real divergence of exactly the class m2-inputs §6
+    names."""
+    from fleet.herdr import Herdr, RealHerdr
+
+    for cls in (FakeHerdr, RealHerdr, Herdr):
+        assert callable(getattr(cls, "unpriced", None)), cls
