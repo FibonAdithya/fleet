@@ -34,6 +34,14 @@ class GhClient(Protocol):
     def delete_comment(self, comment_id: int) -> None: ...
 
 
+#: Seconds any one `gh` call may take. `read_ledger` makes one list call plus
+#: one view per packet-carrying row on every tick, so this multiplies -- but
+#: each call is one API round trip, and `gh` does its own retrying inside it.
+#: 60 is generous for that and still bounds the tick loop, which is the thread
+#: a wedged `gh` would otherwise stop while the socket kept answering.
+GH_TIMEOUT_SECONDS = 60
+
+
 class RealGh:
     """Shells out to the `gh` CLI. Never used in tests."""
 
@@ -43,8 +51,14 @@ class RealGh:
     def _run(self, *args: str) -> str:
         try:
             return subprocess.run(
-                ["gh", *args, "--repo", self.repo], capture_output=True, text=True, check=True
+                ["gh", *args, "--repo", self.repo],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=GH_TIMEOUT_SECONDS,
             ).stdout
+        except subprocess.TimeoutExpired as exc:
+            raise GhError(f"gh {' '.join(args)} timed out after {GH_TIMEOUT_SECONDS}s") from exc
         except subprocess.CalledProcessError as exc:
             # CalledProcessError's message carries the argv and exit code but not
             # stderr, which is where gh puts the actual reason. Task 19 is the only
@@ -139,7 +153,15 @@ class RealGh:
         instead, so this bypasses `_run` rather than widening it.
         """
         try:
-            return subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
+            return subprocess.run(
+                ["gh", *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=GH_TIMEOUT_SECONDS,
+            ).stdout
+        except subprocess.TimeoutExpired as exc:
+            raise GhError(f"gh {' '.join(args)} timed out after {GH_TIMEOUT_SECONDS}s") from exc
         except subprocess.CalledProcessError as exc:
             raise GhError(f"gh {' '.join(args)} failed: {exc.stderr.strip()}") from exc
 

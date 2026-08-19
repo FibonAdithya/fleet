@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import subprocess
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -320,3 +321,23 @@ def test_run_with_an_empty_log_mints_an_id_and_says_it_is_new(monkeypatch, tmp_p
     assert result.exit_code == 0, result.output
     assert "new run" in result.output
     assert "resumed" not in result.output
+
+
+def test_gh_login_survives_a_gh_that_never_answers(monkeypatch):
+    """`_gh_login` runs before the first tick and its failure path already
+    returns None -- a wrong assignee fails every label edit that rides along
+    with it, so a guess is worse than nothing. A TimeoutExpired is not an
+    OSError and not a CalledProcessError, so before the bound it escaped that
+    handler and took `fleet run` down at startup with a traceback."""
+    import fleet.cli as cli_module
+    from fleet.cli import GH_LOGIN_TIMEOUT_SECONDS, _gh_login
+
+    recorded = []
+
+    def run(*args, **kwargs):
+        recorded.append(kwargs)
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(cli_module.subprocess, "run", run)
+    assert _gh_login() is None
+    assert recorded[0]["timeout"] == GH_LOGIN_TIMEOUT_SECONDS > 0

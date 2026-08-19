@@ -5,12 +5,25 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+#: Seconds any one git call may take. Every call here is a local read --
+#: rev-parse, merge-base -- with no network in it, so 30 is far past any
+#: legitimate one. It is a bound on the pathological case: an index lock held
+#: by a crashed process, or a filesystem that has gone away, either of which
+#: hangs an agent's `fleet handoff` forever with no output at all.
+GIT_TIMEOUT_SECONDS = 30
+
 
 def _git(root: Path, *args: str) -> str:
     try:
         return subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=GIT_TIMEOUT_SECONDS,
         ).stdout.strip()
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"git {' '.join(args)} timed out after {GIT_TIMEOUT_SECONDS}s") from exc
     except subprocess.CalledProcessError as exc:
         # Same reasoning as RealGh._run: CalledProcessError carries argv and exit
         # code but not stderr, which is where git says "not a valid object name".

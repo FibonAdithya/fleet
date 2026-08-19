@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
+from fleet import gh as gh_module
 from fleet.gh import FakeGh, GhClient, GhError, RealGh
 from fleet.labels import area_label, attempt_label, state_label, static_vocabulary
 
@@ -342,3 +345,80 @@ def test_the_label_vocabulary_tracks_the_configured_attempt_cap():
     with pytest.raises(GhError, match="attempt-3"):
         FakeGh().create_issue("t", "b", [attempt_label(3)])
     assert FakeGh(max_attempts=3).create_issue("t", "b", [attempt_label(3)]) == 1
+
+
+# -- a hung gh call must not hang the fleet ---------------------------------
+
+
+def _timing_out(recorded):
+    def run(*args, **kwargs):
+        recorded.append(kwargs)
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+    return run
+
+
+def test_a_hung_gh_call_times_out_and_names_itself(monkeypatch):
+    """`gh` calls have no bound. `read_ledger` makes one list call plus one view
+    per packet-carrying row on EVERY tick, so a single wedged `gh` -- a hung
+    proxy, a paused network -- freezes the tick loop while the state socket
+    keeps serving the last snapshot from its own thread. `fleet status` then
+    renders a healthy fleet and only the frozen `at` says otherwise.
+
+    Both halves are asserted: that a bound is actually passed, and that the
+    timeout becomes a GhError rather than escaping as a TimeoutExpired nothing
+    in the daemon catches by name. Without the first, this test would pass
+    against an implementation with no timeout at all.
+    """
+    from fleet.gh import GH_TIMEOUT_SECONDS
+
+    recorded = []
+    monkeypatch.setattr(gh_module.subprocess, "run", _timing_out(recorded))
+    with pytest.raises(GhError, match="timed out"):
+        RealGh("o/r").list_issues("open")
+    assert recorded[0]["timeout"] == GH_TIMEOUT_SECONDS > 0
+
+
+def test_the_gh_api_path_is_bounded_too(monkeypatch):
+    """`_run_api` bypasses `_run` entirely -- `gh api` has no `--repo` flag --
+    so a bound added only to `_run` leaves `list_comments` and `delete_comment`
+    unbounded, which is the half `reset.py` runs."""
+    from fleet.gh import GH_TIMEOUT_SECONDS
+
+    recorded = []
+    monkeypatch.setattr(gh_module.subprocess, "run", _timing_out(recorded))
+    with pytest.raises(GhError, match="timed out"):
+        RealGh("o/r").list_comments(1)
+    assert recorded[0]["timeout"] == GH_TIMEOUT_SECONDS > 0
+
+
+def test_no_subprocess_call_in_the_tree_is_unbounded():
+    """A sweep, because the four call sites were four separate omissions and a
+    fifth is one edit away. Every `subprocess.run` under src/ must carry a
+    `timeout=`: an unbounded one blocks whichever thread reaches it, and in the
+    daemon that thread is the tick loop while the socket keeps answering."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "fleet"
+    unbounded = []
+    seen = 0
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            if not (isinstance(target, ast.Attribute) and target.attr == "run"):
+                continue
+            if not (isinstance(target.value, ast.Name) and target.value.id == "subprocess"):
+                continue
+            seen += 1
+            if not any(kw.arg == "timeout" for kw in node.keywords):
+                unbounded.append(f"{path.name}:{node.lineno}")
+    # Parsed, not grepped: `subprocess.run(["git", "-C", str(root), ...])` closes
+    # a paren inside its own argument list, and a regex that stopped there would
+    # report every such call as unbounded -- or, with the match widened, stop
+    # reporting any of them.
+    assert seen >= 4, f"the sweep found only {seen} call sites; it has stopped looking"
+    assert not unbounded, f"unbounded subprocess calls: {unbounded}"

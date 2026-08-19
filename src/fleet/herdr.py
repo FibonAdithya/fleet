@@ -72,6 +72,22 @@ class HerdrError(RuntimeError):
 #: point of reading a code at all -- see HerdrError.
 AGENT_ABSENT_CODES = frozenset({"agent_not_found"})
 
+#: Seconds any one herdr or git call may take before it is killed.
+#:
+#: This bound is the tick loop's. `agents()` runs `herdr api snapshot` at the
+#: top of every tick and `create_worktree` runs `git fetch origin <base>` on
+#: every dispatch; an unbounded one of those blocks the loop for as long as the
+#: kernel allows while the state socket keeps serving the LAST snapshot from
+#: its own thread -- so `fleet status` renders a healthy fleet all night and
+#: only the frozen `at` says otherwise.
+#:
+#: 120 rather than something tighter: the slowest legitimate call here is
+#: `herdr worktree create`, which does a real checkout, and killing one part
+#: way through leaves a half-made worktree that fails the next dispatch on an
+#: occupied path. Two poll intervals at the default `poll_seconds = 60` is the
+#: most a hung call may cost, and that is the trade being made.
+SUBPROCESS_TIMEOUT_SECONDS = 120
+
 
 def error_code(stderr: str) -> str | None:
     """herdr's `{"error":{"code":...}}` out of a stderr buffer, or None.
@@ -378,7 +394,23 @@ class RealHerdr:
 
     def _subprocess(self, *args: str) -> str:
         try:
-            return subprocess.run(args, capture_output=True, text=True, check=True).stdout.strip()
+            return subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            ).stdout.strip()
+        except subprocess.TimeoutExpired as exc:
+            # No code. `HerdrExecutor._stop_agent` removes a worktree only when
+            # the code says the agent has gone, and a call that timed out says
+            # nothing at all about the agent -- it may be running, mid-write, in
+            # that very checkout. None is the cautious path by construction
+            # (see error_code), and inventing a `timeout` code would also claim
+            # a name herdr may one day use for something else.
+            raise HerdrError(
+                f"{' '.join(args)} timed out after {SUBPROCESS_TIMEOUT_SECONDS}s"
+            ) from exc
         except subprocess.CalledProcessError as exc:
             # Same reasoning as RealGh._run and git._git: CalledProcessError
             # carries argv and exit code but not stderr, which is where the

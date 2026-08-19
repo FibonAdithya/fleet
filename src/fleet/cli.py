@@ -27,6 +27,11 @@ from fleet.reader import read_ledger
 from fleet.runlog import RunLog
 from fleet.simulate import render_intent
 
+#: Seconds `gh api user` may take. One tiny call, made once at startup before
+#: the first tick, and its failure already answers None -- so this only bounds
+#: how long `fleet run` can sit saying nothing before it starts.
+GH_LOGIN_TIMEOUT_SECONDS = 30
+
 ROLE_UNSET = (
     "FLEET_ROLE is unset. It decides which state transitions you may write, so there is "
     "no safe default: 'implementer' hands out exactly the privilege the gate withholds, "
@@ -437,10 +442,14 @@ def _gh_login() -> str | None:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=GH_LOGIN_TIMEOUT_SECONDS,
             ).stdout.strip()
             or None
         )
-    except (OSError, subprocess.CalledProcessError):
+    # TimeoutExpired is neither an OSError nor a CalledProcessError, so without
+    # it here a wedged `gh` at startup takes `fleet run` down with a traceback
+    # rather than falling to the None this handler already means.
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
 

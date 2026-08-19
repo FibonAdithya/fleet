@@ -1179,3 +1179,42 @@ def test_real_create_worktree_names_the_push_prerequisite_when_the_base_is_not_o
     assert "origin/integration" in message
     assert "push" in message
     assert "docs/m3-inputs.md" in message
+
+
+def test_a_hung_herdr_call_times_out_rather_than_freezing_the_tick(tmp_path, monkeypatch):
+    """No `subprocess.run` in the tree carried a timeout.
+
+    `_subprocess` runs `herdr api snapshot` at the top of every tick and
+    `git fetch origin <base>` on every dispatch. One hung fetch -- a network
+    stall, a credential prompt on a tty that is not there -- blocks the tick
+    loop for as long as the kernel will allow, while the state socket keeps
+    serving the LAST snapshot from its own thread. So `fleet status` renders a
+    healthy fleet all night and only the frozen `at` timestamp says otherwise.
+
+    Through the real subprocess path, with the module's own timeout shortened,
+    because the whole claim is about what `subprocess.run` does.
+    """
+    import fleet.herdr as herdr_module
+
+    monkeypatch.setattr(herdr_module, "SUBPROCESS_TIMEOUT_SECONDS", 0.2)
+    herdr = _real(tmp_path, run=None)
+    with pytest.raises(HerdrError) as caught:
+        herdr._subprocess("sh", "-c", "sleep 30")
+    assert "timed out" in str(caught.value)
+
+
+def test_a_timed_out_herdr_call_takes_the_cautious_path(tmp_path, monkeypatch):
+    """No code, deliberately. `HerdrExecutor._stop_agent` removes a worktree
+    only when the code says the agent is gone, and a call that timed out says
+    nothing about the agent -- it may be running, mid-write, in that checkout.
+    An invented `timeout` code would also be a name herdr may one day use for
+    something else."""
+    import fleet.herdr as herdr_module
+    from fleet.herdr import AGENT_ABSENT_CODES
+
+    monkeypatch.setattr(herdr_module, "SUBPROCESS_TIMEOUT_SECONDS", 0.2)
+    herdr = _real(tmp_path, run=None)
+    with pytest.raises(HerdrError) as caught:
+        herdr._subprocess("sh", "-c", "sleep 30")
+    assert caught.value.code is None
+    assert caught.value.code not in AGENT_ABSENT_CODES
