@@ -73,6 +73,30 @@ a cleanup script. Resetting the remote is a human's step:
 git -C ~/TIG/fleet-fixture push --force-with-lease origin integration:integration
 ```
 
+### 1.4 `--new-run` between the two gate runs
+
+`fleet run` resumes the run log's last `run_id` by default rather than
+minting a fresh one — deliberate, so a restart mid-night recovers the
+spend it already made rather than handing the fleet a second full budget.
+But nothing in §1.3's reset touches `.fleet/run.jsonl`: `reset.sh` resets the
+issue tracker and the local git state and says nothing about the run log,
+because the run log is not part of what a graded run is graded on. So a bare
+`fleet run` for the second gate run rejoins the first run's id and starts
+already carrying its spend, against a freshly reset, unspent backlog — which
+can drain on the very first tick. The daemon says so loudly on its startup
+line (`run_id=... (resumed from the run log) spent=$...`) and a drained run
+dispatches nothing rather than silently overspending, but an operator who
+does not already know to reach for `--new-run` loses the run to it anyway.
+
+Between the two graded runs:
+
+```bash
+cd ~/TIG/fleet-fixture && fleet run --new-run
+```
+
+or clear `.fleet/run.jsonl` before the second run if a fresh run id is not
+enough on its own.
+
 ## 2. Carried into M4
 
 - **Issue 6 is unprotected.** Spec §6 states it: M3 adds the merge and not the

@@ -142,10 +142,13 @@ class Daemon:
         # holds several nights, and summing all of them starts tonight drained.
         #
         # Known limitation, inherited from `spent_from_log`: an entry written
-        # before Task 14 carries no `cost_usd` key and counts as zero. That can
-        # only understate tonight's spend if a run id is reused across a fleet
-        # upgrade, since `fleet run` mints a fresh one per start -- but it is an
-        # underestimate, not a measurement, and nothing downstream can tell.
+        # before Task 14 carries no `cost_usd` key and counts as zero. That
+        # understates tonight's spend if a run id spans a fleet upgrade that
+        # added cost tracking -- and since `fleet run` resumes the run log's
+        # last run id by default rather than minting a fresh one per start, a
+        # run id spanning an upgrade is the ordinary shape of a restart, not a
+        # rare coincidence. Still an underestimate, not a measurement, and
+        # nothing downstream can tell.
         self.state = FleetState(spent_usd=runlog_module.spent_from_log(runlog.path, run_id=run_id))
 
     # -- one tick -----------------------------------------------------------

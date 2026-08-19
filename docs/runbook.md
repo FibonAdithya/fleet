@@ -77,27 +77,35 @@ The following were exercised end to end against real GitHub, then cleaned up:
 
 ## Seeing what the allocator would do
 
-    cd ~/TIG/fleet-fixture && fleet plan --dry-run
+    cd ~/TIG/fleet-fixture && fleet plan
 
-Reads the ledger, runs one tick of `decide()`, prints the intents and writes
-nothing. The client is wrapped so that every method outside a read allowlist
-raises — deny by default, so a mutating method added later is refused until
-someone classifies it. The guarantee is a property of the code path, not of
-having read it carefully.
+There is no `--dry-run`/`--no-dry-run` flag any more — `fleet plan --help`
+takes no options at all beyond `--help` itself. `fleet plan` only ever
+previews and never writes; that used to be a mode you opted into, now it is
+the only mode there is.
 
-The tick runs with **no live agents**, because M2 has no agent source. When the
-ledger holds a `fleet:claimed` task the output says so above the intents: with no
-agents that task is indistinguishable from ledger drift, so the
-`Release(N, no_agent, 2)` printed for it is an artefact of the dry run rather
-than a recommendation. Against an idle backlog the output is exactly the
-dispatches the allocator would make.
+It reads every row through `reader.read_ledger`, the same ledger read the
+daemon itself does on every tick — not `gh.list_issues("open")`, which used to
+give a systematically different answer: `Task.blocked_on` and a rebase
+handback both come from a handoff packet an open-only query never fetches, and
+that query also silently dropped the closed dependency that satisfies an
+UNBLOCK. Now the preview is the same answer the next real tick would give.
 
-`--no-dry-run` swaps in the same, unwrapped `RealGh` the daemon uses instead of
-the read-only wrapper above — `fleet plan` itself still only reads and renders,
-it never calls `apply()`, so the flag's only visible effect today is which
-client type gets built. It exists so a caller can tell, from the exit code and
-the client selected, that the refusal is gone rather than silently downgraded
-to dry-run behaviour with no error.
+Runs one tick of `decide()`, prints the intents, and writes nothing. The
+client is wrapped so that every method outside a read allowlist raises — deny
+by default, so a mutating method added later is refused until someone
+classifies it. The guarantee is a property of the code path, not of having
+read it carefully — and it is unconditional now. There used to be a
+`--no-dry-run` that swapped in an unwrapped, writing client for a body that
+made no write either way, so the flag was accepted and did nothing; it was
+removed along with `--dry-run` rather than kept as a no-op.
+
+The tick runs with **no live agents**, because `fleet plan` always calls
+`decide()` with an empty agent list. When the ledger holds a `fleet:claimed`
+task the output says so above the intents: with no agents that task is
+indistinguishable from ledger drift, so the `Release(N, no_agent, 2)` printed
+for it is an artefact of the preview rather than a recommendation. Against an
+idle backlog the output is exactly the dispatches the allocator would make.
 
 ## Running the daemon
 
@@ -135,6 +143,27 @@ night by summing this file's entries for the same run id — the only state a
 restart loses is the idle timers, so a stall in progress is noticed up to
 `stall_minutes` late rather than forgotten.
 
+**`fleet run` resumes by default.** With no `--run-id`/`--new-run`, it takes
+the run log's last line as tonight's run id and rebuilds `spent_usd` from
+every entry under that id, rather than minting a fresh id and starting
+`spent_usd` back at zero. That is deliberate: the restart is half of the M3
+gate, and a fresh id every start would recover none of the night's spend on a
+2am restart, handing the fleet a second full budget. The first line the
+daemon prints says which of the three happened, in one place:
+
+    fleet run: run_id=<id> (resumed from the run log) spent=$<amount> socket=<path>
+
+— `(resumed from the run log)`, `(given on the command line)` for an explicit
+`--run-id NAME`, or `(new run)` — plus what this process believes that night
+has already spent. A daemon resuming at `$0.00` against a night that already
+spent $20 looks exactly like a daemon starting a fresh night; that line is the
+only way to tell them apart. To start a genuinely new night rather than
+rejoining the last one, pass `--new-run`. Without it, `fleet run` after a
+reset resumes whatever run id the log last held and can drain immediately
+against that night's old spend — loud (the startup line says so, and a
+drained night dispatches nothing), but real: see "Resetting after a graded
+run" below.
+
 Worktrees for live agents are created under `[daemon] worktrees` (default
 `~/.fleet/worktrees`, outside the repo on purpose — a scratch worktree under
 the repo root would show up as untracked in `git status`).
@@ -149,9 +178,9 @@ the repo root would show up as untracked in `git status`).
     uv run pytest tests/test_scenarios.py -v
 
 `fixtures/scenarios/` holds one file per claim, and each names its claim in its
-`proves` field. Five of the nine seed from the captured ledger
+`proves` field. Five of the ten seed from the captured ledger
 (`fixtures/ledger/issues.json`), so they are exercised against real gh output
-rather than invented rows; the four that do not say in their own `proves` why
+rather than invented rows; the five that do not say in their own `proves` why
 the capture cannot express their case. Every tick lists **every** intent that
 tick emits — the comparison is exhaustive, which is what lets a scenario assert
 an absence without writing `expect: []`.
@@ -207,6 +236,22 @@ Then reset:
 
 Then re-seed. Do **not** bulk-close by anything looser than an exact search —
 the eleven graded issues are numbers 1–11 and must survive.
+
+**None of the above touches `.fleet/run.jsonl`.** The reset above (and
+`fixtures/seed/reset.sh`) resets the issue tracker and the local git state,
+not the daemon's run log — that file is not part of what a graded run is
+graded on, so nothing here clears it. `fleet run` resumes by default (see
+"Running the daemon" above), so starting run 2 with a bare `fleet run` after
+this reset rejoins run 1's run id and inherits whatever run 1 already spent —
+against a re-seeded, unspent backlog that can mean draining on the very first
+tick. It is loud: the startup line names the run id as `(resumed from the run
+log)` and gives the inherited `spent=$...`, and a drained run dispatches
+nothing rather than silently overspending. But an operator who does not know
+`--new-run` exists loses the run to it anyway. Start run 2 with:
+
+    cd ~/TIG/fleet-fixture && fleet run --new-run
+
+or clear `.fleet/run.jsonl` first if a fresh id is not enough on its own.
 
 Deleting a label strips it from every issue that carried it, which is why the
 capture goes first: the checked-in `fixtures/ledger/issues.json` was taken after
