@@ -255,7 +255,7 @@ class CodexProvider:
         file is date-nested rather than flat -- neither is true of Claude Code's
         layout, so the glob cannot be shared.
         """
-        hits = sorted(Path(self.sessions_dir).glob(f"**/*{session_id}.jsonl"))
+        hits = sorted(Path(self.sessions_dir).glob(f"**/*-{session_id}.jsonl"))
         return hits[0] if hits else None
 
     def read(self, lines: list[str], prices: Prices) -> Reading:

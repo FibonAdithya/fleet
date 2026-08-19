@@ -165,7 +165,8 @@ def test_codex_transcript_is_found_under_the_date_nested_layout(tmp_path):
 
 
 def test_a_missing_codex_transcript_is_none_not_a_crash(tmp_path):
-    """Ordinary in the seconds after dispatch."""
+    """Catches raising on a missing file, which would drain the fleet in the
+    seconds after every dispatch when a transcript has not been written yet."""
     assert CodexProvider(sessions_dir=tmp_path).transcript("no-such-session") is None
 
 
@@ -187,3 +188,26 @@ def test_provider_kinds_matches_build_providers_keys():
 
     providers = build_providers(Path("/home/nobody"))
     assert set(providers) == PROVIDER_KINDS
+
+
+def test_codex_transcript_glob_requires_separator_before_session_id(tmp_path):
+    """The glob must match only `rollout-<ts>-<uuid>.jsonl`, not a decoy
+    `rollout-<ts>-XXXX<uuid>.jsonl` where the session id is a suffix of
+    another file's name. Catches a bare suffix glob, which would return the
+    decoy (sorted first by timestamp) and price one agent from another's
+    transcript."""
+    sid = "019ff017-820a-73c1-aa2c-748d025ad0b5"
+    nested = tmp_path / "2026" / "08" / "11"
+    nested.mkdir(parents=True)
+
+    # Correct file: rollout-<timestamp>-<session-id>
+    correct = nested / f"rollout-2026-08-11T10-11-40-{sid}.jsonl"
+    correct.write_text("{}\n")
+
+    # Decoy file: session id is a suffix of a different filename
+    # This would match a bare suffix glob and sort before the correct file
+    decoy = nested / f"rollout-2026-08-11T09-00-00-XXXX{sid}.jsonl"
+    decoy.write_text("{}\n")
+
+    # Must return the correct file, not the decoy
+    assert CodexProvider(sessions_dir=tmp_path).transcript(sid) == correct
