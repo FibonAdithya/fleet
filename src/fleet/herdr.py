@@ -19,8 +19,8 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
-from fleet.cost import UnpricedModel, price_transcript, transcript_path
-from fleet.model import AgentSpec, AgentState
+from fleet.cost import ClaudeProvider, Provider, UnpricedModel, UnpricedTranscript
+from fleet.model import MULTIPLE_MODELS, AgentSpec, AgentState
 
 # herdr's five statuses to AgentState's three.
 #
@@ -151,7 +151,7 @@ def task_of(checkout_path: str, worktree_root: Path) -> int | None:
 def parse_snapshot(
     raw: dict,
     worktree_root: Path,
-    projects_dir: Path | None = None,
+    providers: dict[str, Provider] | None = None,
     prices: dict[str, dict[str, float]] | None = None,
     unpriced: set[str] | None = None,
 ) -> list[AgentState]:
@@ -187,10 +187,17 @@ def parse_snapshot(
     fallback is now belt-and-braces for the nested-worktree shape rather than
     the primary path.
 
+    Dispatches on the snapshot's own `agent` field to pick a `Provider` out of
+    `providers` (a Claude-only map is no longer derivable from a bare path, so
+    `providers` replaces the old `projects_dir` parameter outright). An agent
+    kind with no registered provider is not read as free: with a collector it
+    is added there, matching how an unpriced model is handled two lines below;
+    with no collector it raises, for the same reason.
+
     Pricing an unpriced model is never silently defaulted to zero, and how it
-    is reported depends on whether anyone is collecting. `price_transcript`
-    raises `UnpricedModel` on purpose -- a zero price switches the budget
-    ceiling off with nothing to notice.
+    is reported depends on whether anyone is collecting. `Provider.read`
+    raises `UnpricedModel` (or `UnpricedTranscript`) on purpose -- a zero
+    price switches the budget ceiling off with nothing to notice.
 
     * With no `unpriced` collector the exception propagates, unchanged. A caller
       that forgot the argument must not get a fleet of free agents; the loud
@@ -206,6 +213,14 @@ def parse_snapshot(
     It is safe only because the collector is non-empty in exactly the same
     ticks, and `Daemon.tick` turns a non-empty collector into a Drain that
     stops every Dispatch and every Continue.
+
+    `model` mirrors that same caution: it is the single model the transcript
+    named, None when none is known yet (no transcript, or no transcript naming
+    a model that carried tokens -- `<synthetic>` for instance), and
+    `MULTIPLE_MODELS` -- never None -- when more than one is. Collapsing the
+    multi-model case into None would make a mid-session substitution pass the
+    later mismatch check vacuously, because that check deliberately ignores
+    None.
     """
     agents = (raw.get("result") or {}).get("snapshot", {}).get("agents", [])
     out: list[AgentState] = []
@@ -218,29 +233,54 @@ def parse_snapshot(
         status = STATUS.get(agent.get("agent_status"), "working")
         session = (agent.get("agent_session") or {}).get("value")
         cost = 0.0
+        model: str | None = None
         # `prices is not None`, NOT `prices` -- an empty dict is falsy, and
         # `and prices` made a MISSING [prices] table skip the join entirely:
         # every agent read as free, `unpriced` stayed empty, the daemon never
         # drained, and `per_task_usd` could never fire either. An empty table
         # prices nothing, which is precisely what `UnpricedModel` names, so it
-        # is left to `price_transcript` to raise and to the collector below to
+        # is left to `Provider.read` to raise and to the collector below to
         # arm the drain -- the same treatment an unknown model gets.
-        if session and projects_dir is not None and prices is not None:
-            path = transcript_path(session, projects_dir)
-            if path is not None:
-                try:
-                    cost = price_transcript(path, prices)
-                except UnpricedModel as exc:
-                    if unpriced is None:
-                        raise
-                    unpriced.add(str(exc))
-                    cost = 0.0
+        if session and providers is not None and prices is not None:
+            kind = agent.get("agent")
+            provider = providers.get(kind)
+            if provider is None:
+                message = (
+                    f"agent kind {kind!r} has no transcript reader, so its spend "
+                    "cannot be counted. Reading it as free would leave the ceiling "
+                    "off for this agent."
+                )
+                if unpriced is None:
+                    raise UnpricedModel(message)
+                unpriced.add(message)
+            else:
+                path = provider.transcript(session)
+                if path is not None:
+                    lines = path.read_text(encoding="utf-8").splitlines()
+                    try:
+                        reading = provider.read(lines, prices)
+                    except (UnpricedModel, UnpricedTranscript) as exc:
+                        if unpriced is None:
+                            raise
+                        unpriced.add(str(exc))
+                    else:
+                        cost = reading.cost_usd
+                        if len(reading.models) == 1:
+                            model = next(iter(reading.models))
+                        elif len(reading.models) > 1:
+                            # NOT None. None means "not known yet" and is
+                            # deliberately ignored by the mismatch check, so
+                            # collapsing this case into it would make a fallback
+                            # substitution mid-session -- the very thing a later
+                            # task's check exists to catch -- pass vacuously.
+                            model = MULTIPLE_MODELS
         out.append(
             AgentState(
                 task=task,
                 status=status,
                 change_seq=int(agent.get("state_change_seq", 0)),
                 cost_usd=cost,
+                model=model,
             )
         )
     return sorted(out, key=lambda a: a.task)
@@ -458,7 +498,22 @@ class RealHerdr:
         # if the read raised partway, and the daemon reads this immediately
         # after -- a drain armed by an aborted read is a drain nothing clears.
         unpriced: set[str] = set()
-        parsed = parse_snapshot(raw, self.root, self.projects_dir, self.prices, unpriced)
+        # Built fresh from `self.projects_dir` on every read, not cached at
+        # construction: this is the one call site `parse_snapshot`'s own
+        # docstring names as passing a collector, and it is also the one place
+        # a Claude-only fleet's provider map is derivable at all. Keyword
+        # arguments here on purpose -- `parse_snapshot`'s third positional
+        # parameter used to be `projects_dir`; a bare `Path` landing in
+        # `providers` by position would match no agent kind and read every
+        # agent in the tick as free, silently.
+        providers: dict[str, Provider] = {"claude": ClaudeProvider(projects_dir=self.projects_dir)}
+        parsed = parse_snapshot(
+            raw,
+            self.root,
+            providers=providers,
+            prices=self.prices,
+            unpriced=unpriced,
+        )
         self._unpriced = unpriced
         return parsed
 

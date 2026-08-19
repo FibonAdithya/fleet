@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from fleet.cost import UnpricedModel
+from fleet.cost import ClaudeProvider, UnpricedModel
 from fleet.herdr import STATUS, FakeHerdr, HerdrError, error_code, parse_snapshot, task_of
-from fleet.model import AgentSpec, AgentState
+from fleet.model import MULTIPLE_MODELS, AgentSpec, AgentState
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/herdr/snapshot-fleet.json"
 ROOT = Path("/home/u/.fleet/worktrees")
@@ -25,6 +25,7 @@ def _agent(cwd: str, **overrides) -> dict:
         "cwd": cwd,
         "foreground_cwd": cwd,
         "agent_session": {"value": "session-id"},
+        "agent": "claude",
     }
     agent.update(overrides)
     return agent
@@ -199,9 +200,8 @@ def test_a_priced_agent_carries_its_transcript_cost(tmp_path):
     )
     prices = {"test-model": {"input": 10.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}}
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
-    parsed = parse_snapshot(
-        _snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices=prices
-    )
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=prices)
     assert parsed[0].cost_usd == pytest.approx(10.0)
 
 
@@ -221,8 +221,9 @@ def test_an_unpriced_model_propagates_out_of_parse_snapshot(tmp_path):
     # would be falsy and skip the join branch entirely, proving nothing.
     prices = {"other-model": {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}}
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     with pytest.raises(UnpricedModel):
-        parse_snapshot(_snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices=prices)
+        parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=prices)
 
 
 def test_cwd_resolves_the_task_when_it_disagrees_with_foreground_cwd():
@@ -1013,7 +1014,8 @@ def test_a_freshly_started_agent_has_no_session_id_yet():
     (agent,) = raw["result"]["snapshot"]["agents"]
     assert "agent_session" not in agent
     prices = {"m": {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}}
-    parsed = parse_snapshot(raw, CAPTURE_ROOT, projects_dir=Path("/nonexistent"), prices=prices)
+    providers = {"claude": ClaudeProvider(projects_dir=Path("/nonexistent"))}
+    parsed = parse_snapshot(raw, CAPTURE_ROOT, providers=providers, prices=prices)
     assert parsed[0].cost_usd == 0.0
 
 
@@ -1059,11 +1061,12 @@ def test_an_unpriced_model_is_recorded_rather_than_raised_when_someone_is_collec
     session = "33333333-3333-3333-3333-333333333333"
     prices = _unpriced_transcript(tmp_path, session)
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     unpriced: set[str] = set()
     parsed = parse_snapshot(
         _snapshot([agent]),
         ROOT,
-        projects_dir=tmp_path / "projects",
+        providers=providers,
         prices=prices,
         unpriced=unpriced,
     )
@@ -1081,8 +1084,9 @@ def test_an_unpriced_agent_does_not_silence_the_rest_of_the_snapshot(tmp_path):
         _agent(str(ROOT / "5-slug"), agent_session={"value": session}),
         _agent(str(ROOT / "6-other"), agent_session={"value": "no-transcript-at-all"}),
     ]
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     parsed = parse_snapshot(
-        _snapshot(agents), ROOT, projects_dir=tmp_path / "projects", prices=prices, unpriced=set()
+        _snapshot(agents), ROOT, providers=providers, prices=prices, unpriced=set()
     )
     assert [a.task for a in parsed] == [5, 6]
 
@@ -1162,9 +1166,10 @@ def test_an_empty_price_table_makes_every_priceable_agent_unpriced(tmp_path):
         json.dumps({"message": {"model": "claude-opus-4", "usage": {"input_tokens": 1}}}) + "\n"
     )
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     unpriced: set[str] = set()
     parsed = parse_snapshot(
-        _snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices={}, unpriced=unpriced
+        _snapshot([agent]), ROOT, providers=providers, prices={}, unpriced=unpriced
     )
     assert unpriced, "an empty [prices] table priced an agent at nothing, silently"
     assert parsed[0].cost_usd == 0.0
@@ -1181,8 +1186,9 @@ def test_an_empty_price_table_raises_when_nobody_is_collecting(tmp_path):
         json.dumps({"message": {"model": "claude-opus-4", "usage": {"input_tokens": 1}}}) + "\n"
     )
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     with pytest.raises(UnpricedModel):
-        parse_snapshot(_snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices={})
+        parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices={})
 
 
 def test_real_create_worktree_names_the_push_prerequisite_when_the_base_is_not_on_the_remote(
@@ -1282,3 +1288,112 @@ def test_a_role_with_no_declared_agent_raises_before_launching(tmp_path):
     with pytest.raises(HerdrError, match="reviewer"):
         herdr.start_agent(7, "reviewer", "do the thing")
     assert not run.herdr_calls("herdr", "agent", "start")
+
+
+# --------------------------------------------------------------------------
+# Task 8: the model each agent actually ran, joined from its own transcript.
+
+
+PRICED = {"test-model": {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}}
+
+
+def _claude_transcript(tmp_path, session, model="test-model", tokens=1_000):
+    """A one-message Claude transcript, mirroring `_unpriced_transcript` above."""
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": model, "usage": {"input_tokens": tokens}}}) + "\n"
+    )
+    return {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+
+
+def test_parse_snapshot_records_the_model_a_transcript_names(tmp_path):
+    """decide compares this against the declared model. Catches leaving it None,
+    which makes every mismatch check pass vacuously and lets a silent model
+    substitution run the whole night unnoticed."""
+    session = "55555555-5555-5555-5555-555555555555"
+    providers = _claude_transcript(tmp_path, session)
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=PRICED)
+    assert parsed[0].model == "test-model"
+
+
+def test_a_model_carrying_no_tokens_is_not_recorded_as_the_observed_model(tmp_path):
+    """`<synthetic>` has a usage block of all zeros. Catches recording it as the
+    observed model, which reports a mismatch against every declared model."""
+    session = "66666666-6666-6666-6666-666666666666"
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": "test-model", "usage": {"input_tokens": 1000}}})
+        + "\n"
+        + json.dumps({"message": {"model": "<synthetic>", "usage": {"input_tokens": 0}}})
+        + "\n"
+    )
+    prices = dict(PRICED)
+    prices["<synthetic>"] = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=prices)
+    assert parsed[0].model == "test-model"
+
+
+def test_an_agent_on_an_unregistered_cli_is_collected_not_priced_at_zero(tmp_path):
+    """Defence in depth behind the load-time check. Catches reading an unknown
+    CLI's agent as free, which leaves the ceiling off for that agent while every
+    other agent reports normally."""
+    session = "77777777-7777-7777-7777-777777777777"
+    providers = _claude_transcript(tmp_path, session)
+    agent = _agent(str(ROOT / "7-slug"), agent="nosuchcli", agent_session={"value": session})
+    unpriced: set[str] = set()
+    parsed = parse_snapshot(
+        _snapshot([agent]), ROOT, providers=providers, prices=PRICED, unpriced=unpriced
+    )
+    assert parsed[0].cost_usd == 0.0
+    assert parsed[0].model is None
+    assert any("nosuchcli" in message for message in unpriced)
+
+
+def test_an_unregistered_cli_raises_when_nobody_is_collecting(tmp_path):
+    """Mirrors the UnpricedModel rule directly above it: a caller that forgot
+    the collector must not get a fleet of free agents."""
+    session = "88888888-8888-8888-8888-888888888888"
+    providers = _claude_transcript(tmp_path, session)
+    agent = _agent(str(ROOT / "7-slug"), agent="nosuchcli", agent_session={"value": session})
+    with pytest.raises(UnpricedModel, match="nosuchcli"):
+        parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=PRICED)
+
+
+def test_a_transcript_naming_two_token_carrying_models_records_the_sentinel(tmp_path):
+    """Catches collapsing a multi-model transcript into None: None is
+    deliberately ignored by the later mismatch check, so a mid-session
+    substitution -- exactly what that check exists to catch -- would pass it
+    vacuously if this recorded None instead of MULTIPLE_MODELS."""
+    session = "99999999-9999-9999-9999-999999999999"
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": "test-model", "usage": {"input_tokens": 1000}}})
+        + "\n"
+        + json.dumps({"message": {"model": "other-model", "usage": {"input_tokens": 500}}})
+        + "\n"
+    )
+    prices = dict(PRICED)
+    prices["other-model"] = {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=prices)
+    assert parsed[0].model == MULTIPLE_MODELS
+
+
+def test_an_agent_with_no_transcript_yet_leaves_model_unknown(tmp_path):
+    """Catches recording any placeholder for 'not written yet' other than
+    None. A transcript missing in the seconds after a dispatch is ordinary;
+    the later mismatch check deliberately ignores None so it does not
+    escalate on every fresh dispatch and burn the backlog on the first tick."""
+    session = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=PRICED)
+    assert parsed[0].model is None
+    assert parsed[0].cost_usd == 0.0
