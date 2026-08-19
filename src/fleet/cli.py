@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import click
 
-from fleet import git, labels
+from fleet import git, labels, statesocket
 from fleet import ledger as ledger_module
 from fleet import policy as policy_module
+from fleet import status as status_module
 from fleet.commands import do_block, do_discover, do_escalate, do_handoff, do_verdict
 from fleet.config import load_config
+from fleet.daemon import Daemon, stop_on_signals
 from fleet.decide import decide
 from fleet.gh import RealGh
+from fleet.herdr import RealHerdr
+from fleet.herdr_executor import HerdrExecutor
 from fleet.model import FleetState
+from fleet.runlog import RunLog
 from fleet.simulate import render_intent
 
 ROLE_UNSET = (
@@ -267,15 +275,91 @@ def verdict(task, decision, head_sha, checks_rerun, findings, packet_was_suffici
 @click.option("--dry-run/--no-dry-run", default=True, help="Print the plan; write nothing.")
 def plan(dry_run):
     """Print what the allocator would do right now."""
-    if not dry_run:
-        # Refused before load_config, or `fleet plan --no-dry-run` outside a
-        # fleet repo complains about a missing fleet.toml instead of saying
-        # which half of the flag is unimplemented.
-        raise click.ClickException("only --dry-run is implemented; the daemon lands in M3")
     cfg = load_config()
-    gh = ReadOnlyGh(RealGh(cfg.repo_slug))
+    # `--no-dry-run` selects the unwrapped, writing client (Ruling D6): a
+    # refusal that vanished but a body still pinned to `ReadOnlyGh` would take
+    # the flag and silently do nothing, which is worse than either refusing or
+    # writing -- an operator who asked for `--no-dry-run` and got dry-run
+    # behaviour with no error has no way to notice.
+    gh = RealGh(cfg.repo_slug) if not dry_run else ReadOnlyGh(RealGh(cfg.repo_slug))
     for line in do_plan(cfg, gh, datetime.now(timezone.utc)):
         click.echo(line)
+
+
+@main.command()
+@click.option("--once", is_flag=True, help="One tick, then exit. For a supervised slice.")
+@click.option("--poll-seconds", type=int, default=None)
+def run(once: bool, poll_seconds: int | None) -> None:
+    """Start the allocator daemon."""
+    cfg = load_config()
+    policy = policy_module.load(cfg)
+    gh = RealGh(cfg.repo_slug)
+    herdr = RealHerdr(
+        worktree_root=cfg.worktree_root,
+        projects_dir=Path.home() / ".claude" / "projects",
+        prices=cfg.prices,
+        repo_root=cfg.root,
+    )
+    owner = _gh_login()
+    executor = HerdrExecutor(herdr, gh, cfg, owner=owner)
+    run_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    log = RunLog(cfg.runlog_path, run_id=run_id)
+    daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id)
+
+    stop = threading.Event()
+    # PULL-based: the socket calls back into the daemon's own last snapshot on
+    # every connection, so this is wired directly to the attribute rather than
+    # through `Daemon.run`'s `publish` callback -- that callback is a push and
+    # does not fit a client that connects, reads once, and disconnects.
+    thread = statesocket.serve(cfg.socket_path, lambda: daemon.snapshot, stop)
+    click.echo(f"fleet run: run_id={run_id} socket={cfg.socket_path}")
+    try:
+        # SIGTERM as well as SIGINT: a supervisor stopping the daemon must get
+        # the same clean shutdown a Ctrl-C gives, or the socket file is left
+        # behind. `stop_on_signals` installs both and restores the previous
+        # handlers on the way out.
+        with stop_on_signals(stop):
+            if once:
+                daemon.tick(datetime.now(timezone.utc))
+                click.echo("\n".join(status_module.render(daemon.snapshot.to_json())))
+            else:
+                daemon.run(cfg.poll_seconds if poll_seconds is None else poll_seconds, stop)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
+@main.command()
+def status() -> None:
+    """Print the last completed tick."""
+    cfg = load_config()
+    try:
+        payload = statesocket.request(cfg.socket_path)
+    except statesocket.NotRunning as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("\n".join(status_module.render(payload)))
+
+
+def _gh_login() -> str | None:
+    """The login `gh` is authenticated as -- the fleet's own identity.
+
+    Parent §3 makes the allocator the sole writer of ownership, and `fleet-1` is
+    not a GitHub login: gh fails the whole edit on an assignee it cannot resolve.
+    None rather than a guess if gh cannot say, because a wrong assignee fails
+    every label edit that rides along with it.
+    """
+    try:
+        return (
+            subprocess.run(
+                ["gh", "api", "user", "--jq", ".login"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            or None
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
 
 if __name__ == "__main__":

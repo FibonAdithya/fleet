@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import click
 import pytest
+from click.testing import CliRunner
 
-from conftest import git
-from fleet.cli import _context, _git_facts
+from conftest import FIXTURE_POLICY, git
+from fleet.cli import ReadOnlyGh, _context, _git_facts, main
+from fleet.config import load_config
+from fleet.daemon import Daemon
+from fleet.gh import RealGh
+from fleet.model import FleetSnapshot
 from fleet.schemas import validate
 
 
@@ -103,3 +109,90 @@ def test_git_facts_allows_a_detached_head_for_escalate_and_block(repo):
     cfg = SimpleNamespace(root=repo, integration_branch="integration")
     git(repo, "checkout", "--detach", "HEAD")
     assert _git_facts(cfg, allow_detached=True)["branch"].startswith("detached at ")
+
+
+# -- `fleet plan --dry-run` / `--no-dry-run` -------------------------------
+
+
+def test_plan_dry_run_wraps_the_client_in_read_only(monkeypatch, cfg):
+    """The default. A caller who never says `--no-dry-run` must still get a
+    client that refuses every write."""
+    monkeypatch.chdir(cfg.root)
+    seen = {}
+    monkeypatch.setattr("fleet.cli.do_plan", lambda cfg_, gh, now: seen.setdefault("gh", gh) and [])
+    result = CliRunner().invoke(main, ["plan"])
+    assert result.exit_code == 0, result.output
+    assert isinstance(seen["gh"], ReadOnlyGh)
+
+
+def test_plan_no_dry_run_selects_the_writing_client(monkeypatch, cfg):
+    """Ruling D6: the plan deletes the M3 refusal but left `plan()`'s body
+    pinned to `ReadOnlyGh`, so `--no-dry-run` would be accepted and silently do
+    nothing -- the worst of both worlds. This pins that `--no-dry-run` actually
+    swaps in the unwrapped, writing client rather than leaving it a no-op flag."""
+    monkeypatch.chdir(cfg.root)
+    seen = {}
+    monkeypatch.setattr("fleet.cli.do_plan", lambda cfg_, gh, now: seen.setdefault("gh", gh) and [])
+    result = CliRunner().invoke(main, ["plan", "--no-dry-run"])
+    assert result.exit_code == 0, result.output
+    assert type(seen["gh"]) is RealGh
+    assert not isinstance(seen["gh"], ReadOnlyGh)
+
+
+# -- `fleet status` ----------------------------------------------------------
+
+
+def test_status_with_no_daemon_running_exits_nonzero_and_says_so(monkeypatch, cfg):
+    """At 7am the one thing `status` has to answer is whether the fleet is dead
+    or merely idle. Nothing is listening on `cfg.socket_path`, so this must
+    fail loudly rather than render an empty ledger."""
+    monkeypatch.chdir(cfg.root)
+    result = CliRunner().invoke(main, ["status"])
+    assert result.exit_code != 0
+    assert "no fleet daemon" in result.output.lower()
+
+
+# -- `fleet run --once` ------------------------------------------------------
+
+
+def test_run_once_builds_its_collaborators_and_ticks_exactly_once(monkeypatch, tmp_path):
+    """Wired, not exercised end to end: `Daemon.tick` is monkeypatched so this
+    never talks to `gh` or a real herdr, but `run` must still load config,
+    build the policy, the real gh/herdr/executor, the run log and the daemon,
+    then call `tick` exactly once and print the rendered snapshot."""
+    policy_cfg = load_config(FIXTURE_POLICY)
+    cfg = dataclasses.replace(
+        policy_cfg,
+        socket_path=tmp_path / "fleet.sock",
+        runlog_path=tmp_path / "run.jsonl",
+        worktree_root=tmp_path / "worktrees",
+    )
+
+    calls = []
+
+    def fake_tick(self, now):
+        calls.append(now)
+        self.snapshot = FleetSnapshot(
+            run_id=self.run_id,
+            tick=self.tick_number + 1,
+            at=now.isoformat(),
+            rows=(),
+            spent_usd=0.0,
+            fleet_usd=self.policy.fleet_usd,
+            free_slots=self.policy.slots,
+            held_areas=(),
+        )
+        return self.snapshot
+
+    monkeypatch.setattr(Daemon, "tick", fake_tick)
+    monkeypatch.setattr("fleet.cli.load_config", lambda: cfg)
+    monkeypatch.setattr("fleet.cli._gh_login", lambda: "fleet-bot")
+
+    result = CliRunner().invoke(main, ["run", "--once"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert "tick 1" in result.output
+    # The socket thread must have been started and cleanly torn down: no
+    # leftover socket file after `run --once` returns.
+    assert not cfg.socket_path.exists()

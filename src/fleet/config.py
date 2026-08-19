@@ -61,6 +61,10 @@ class FleetConfig:
     per_task_usd: float
     fleet_usd: float
     prices: dict[str, dict[str, float]]
+    socket_path: Path
+    runlog_path: Path
+    worktree_root: Path
+    poll_seconds: int
 
 
 def _prices(raw: dict) -> dict[str, dict[str, float]]:
@@ -99,6 +103,7 @@ def load_config(start: Path | None = None) -> FleetConfig:
     data = tomllib.loads((root / "fleet.toml").read_text())
     repo, policy, fleet = data["repo"], data["policy"], data.get("fleet", {})
     budget = data.get("budget", {})
+    daemon = data.get("daemon", {})
     return FleetConfig(
         root=root,
         repo_slug=repo["slug"],
@@ -117,4 +122,11 @@ def load_config(start: Path | None = None) -> FleetConfig:
         ),
         fleet_usd=_positive(float(budget.get("fleet_usd", DEFAULT_FLEET_USD)), "fleet_usd"),
         prices=_prices(data.get("prices", {})),
+        socket_path=Path(daemon.get("socket", root / ".fleet" / "fleet.sock")).expanduser(),
+        runlog_path=Path(daemon.get("runlog", root / ".fleet" / "run.jsonl")).expanduser(),
+        worktree_root=Path(daemon.get("worktrees", "~/.fleet/worktrees")).expanduser(),
+        # Parent §8 writes 60. A tick fetches comments for every live task, so
+        # this is more gh calls than M2's single list and secondary rate limits
+        # are real -- instrument before lowering it.
+        poll_seconds=int(daemon.get("poll_seconds", 60)),
     )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fleet.config import ConfigError, ConfigNotFound, load_config
@@ -151,3 +153,38 @@ def test_no_prices_table_is_an_empty_mapping_not_a_crash(tmp_path):
         'roles = "r"\nschemas = "s"\n'
     )
     assert load_config(tmp_path).prices == {}
+
+
+def test_daemon_paths_default_relative_to_root_and_home(tmp_path):
+    """No `[daemon]` table at all: socket and run log default under the repo's
+    own `.fleet/`, and the worktree root defaults under the user's home --
+    the fixture repo should not grow a directory of scratch worktrees that
+    `git status` then reports as untracked."""
+    (tmp_path / "fleet.toml").write_text(
+        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
+        'roles = "r"\nschemas = "s"\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.socket_path == tmp_path / ".fleet" / "fleet.sock"
+    assert cfg.runlog_path == tmp_path / ".fleet" / "run.jsonl"
+    assert cfg.worktree_root == Path("~/.fleet/worktrees").expanduser()
+    assert cfg.poll_seconds == 60
+
+
+def test_daemon_paths_are_read_from_fleet_toml_and_tilde_is_expanded(tmp_path):
+    """An unexpanded `~` becomes a literal directory named `~` under the repo
+    root, which is the kind of thing nobody notices until a worktree turns up
+    in `git status`."""
+    (tmp_path / "fleet.toml").write_text(
+        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
+        'roles = "r"\nschemas = "s"\n'
+        '[daemon]\nsocket = "~/custom/fleet.sock"\nrunlog = "~/custom/run.jsonl"\n'
+        'worktrees = "~/custom/worktrees"\npoll_seconds = 15\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.socket_path == Path("~/custom/fleet.sock").expanduser()
+    assert cfg.runlog_path == Path("~/custom/run.jsonl").expanduser()
+    assert cfg.worktree_root == Path("~/custom/worktrees").expanduser()
+    assert cfg.poll_seconds == 15
+    for path in (cfg.socket_path, cfg.runlog_path, cfg.worktree_root):
+        assert "~" not in str(path)

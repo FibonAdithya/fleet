@@ -92,7 +92,57 @@ agents that task is indistinguishable from ledger drift, so the
 than a recommendation. Against an idle backlog the output is exactly the
 dispatches the allocator would make.
 
-`--no-dry-run` is refused until the daemon lands in M3.
+`--no-dry-run` swaps in the same, unwrapped `RealGh` the daemon uses instead of
+the read-only wrapper above — `fleet plan` itself still only reads and renders,
+it never calls `apply()`, so the flag's only visible effect today is which
+client type gets built. It exists so a caller can tell, from the exit code and
+the client selected, that the refusal is gone rather than silently downgraded
+to dry-run behaviour with no error.
+
+## Running the daemon
+
+    cd ~/TIG/fleet-fixture && fleet run
+
+Starts the allocator loop: read the ledger, decide, log, apply, render — repeat
+every `poll_seconds` (default 60, `[daemon] poll_seconds` in `fleet.toml`) until
+`SIGINT` or `SIGTERM`. Both signals get the same clean shutdown a Ctrl-C gives —
+the tick in flight finishes, the socket file is removed — because exiting
+mid-tick would leave a task labelled `fleet:claimed` with no agent, which the
+next run's REAP only clears at the cost of an attempt.
+
+Watch it from another terminal:
+
+    watch -n5 fleet status
+
+`fleet status` is a client of the daemon's Unix-domain socket
+(`[daemon] socket`, default `<repo>/.fleet/fleet.sock`): each call connects,
+reads one rendered snapshot of the last completed tick, and disconnects. If
+nothing is listening it says so and exits non-zero — distinct from an empty
+table, which would read as an idle fleet rather than a dead one. If the daemon
+has started but not yet finished its first tick, `fleet status` says "no tick
+yet" instead, which is a real and different state from "no daemon".
+
+`--once` runs a single tick, prints the same rendering `fleet status` would
+show, and exits — for a supervised slice, or for checking a fresh `fleet.toml`
+works before leaving the daemon running unattended overnight:
+
+    fleet run --once
+
+The run log (`[daemon] runlog`, default `<repo>/.fleet/run.jsonl`) is the
+night's durable memory: every intent the daemon decided on, with the cost it
+finalised, one JSON line per entry. A restart rebuilds `spent_usd` for the
+night by summing this file's entries for the same run id — the only state a
+restart loses is the idle timers, so a stall in progress is noticed up to
+`stall_minutes` late rather than forgotten.
+
+Worktrees for live agents are created under `[daemon] worktrees` (default
+`~/.fleet/worktrees`, outside the repo on purpose — a scratch worktree under
+the repo root would show up as untracked in `git status`).
+
+`fleet:rebase-N` is a third per-task counter alongside `fleet:attempt-N` and
+`fleet:fix-pass-N`: an integrator's rebase attempts are capped by
+`max_rebases` exactly as an implementer's attempts are capped by
+`max_attempts`, and a reviewer's fix passes by `max_fix_passes`.
 
 ## Running the scenarios
 
