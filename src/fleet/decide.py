@@ -193,11 +193,24 @@ def _stalled(
 def _is_rebase_handback(task: Task) -> bool:
     """An integrator handing a task back to CLAIMED for a rebase.
 
-    Both halves are required. The target alone would let any role dodge an
-    attempt by naming CLAIMED; the role alone would catch an integrator's
-    ordinary hand to `done`.
+    Three halves, now. The target alone would let any role dodge an attempt by
+    naming CLAIMED; the role alone would catch an integrator's ordinary hand to
+    `done`; and neither says WHEN the handback was written.
+
+    The attempt binding is spec §5.5, the same rule `_advance` applies and for
+    the same reason. `packet.parse_latest` returns the newest handoff comment
+    across the whole issue's history with no per-attempt scoping, and the issue
+    outlives the attempt -- so attempt 1's handback is still "latest" while the
+    task is on attempt 2. This branch runs ahead of every other one in `_reap`,
+    so without the binding a stale packet charged the task a rebase it never
+    made, hit `max_rebases`, and sent it to NEEDS_HUMAN naming
+    `rebases_exhausted` for work that never happened. A missing `attempt` is a
+    mismatch, not a pass: `handoff.schema.json` requires the field, and a
+    permissive default here makes the whole check decorative.
     """
     packet = task.packet or {}
+    if packet.get("attempt") != max(task.attempts, 1):
+        return False
     sender = packet.get("from") or {}
     return packet.get("to") == "claimed" and sender.get("role") == "integrator"
 

@@ -546,7 +546,12 @@ def test_a_continuation_agent_exactly_at_the_ceiling_is_left_alone():
     assert intents == []
 
 
-HANDBACK = {"to": "claimed", "from": {"role": "integrator", "agent": "fleet-1"}}
+#: A real integrator handback. `attempt` is required by handoff.schema.json
+#: (spec §5.5) and `_is_rebase_handback` binds on it, so a fixture without
+#: one is not a packet `fleet handoff` could ever have written -- and every
+#: test below would then pass on the attempt mismatch rather than on the
+#: rule it names. The tasks here all carry `attempts=1`.
+HANDBACK = {"to": "claimed", "from": {"role": "integrator", "agent": "fleet-1"}, "attempt": 1}
 
 
 def test_an_integrator_handback_releases_without_burning_an_attempt():
@@ -585,7 +590,7 @@ def test_a_claimed_task_with_no_agent_and_no_handback_is_still_drift():
 def test_a_handback_from_a_non_integrator_is_not_a_rebase():
     """Only the integrator hands back for a rebase. A packet claiming otherwise
     would let any role dodge an attempt by naming the right target state."""
-    packet = {"to": "claimed", "from": {"role": "implementer", "agent": "fleet-2"}}
+    packet = {"to": "claimed", "from": {"role": "implementer", "agent": "fleet-2"}, "attempt": 1}
     task = claimed(number=4, state="claimed", attempts=1, packet=packet)
     intents, _ = decide(FleetState(), [task], POLICY, [], T0)
     assert intents == [Release(task=4, reason="no_agent", attempt=2)]
@@ -868,3 +873,55 @@ def test_a_replacement_agent_on_the_same_task_is_charged_in_full():
         T0 + timedelta(minutes=2),
     )
     assert state.spent_usd == 3.5
+
+
+# --------------------------------------- a handback is bound to its attempt too
+
+
+def test_a_handback_from_a_previous_attempt_is_not_a_rebase():
+    """Spec §5.5, applied to the branch that ran ahead of every other one.
+
+    `packet.parse_latest` returns the newest handoff comment across the whole
+    issue's history with no per-attempt scoping, and the issue outlives the
+    attempt. So attempt 1's integrator handback is still "latest" while the task
+    is on attempt 2 -- and `_is_rebase_handback` read it with no attempt binding
+    at all, ahead of every other REAP branch. The task was charged a rebase it
+    did not make, hit `max_rebases`, and went to NEEDS_HUMAN naming
+    `rebases_exhausted` for work that never happened. `_advance` implements
+    exactly this check on exactly this shape; this path did not.
+    """
+    stale = claimed(
+        number=4,
+        attempts=2,
+        rebases=1,
+        packet={"to": "claimed", "from": {"role": "integrator"}, "attempt": 1},
+    )
+    intents, _ = decide(FleetState(), [stale], POLICY, [], T0)
+    assert only(intents, Escalate) == []
+    assert intents == [Release(task=4, reason="no_agent", attempt=3)]
+
+
+def test_a_handback_with_no_attempt_at_all_is_not_a_rebase():
+    """A missing `attempt` is a mismatch, not a pass -- the same rule `_advance`
+    states. `handoff.schema.json` requires the field, so a packet without one
+    predates spec §5.5 or was not written by `fleet handoff`; treating it as
+    matching would make the whole check decorative."""
+    stale = claimed(
+        number=4, attempts=1, rebases=0, packet={"to": "claimed", "from": {"role": "integrator"}}
+    )
+    intents, _ = decide(FleetState(), [stale], POLICY, [], T0)
+    assert only(intents, Rebase) == []
+    assert intents == [Release(task=4, reason="no_agent", attempt=2)]
+
+
+def test_a_handback_from_this_attempt_still_rebases():
+    """The other half, or the fix is just a disabled feature. A packet whose
+    attempt matches the task's is the live conflict `max_rebases` bounds."""
+    current = claimed(
+        number=4,
+        attempts=2,
+        rebases=0,
+        packet={"to": "claimed", "from": {"role": "integrator"}, "attempt": 2},
+    )
+    intents, _ = decide(FleetState(), [current], POLICY, [], T0)
+    assert intents == [Rebase(task=4, rebase=1)]
