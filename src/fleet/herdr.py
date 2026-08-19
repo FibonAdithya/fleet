@@ -432,7 +432,27 @@ class RealHerdr:
         # integration branch exists to remove. `--base origin/<base>` and not
         # `--base <base>` for the same reason -- the fetch updates the
         # remote-tracking ref, so only that name carries what was fetched.
-        self._run("git", "-C", str(self.repo_root), "fetch", "origin", base)
+        try:
+            self._run("git", "-C", str(self.repo_root), "fetch", "origin", base)
+        except HerdrError as exc:
+            # The fresh-base rule has a prerequisite, and this is where a repo
+            # that has not met it finds out. NOTHING in this project pushes:
+            # `git.py`'s whole seam is local reads, `integrator.md` has no push
+            # step, and fixtures/seed/reset.sh resets a LOCAL `integration` ref.
+            # So `origin/<base>` exists only because a human or the integrator
+            # put it there, and a fixture repo that has never had one answers
+            # git's `couldn't find remote ref integration` -- at 2am, on a gate
+            # run, from inside herdr's argv. Naming the prerequisite here is the
+            # difference between a five-minute fix and an hour of reading.
+            raise HerdrError(
+                f"could not fetch origin/{base} for task {task}: {exc}. "
+                f"The fresh-base rule branches every new worktree off origin/{base}, "
+                f"so that ref has to exist on the remote before a run starts -- "
+                f"the integrator pushing `{base}` is a prerequisite of it, not a "
+                f"consequence (docs/m3-inputs.md). Push it, or point "
+                f"[repo] integration_branch at a branch that is on the remote.",
+                code=exc.code,
+            ) from exc
         existing = self._existing_branch(task)
         branch = existing or f"fleet/{task}-{slug}"
         # The checkout is named after the branch it is on, so the two cannot

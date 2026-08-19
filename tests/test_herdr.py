@@ -1152,3 +1152,30 @@ def test_an_empty_price_table_raises_when_nobody_is_collecting(tmp_path):
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
     with pytest.raises(UnpricedModel):
         parse_snapshot(_snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices={})
+
+
+def test_real_create_worktree_names_the_push_prerequisite_when_the_base_is_not_on_the_remote(
+    tmp_path,
+):
+    """`--base origin/<base>` needs `origin/<base>` to exist, and nothing in
+    this project ever pushes: `git.py`'s whole seam is local, `integrator.md`
+    has no push step, and fixtures/seed/reset.sh resets a LOCAL integration ref.
+    So the fresh-base rule has a prerequisite -- the integrator must push
+    `integration` -- and a fixture repo that has never had one pushed fails here
+    with git's own `couldn't find remote ref integration`, at 2am, on a gate
+    run. Naming the prerequisite is the difference between a five-minute fix and
+    an hour reading herdr's source."""
+    from fleet.herdr import HerdrError as _HerdrError
+
+    def run(*args):
+        if args[0] == "git" and "fetch" in args:
+            raise _HerdrError("git fetch origin integration failed: couldn't find remote ref")
+        return RecordingRun(_captured_replies())(*args)
+
+    herdr = _real(tmp_path, run)
+    with pytest.raises(HerdrError) as caught:
+        herdr.create_worktree(task=1, slug="lid", base="integration")
+    message = str(caught.value)
+    assert "origin/integration" in message
+    assert "push" in message
+    assert "docs/m3-inputs.md" in message
