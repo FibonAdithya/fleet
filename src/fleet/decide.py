@@ -388,7 +388,19 @@ def _dispatch(
     # its own slot. `task.number in busy` above already removed this task from
     # the running set, so no self-exclusion is needed.
     running_integrators = integrators & busy
+    # Bounded by `slots` on the AGENTS that will be running, not on the live
+    # rows. "A continuation already holds its slot" is true only while live rows
+    # <= slots, and the two events M3 exists to survive break exactly that: a
+    # daemon restarted against a ledger it did not build, and a human relabelling
+    # rows by hand. Unbounded, ten REVIEW rows started ten agents in one tick.
+    # Counting rows instead would bring back the deadlock this pass exists to
+    # prevent -- at slots=1 the one reviewing task IS the one live row, so it
+    # could never be advanced. Running agents plus the ones started here is the
+    # count that is both bounded and non-self-excluding.
+    started = 0
     for task in sorted(ledger, key=lambda t: t.number):
+        if len(busy) + started >= policy.slots:
+            break
         if task.state not in _CONTINUATIONS or not task.auto_ok:
             continue
         if task.number in busy:
@@ -401,6 +413,7 @@ def _dispatch(
         # Continue, not Dispatch. Dispatch relabels to CLAIMED, which for a task
         # at REVIEW destroys the state it is being continued FOR.
         intents.append(Continue(task=task.number, role=role, base=policy.integration_branch))
+        started += 1
         if _writes_integration(task):
             integrating = True
 

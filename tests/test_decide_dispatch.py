@@ -181,20 +181,24 @@ def test_a_task_in_integrating_arms_the_global_lock():
     assert dispatched(intents) == []
 
 
-def test_a_task_in_integrating_holds_its_slot_and_its_area():
-    """The other half of the same membership: INTEGRATING is live, so it counts
-    against slots and excludes its area."""
+def test_a_task_in_review_holds_the_slot_it_occupies():
+    """The other half of the same membership: a live row counts against `slots`.
+
+    Pointed at a REVIEW row, not the INTEGRATING one it used to use. Any row
+    that writes the integration branch -- which `class:patch` at INTEGRATING now
+    does -- makes DISPATCH return at the global lock BEFORE `held` or `free` is
+    computed, so the identical assertion on an INTEGRATING row survives a
+    mutation to either accounting: it had become a weaker duplicate of
+    `test_a_patch_task_at_integrating_takes_the_global_lock`.
+
+    #8 is in a DIFFERENT area on purpose, so the slot is the only thing that can
+    exclude it; the area half is `test_an_area_held_by_a_task_in_review_is_excluded`."""
     small = dataclasses.replace(POLICY, slots=1)
-    integrating = Task(
-        number=20,
-        title="t",
-        state="integrating",
-        area="eval",
-        klass="patch",
-        auto_ok=True,
+    intents, _ = decide(
+        FleetState(), [staged(20, "review", area="eval"), ready(8, "train")], small, [], T0
     )
-    intents, _ = decide(FleetState(), [integrating, ready(8, "eval")], small, [], T0)
     assert dispatched(intents) == []
+    assert continued(intents) == [20]
 
 
 # The shared POLICY routes `patch` alone, which is enough to prove the lock
@@ -458,3 +462,55 @@ def test_the_drain_stops_continuations_too():
     state = FleetState(spent_usd=POLICY.fleet_usd)
     intents, _ = decide(state, [staged(1, "review")], POLICY, [], T0)
     assert intents == [Drain(reason="budget")]
+
+
+def test_a_running_integrator_blocks_another_task_at_integrating():
+    """The protective half of the continuation lock, and the half that is a
+    DEVIATION from the brief: Pass 1 excludes integrators that are actually
+    RUNNING rather than every live INTEGRATING row, because the latter deadlocks
+    two agentless rows against each other. Nothing else pins the running set --
+    `test_two_tasks_at_integrating_start_one_integrator` is carried by the
+    within-tick flag -- so replacing it with an empty set puts a second writer
+    onto the integration branch with every test still green."""
+    agents = [AgentState(task=1, status="working", change_seq=1)]
+    intents, _ = decide(
+        FleetState(),
+        [staged(1, "integrating"), staged(2, "integrating", area="train")],
+        POLICY,
+        agents,
+        T0,
+    )
+    assert continued(intents) == []
+
+
+def test_continuations_are_bounded_by_slots():
+    """`slots` bounds concurrent agents, and a continuation starts one. The
+    brief's justification for charging continuations no slot -- they already hold
+    theirs -- is true only while live rows <= slots, which is exactly what a
+    daemon restarted against a ledger it did not build, or a human relabelling
+    rows by hand, does not guarantee. Unbounded, ten REVIEW rows started ten
+    agents in one tick against a six-slot fleet."""
+    small = dataclasses.replace(POLICY, slots=6)
+    backlog = [staged(n, "review", area=f"a{n}") for n in range(1, 11)]
+    intents, _ = decide(FleetState(), backlog, small, [], T0)
+    assert len(continued(intents)) == 6
+
+
+def test_the_only_task_in_review_still_starts_at_one_slot():
+    """The deadlock the bound must not reintroduce. At slots=1 the reviewing
+    task IS the one live row, so a bound counting LIVE ROWS would refuse the only
+    task the fleet is working on -- forever. Counting running AGENTS is what
+    keeps both properties: nothing is running, so the slot is free."""
+    small = dataclasses.replace(POLICY, slots=1)
+    intents, _ = decide(FleetState(), [staged(1, "review")], small, [], T0)
+    assert continued(intents) == [1]
+
+
+def test_a_running_agent_spends_the_slot_a_continuation_would_need():
+    """The other side of the bound: the agent on #1 is the one slot, so #2 waits
+    a tick. Catches a bound written against the started count alone, which
+    ignores every agent already running and starts `slots` MORE of them."""
+    small = dataclasses.replace(POLICY, slots=1)
+    agents = [AgentState(task=1, status="working", change_seq=1)]
+    intents, _ = decide(FleetState(), [live(1), staged(2, "review")], small, agents, T0)
+    assert continued(intents) == []
