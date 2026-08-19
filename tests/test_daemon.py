@@ -191,11 +191,19 @@ def test_the_log_and_the_live_state_agree_on_the_spend_every_tick(cfg, tmp_path)
 
 
 def test_a_restarted_daemon_recovers_the_night_s_spend(cfg, tmp_path):
-    """The half of the restart test that costs money, taken by the path a
-    restart actually takes: one daemon spends, the process dies, a second
-    daemon is constructed over the same log and run id and resumes with the
-    same total. A daemon whose spent_usd resets hands the fleet a second full
-    budget at 2am, and the drain never fires."""
+    """The half of the restart test that costs money: one daemon spends, the
+    process dies, a second daemon is constructed over the same log and run id
+    and resumes with the same total. A daemon whose spent_usd resets hands the
+    fleet a second full budget at 2am, and the drain never fires.
+
+    This is the `Daemon` layer only, and handing both daemons `run_id="tonight"`
+    by hand is what makes it that. It proved the recovery arithmetic while
+    `fleet run` -- the only way a human starts a daemon -- minted a fresh id at
+    every start and so resumed at zero through the whole of M3. The real path is
+    pinned by tests/test_cli.py::test_a_restarted_fleet_run_resumes_the_night_s_spend,
+    which runs two real ticks through the command and asserts the number the
+    operator reads.
+    """
     first, gh, herdr = _daemon(cfg, tmp_path, run_id="tonight")
     number = gh.create_issue("Fix LID", "b", CLAIMED)
     herdr.add_agent(task=number, status="dirty", change_seq=2, cost_usd=7.5)

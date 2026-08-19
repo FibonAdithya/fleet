@@ -14,6 +14,7 @@ import click
 from fleet import git, labels, statesocket
 from fleet import ledger as ledger_module
 from fleet import policy as policy_module
+from fleet import runlog as runlog_module
 from fleet import status as status_module
 from fleet.commands import do_block, do_discover, do_escalate, do_handoff, do_verdict
 from fleet.config import load_config
@@ -286,10 +287,63 @@ def plan(dry_run):
         click.echo(line)
 
 
+#: The minted run id's shape. Sortable, filename-safe, and second-resolution --
+#: two daemons started in the same second would share a night, which is what
+#: `--run-id` and `--new-run` exist to settle explicitly.
+RUN_ID_FORMAT = "%Y-%m-%dT%H-%M-%SZ"
+
+
+def resolve_run_id(
+    runlog_path: Path, run_id: str | None, new_run: bool, now: datetime
+) -> tuple[str, str]:
+    """The night this process belongs to, and how it decided. Never guesses.
+
+    Resuming is the default because the alternative is worse in the direction
+    that costs money. `Daemon` recovers `spent_usd` by summing the run log for
+    ITS run id, so a freshly minted id at every start filters on an id that
+    appears in zero lines and resumes at zero -- a 2am restart hands the fleet a
+    second full budget and parent §10's drain never fires. That is spec §8's
+    named failure, and it was reachable through the only command a human uses
+    to start a daemon.
+
+    The cost of resuming by default is the mirror case: last night's id is still
+    the last line in the log tonight, so tonight would start already drained.
+    That is loud and safe -- the fleet dispatches nothing and says why -- and
+    `--new-run` is one flag away, which is not true of a night quietly spending
+    twice its ceiling.
+
+    Returns the id and a phrase naming the choice, because the operator has to
+    be able to read which of the three happened off one line at 2am.
+    """
+    if run_id and new_run:
+        raise click.ClickException(
+            "--run-id and --new-run contradict each other: one names a night to "
+            "rejoin, the other starts a new one. Pass exactly one."
+        )
+    if run_id:
+        return run_id, "given on the command line"
+    if not new_run:
+        previous = runlog_module.latest_run_id(runlog_path)
+        if previous:
+            return previous, "resumed from the run log"
+    return now.strftime(RUN_ID_FORMAT), "new run"
+
+
 @main.command()
 @click.option("--once", is_flag=True, help="One tick, then exit. For a supervised slice.")
 @click.option("--poll-seconds", type=int, default=None)
-def run(once: bool, poll_seconds: int | None) -> None:
+@click.option(
+    "--run-id",
+    default=None,
+    help="Rejoin this night by name, whatever the run log's last line says.",
+)
+@click.option(
+    "--new-run",
+    is_flag=True,
+    help="Start a new night rather than resuming the run log's last one. "
+    "Without it, a restart resumes -- and inherits what that night already spent.",
+)
+def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool) -> None:
     """Start the allocator daemon."""
     cfg = load_config()
     policy = policy_module.load(cfg)
@@ -302,7 +356,7 @@ def run(once: bool, poll_seconds: int | None) -> None:
     )
     owner = _gh_login()
     executor = HerdrExecutor(herdr, gh, cfg, owner=owner)
-    run_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    run_id, origin = resolve_run_id(cfg.runlog_path, run_id, new_run, datetime.now(timezone.utc))
     log = RunLog(cfg.runlog_path, run_id=run_id)
     daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id)
 
@@ -312,7 +366,15 @@ def run(once: bool, poll_seconds: int | None) -> None:
     # through `Daemon.run`'s `publish` callback -- that callback is a push and
     # does not fit a client that connects, reads once, and disconnects.
     thread = statesocket.serve(cfg.socket_path, lambda: daemon.snapshot, stop)
-    click.echo(f"fleet run: run_id={run_id} socket={cfg.socket_path}")
+    # One line, three facts: which night this is, how that was decided, and what
+    # this process believes that night has already spent. The third is the one
+    # that was unreadable before -- a daemon resuming at $0.00 against a night
+    # that spent $20 looks exactly like a daemon starting a fresh night, and the
+    # difference is the whole of the fleet ceiling.
+    click.echo(
+        f"fleet run: run_id={run_id} ({origin}) "
+        f"spent=${daemon.state.spent_usd:.2f} socket={cfg.socket_path}"
+    )
     try:
         # SIGTERM as well as SIGINT: a supervisor stopping the daemon must get
         # the same clean shutdown a Ctrl-C gives, or the socket file is left

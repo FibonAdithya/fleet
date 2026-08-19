@@ -215,3 +215,57 @@ def test_summing_hundreds_of_entries_does_not_drift(tmp_path):
             cost_usd=0.01,
         )
     assert runlog.spent_from_log(path) == pytest.approx(5.0, abs=1e-6)
+
+
+# ---------------------------------------------------------- rejoining a night
+
+
+def test_the_latest_run_id_is_the_last_night_written_not_the_first(tmp_path):
+    """One file holds several nights. A restart rejoins the one that was being
+    written when the process died, so the LAST entry answers -- reading the
+    first would resume a night that finished days ago and start already
+    drained."""
+    path = tmp_path / "run.jsonl"
+    RunLog(path, run_id="night-1").append(tick=1, at=T0, intent=dispatch(), outcome="applied")
+    RunLog(path, run_id="night-2").append(tick=1, at=T0, intent=dispatch(), outcome="applied")
+    assert runlog.latest_run_id(path) == "night-2"
+
+
+def test_the_latest_run_id_of_a_missing_log_is_none(tmp_path):
+    """A fresh fleet has written nothing. None is the signal to mint an id, not
+    an error that stops the daemon starting."""
+    assert runlog.latest_run_id(tmp_path / "nothing.jsonl") is None
+
+
+def test_the_latest_run_id_of_an_empty_log_is_none(tmp_path):
+    """An existing but empty file is the same fact as a missing one. `""` is not
+    a run id, and returning it would make `spent_from_log` filter on a value no
+    entry carries -- the very defect resuming exists to close."""
+    path = tmp_path / "run.jsonl"
+    path.write_text("")
+    assert runlog.latest_run_id(path) is None
+
+
+def test_the_latest_run_id_survives_a_truncated_final_line(tmp_path):
+    """The shape a `kill -9` mid-write leaves, which is precisely the event a
+    restart recovers from. The half-written line is skipped and the last WHOLE
+    entry answers -- not None, which would mint a fresh id and forget the
+    night's spend on the one path this function exists to serve."""
+    path = tmp_path / "run.jsonl"
+    RunLog(path, run_id="tonight").append(tick=1, at=T0, intent=dispatch(), outcome="applied")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"run_id": "tonig')
+    assert runlog.latest_run_id(path) == "tonight"
+
+
+def test_an_entry_with_no_usable_run_id_does_not_answer(tmp_path):
+    """A row whose run_id is absent, empty or not a string cannot name a night.
+    Answering with it would hand `spent_from_log` a filter matching nothing,
+    which reads as `$0.00 spent` -- a legal number and the wrong one."""
+    path = tmp_path / "run.jsonl"
+    RunLog(path, run_id="tonight").append(tick=1, at=T0, intent=dispatch(), outcome="applied")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"run_id": "", "cost_usd": 1.0}) + "\n")
+        handle.write(json.dumps({"run_id": None, "cost_usd": 1.0}) + "\n")
+        handle.write(json.dumps({"cost_usd": 1.0}) + "\n")
+    assert runlog.latest_run_id(path) == "tonight"

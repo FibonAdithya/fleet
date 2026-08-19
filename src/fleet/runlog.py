@@ -97,3 +97,43 @@ def spent_from_log(path: Path, run_id: str | None = None) -> float:
             continue
         total += float(entry.get("cost_usd", 0.0))
     return total
+
+
+def latest_run_id(path: Path) -> str | None:
+    """The run id of the last entry in the log, or None for an empty log.
+
+    What a restart rejoins. `spent_from_log` filters on a run id, so a daemon
+    that mints a fresh one at every start filters on an id appearing in zero
+    lines and resumes at `spent_usd = 0.0` -- spec §8's failure, exactly, and
+    invisible because the number it produces is a legal one.
+
+    The LAST entry, not the first: one file holds several nights, and the night
+    a restart means to rejoin is the one that was being written when the
+    process died.
+
+    Tolerant of the same two shapes `spent_from_log` is, and for the same
+    reason: a truncated final line is what a `kill -9` mid-write leaves, and an
+    entry with no usable `run_id` is skipped rather than allowed to answer.
+    Returning None on an unreadable log is safe in the direction that matters
+    -- the caller mints a fresh id and starts at zero, which under-spends
+    rather than over-spends only if the log was already unreadable, in which
+    case there was nothing to recover.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None
+    found: str | None = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        run_id = entry.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            found = run_id
+    return found
