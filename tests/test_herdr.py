@@ -895,18 +895,26 @@ def test_real_start_agent_passes_agent_args_after_a_separator(tmp_path):
     the `--`, `--permission-mode` is parsed as one of herdr's own options and
     the start fails instead of reaching claude.
 
-    Asserts a *prefix* of the post-separator args rather than the whole tuple:
-    since task 7, the model always lands after `spec.args` on that same side of
-    `--` (see `test_a_role_is_started_on_its_declared_agent_and_model`), so a
-    tuple that ended exactly at `acceptEdits` would now be wrong by
-    construction. The separator and ordering this test exists to pin are
-    unchanged."""
+    Pins the whole post-separator sequence, not just `spec.args`: since task
+    7 the model always lands after `spec.args` on that same side of `--` (see
+    `test_a_role_is_started_on_its_declared_agent_and_model`), so a tuple
+    that ended exactly at `acceptEdits` would now be wrong by construction --
+    but a prefix check would also miss the model flag being appended twice,
+    junk appended after it, or the model landing ahead of `spec.args` instead
+    of after it. `_DEFAULT_AGENTS["claude"].args` and
+    `_DEFAULT_ROUTING["implementer"]` are both fixed in this file, so the
+    full tuple is exactly determined and worth pinning exactly."""
     run = RecordingRun(_captured_replies())
     herdr = _real(tmp_path, run)
     herdr.create_worktree(task=1, slug="lid", base="integration")
     herdr.start_agent(task=1, role="implementer", prompt="x")
     start = run.herdr_calls("herdr", "agent", "start")[0]
-    assert start[start.index("--") + 1 :][:2] == ("--permission-mode", "acceptEdits")
+    assert start[start.index("--") + 1 :] == (
+        "--permission-mode",
+        "acceptEdits",
+        "--model",
+        "claude-opus-5",
+    )
     assert start[3] == "fleet-1"
     assert start[start.index("--kind") + 1] == "claude"
 
