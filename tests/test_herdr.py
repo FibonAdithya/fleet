@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from fleet.cost import UnpricedModel
-from fleet.herdr import STATUS, FakeHerdr, parse_snapshot, task_of
+from fleet.herdr import STATUS, FakeHerdr, HerdrError, parse_snapshot, task_of
 from fleet.model import AgentState
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/herdr/snapshot-fleet.json"
@@ -91,6 +91,72 @@ def test_the_fake_yields_agents_for_fleet_worktrees_only(tmp_path):
     assert [a.task for a in fake.agents()] == [3, 9]
     assert fake.agents()[0].status == "working"
     assert fake.agents()[0].cost_usd == 0.25
+
+
+# The three tests below exist because this is the first task with a real client
+# to compare the fake against. docs/m2-inputs.md §6 records four M1 cases where
+# FakeGh was subtly more permissive than RealGh, and every one of them passed
+# the entire offline suite and failed against GitHub. These are the same shape:
+# in each, RealHerdr raises and FakeHerdr used to succeed, so a caller written
+# against the fake would carry a bug the offline suite could never see.
+
+
+def test_the_fake_refuses_to_stop_an_agent_that_is_not_running():
+    """`RealHerdr.stop_agent` shells `herdr agent send-keys fleet-<task>`, which
+    answers `{"code":"agent_not_found"}` and rc=1 for a target that is not
+    there, so it raises. A fake that popped a missing key and returned would
+    let a double-stop -- or a stop of a task that never started -- look fine
+    offline and fail on the box."""
+    fake = FakeHerdr()
+    with pytest.raises(HerdrError):
+        fake.stop_agent(task=1)
+
+
+def test_the_fake_refuses_to_start_an_agent_with_no_worktree():
+    """`RealHerdr.start_agent` resolves a pane through the task's workspace and
+    raises `task <n> has no herdr workspace` when there is none. The fake used
+    to register a working agent regardless, so a dispatch ordering bug --
+    start_agent before create_worktree -- would pass every offline test."""
+    fake = FakeHerdr()
+    with pytest.raises(HerdrError):
+        fake.start_agent(task=1, role="implementer", prompt="x")
+    assert fake.started == []
+    assert fake.agents() == []
+
+
+def test_the_fake_refuses_to_create_a_worktree_that_already_exists():
+    """Real herdr fails a `worktree create` onto an existing path or branch.
+    The fake used to overwrite its map entry and hand back the path, so a
+    duplicate dispatch into an already-occupied worktree -- the precise failure
+    the `foreground_cwd` fallback exists to prevent -- would look like a clean
+    create offline."""
+    fake = FakeHerdr()
+    fake.create_worktree(task=1, slug="lid", base="integration")
+    with pytest.raises(HerdrError):
+        fake.create_worktree(task=1, slug="lid", base="integration")
+
+
+def test_the_fake_allows_a_recreate_after_a_removal():
+    """The guard above is about a *live* worktree, not a permanent ban. A task
+    whose worktree was removed can be dispatched again, and real herdr allows
+    it -- the path is free. Without this, the strictness added for the fake's
+    sake would break the retry path instead."""
+    fake = FakeHerdr()
+    fake.create_worktree(task=1, slug="lid", base="integration")
+    fake.remove_worktree(task=1)
+    assert fake.create_worktree(task=1, slug="lid", base="integration") == fake.root / "1-lid"
+
+
+def test_the_fake_stops_an_agent_it_started():
+    """The positive path, so the strictness above cannot be satisfied by a fake
+    that simply raises on every stop."""
+    fake = FakeHerdr()
+    fake.create_worktree(task=1, slug="lid", base="integration")
+    fake.start_agent(task=1, role="implementer", prompt="x")
+    assert [a.task for a in fake.agents()] == [1]
+    fake.stop_agent(task=1)
+    assert fake.stopped == [1]
+    assert fake.agents() == []
 
 
 def test_the_captured_snapshot_parses_to_no_fleet_agents():
@@ -210,6 +276,9 @@ WORKTREE_CREATED = Path(__file__).resolve().parents[1] / "fixtures/herdr/worktre
 PANE_LIST = Path(__file__).resolve().parents[1] / "fixtures/herdr/pane-list.json"
 WORKSPACE_LIST = Path(__file__).resolve().parents[1] / "fixtures/herdr/workspace-list.json"
 AGENT_IN_WORKTREE = Path(__file__).resolve().parents[1] / "fixtures/herdr/agent-fleet-worktree.json"
+WORKTREE_LIST_ORPHAN = (
+    Path(__file__).resolve().parents[1] / "fixtures/herdr/worktree-list-orphan.json"
+)
 
 # The worktree root the captures were taken under, read out of the capture
 # rather than retyped: a copy-paste drift between the two would make every
@@ -218,6 +287,17 @@ CAPTURE_ROOT = Path(json.loads(WORKTREE_CREATED.read_text())["result"]["worktree
 CAPTURE_TASK = 12
 CAPTURE_WORKSPACE = "w3R"
 CAPTURE_PANE = "w3R:p1"
+
+# The orphan capture is a *different* repo and a different worktree root: a
+# checkout that exists at the git level with no herdr workspace open on it.
+# Derived from the capture for the same reason as CAPTURE_ROOT.
+ORPHAN_ROOT = Path(
+    [
+        w["path"]
+        for w in json.loads(WORKTREE_LIST_ORPHAN.read_text())["result"]["worktrees"]
+        if w["is_linked_worktree"]
+    ][0]
+).parent
 
 
 class RecordingRun:
@@ -252,6 +332,7 @@ def _captured_replies():
         ("herdr", "worktree", "create"): WORKTREE_CREATED.read_text(),
         ("herdr", "pane", "list"): PANE_LIST.read_text(),
         ("herdr", "workspace", "list"): WORKSPACE_LIST.read_text(),
+        ("herdr", "worktree", "list"): WORKTREE_LIST_ORPHAN.read_text(),
     }
 
 
@@ -377,13 +458,79 @@ def test_real_remove_worktree_finds_a_workspace_it_did_not_create(tmp_path):
     assert remove[remove.index("--workspace") + 1] == CAPTURE_WORKSPACE
 
 
-def test_real_remove_worktree_of_an_unknown_task_removes_nothing(tmp_path):
-    """No workspace found means nothing to remove. Guessing an id here would
-    remove some other workspace's checkout -- someone's uncommitted work."""
+def test_real_remove_worktree_of_a_task_with_nothing_on_disk_removes_nothing(tmp_path):
+    """Nothing to remove is a silent, successful no-op -- and it has to be
+    distinguished from the leak below rather than collapsed with it. Task 4242
+    appears in neither capture: no workspace, and no checkout at the git level
+    either. Guessing an id here would remove some other workspace's checkout,
+    and someone's uncommitted work with it."""
     run = RecordingRun(_captured_replies())
-    herdr = _real(tmp_path, run, worktree_root=CAPTURE_ROOT)
+    herdr = _real(tmp_path, run, worktree_root=ORPHAN_ROOT)
     herdr.remove_worktree(task=4242)
     assert run.herdr_calls("herdr", "worktree", "remove") == []
+
+
+def test_real_remove_worktree_raises_when_a_checkout_has_no_workspace(tmp_path):
+    """A checkout that exists with no workspace to remove it through is a leak,
+    and a silent `return` makes it unobservable.
+
+    The capture is that exact state, produced live: create the worktree, then
+    close its workspace. `herdr workspace list` cannot see the checkout
+    afterwards (it is not a workspace any more), so `_workspace_of` answers
+    None -- indistinguishable, without this check, from the task above that has
+    nothing anywhere. `herdr worktree list --cwd <repo> --json` is the
+    git-level view that still sees it, with `open_workspace_id` simply absent.
+
+    Swallowed, the leak surfaces two dispatches later as a `worktree create
+    --path <existing dir>` failure, which points at the wrong thing entirely."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run, worktree_root=ORPHAN_ROOT)
+    with pytest.raises(HerdrError) as excinfo:
+        herdr.remove_worktree(task=CAPTURE_TASK)
+    message = str(excinfo.value)
+    assert str(CAPTURE_TASK) in message
+    assert str(ORPHAN_ROOT / "12-lid-small-sample") in message
+    assert run.herdr_calls("herdr", "worktree", "remove") == []
+
+
+def test_real_remove_worktree_does_not_consult_git_when_it_has_a_workspace(tmp_path):
+    """The leak check is on the None branch only. Listing worktrees on every
+    successful removal would be a second subprocess per reap for nothing."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=CAPTURE_TASK, slug="lid-small-sample", base="integration")
+    run.calls.clear()
+    herdr.remove_worktree(task=CAPTURE_TASK)
+    assert run.herdr_calls("herdr", "worktree", "list") == []
+
+
+def test_real_remove_worktree_asks_git_from_the_repo_root(tmp_path):
+    """`worktree list` is scoped to a repo. Without `--cwd <repo_root>` it
+    answers for whatever repo the daemon's own cwd happens to be in, which is
+    not necessarily the one holding fleet's worktrees."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run, worktree_root=ORPHAN_ROOT)
+    herdr.remove_worktree(task=4242)
+    listed = run.herdr_calls("herdr", "worktree", "list")[0]
+    assert listed[listed.index("--cwd") + 1] == str(tmp_path / "repo")
+    assert "--json" in listed
+
+
+def test_real_create_worktree_raises_when_herdr_returns_no_workspace_id(tmp_path):
+    """A create that cached no workspace id is not a successful create, and it
+    must not look like one. Returning the path regardless -- which a truthiness
+    guard on the id does -- leaves a checkout on disk that nothing can remove,
+    and the caller with no way to know. A herdr field rename is exactly how
+    this happens."""
+    replies = _captured_replies()
+    renamed = json.loads(WORKTREE_CREATED.read_text())
+    renamed["result"]["workspace"]["id"] = renamed["result"]["workspace"].pop("workspace_id")
+    replies[("herdr", "worktree", "create")] = json.dumps(renamed)
+    run = RecordingRun(replies)
+    herdr = _real(tmp_path, run)
+    with pytest.raises(HerdrError) as excinfo:
+        herdr.create_worktree(task=1, slug="lid", base="integration")
+    assert "no workspace id" in str(excinfo.value)
 
 
 def test_real_start_agent_exports_the_role_and_the_agent_id(tmp_path):
@@ -451,9 +598,27 @@ def test_real_start_agent_resolves_the_pane_by_workspace_id(tmp_path):
 
 
 def test_real_start_agent_grants_permissions_up_front(tmp_path):
-    """Parent §8: an agent waiting at an interactive prompt is the most common
-    stall, and a permission prompt is a hang that costs stall_minutes and one
-    attempt."""
+    """A weak test, kept honest about it. **This does not show that the agent
+    reaches a usable prompt**, and it must not be read as the trust-prompt
+    question being settled.
+
+    The measurement that produced fixtures/herdr/agent-fleet-worktree.json
+    disproves the obvious reading: the default `--permission-mode acceptEdits`
+    satisfies the assertion below, and the agent still came up `agent_status:
+    blocked`, sitting at claude's trust-this-folder dialog -- which every fresh
+    worktree gets, because trust is keyed per directory path. `STATUS` maps
+    `blocked` to `dirty`, so under this default a dispatch reads as dirty on
+    its first tick.
+
+    Whether `--dangerously-skip-permissions` clears it is UNMEASURED: the
+    sandbox classifier blocked that command, and it is not assumed here. The
+    default is a human's decision and is escalated, not settled.
+
+    What this actually discriminates -- that some permission argument reaches
+    the argv -- is already covered exactly by
+    `test_real_start_agent_passes_agent_args_after_a_separator`, which pins the
+    tuple after the `--`. This one is left as the place the open question is
+    written down."""
     run = RecordingRun(_captured_replies())
     herdr = _real(tmp_path, run)
     herdr.create_worktree(task=1, slug="lid", base="integration")
@@ -577,8 +742,6 @@ def test_real_run_raises_herdr_error_carrying_stderr(tmp_path):
     """CalledProcessError carries argv and an exit code but not stderr, which is
     where herdr puts the reason -- `{"code":"dirty_worktree_requires_force"}`
     and friends. Losing it turns every failure into 'exit 1'."""
-    from fleet.herdr import HerdrError
-
     herdr = _real(tmp_path)
     with pytest.raises(HerdrError) as excinfo:
         herdr._subprocess("git", "--this-flag-does-not-exist")
@@ -590,8 +753,6 @@ def test_real_run_raises_herdr_error_when_output_is_not_json(tmp_path):
     """herdr prints its errors as JSON on stdout for some failures and plain
     text for others (`unknown option: --cwd`, exit 2). A bare json.JSONDecodeError
     out of the daemon tick names neither the command nor the output."""
-    from fleet.herdr import HerdrError
-
     run = RecordingRun({("herdr",): "unknown option: --cwd"})
     herdr = _real(tmp_path, run)
     with pytest.raises(HerdrError) as excinfo:

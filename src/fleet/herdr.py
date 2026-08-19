@@ -146,7 +146,18 @@ class Herdr(Protocol):
 
 
 class FakeHerdr:
-    """In-memory, with the same surface. The only client tests use."""
+    """In-memory, with the same surface. The only client tests use.
+
+    Where `RealHerdr` raises, this raises too. That is not politeness: it is
+    the rule from docs/m2-inputs.md §6, where four M1 defects were all cases of
+    a fake being subtly *more* permissive than the real client, and every one
+    of them passed the whole offline suite and failed against the live service.
+    A fake must be less permissive than the real client, never more, so that a
+    production failure becomes an offline one.
+
+    The three guards below each mirror a specific `RealHerdr` failure, named at
+    the guard.
+    """
 
     def __init__(self, worktree_root: Path | None = None) -> None:
         self.root = Path(worktree_root or "/fake/worktrees")
@@ -169,20 +180,42 @@ class FakeHerdr:
         return sorted(self._agents.values(), key=lambda a: a.task)
 
     def create_worktree(self, task: int, slug: str, base: str) -> Path:
+        # Real herdr fails a create onto an existing path or branch. Silently
+        # overwriting the map entry would make a duplicate dispatch into an
+        # already-occupied worktree look like a clean create. Removal frees the
+        # task again, because it frees the path.
+        if task in self.worktrees:
+            raise HerdrError(f"task {task} already has a worktree at {self.worktrees[task]}")
         path = self.root / f"{task}-{slug}"
         self.worktrees[task] = path
         return path
 
     def remove_worktree(self, task: int) -> None:
+        # Deliberately NOT guarded: `RealHerdr.remove_worktree` is a successful
+        # no-op when there is nothing to remove, so raising here would make the
+        # fake stricter than the real client in the one direction that is also
+        # wrong -- it would reject a call the real client accepts.
         self.worktrees.pop(task, None)
         self.removed.append(task)
 
     def start_agent(self, task: int, role: str, prompt: str) -> None:
+        # `RealHerdr.start_agent` resolves a pane through the task's workspace
+        # and raises `task <n> has no herdr workspace` when there is none. The
+        # ordering bug this catches -- start_agent before create_worktree --
+        # would otherwise pass every offline test.
+        if task not in self.worktrees:
+            raise HerdrError(f"task {task} has no herdr workspace")
         self.started.append((task, role, prompt))
         self.add_agent(task, "working", change_seq=len(self.started))
 
     def stop_agent(self, task: int) -> None:
-        self._agents.pop(task, None)
+        # `RealHerdr.stop_agent` shells `herdr agent send-keys fleet-<task>`,
+        # which answers `agent_not_found` and rc=1 for a target that is not
+        # there, so it raises. A double-stop must not be silently fine here
+        # when it is an exception on the box.
+        if task not in self._agents:
+            raise HerdrError(f"agent fleet-{task} not found")
+        self._agents.pop(task)
         self.stopped.append(task)
 
 
@@ -289,8 +322,16 @@ class RealHerdr:
         )
         result = created.get("result") or {}
         workspace = (result.get("workspace") or {}).get("workspace_id")
-        if workspace:
-            self.workspaces[task] = workspace
+        if not workspace:
+            # Not a successful create, and it must not look like one. The
+            # worktree is on disk by now, and the id is the only handle that
+            # removes it -- returning the path anyway would leave a checkout
+            # nothing can clean up and a caller with no way to know. A herdr
+            # field rename is exactly how this happens.
+            raise HerdrError(
+                f"herdr worktree create for task {task} returned no workspace id: {created!r}"
+            )
+        self.workspaces[task] = workspace
         pane = (result.get("root_pane") or {}).get("pane_id")
         if pane:
             self.panes[task] = pane
@@ -310,9 +351,24 @@ class RealHerdr:
         """
         workspace = self.workspaces.get(task) or self._workspace_of(task)
         if workspace is None:
-            # Nothing found. Guessing an id here would remove some other
-            # workspace's checkout, and someone's uncommitted work with it.
-            return
+            # Two very different situations answer None here, and collapsing
+            # them is what makes a leak unobservable.
+            checkout = self._checkout_of(task)
+            if checkout is None:
+                # Nothing to remove. A silent, successful no-op -- and note
+                # that guessing an id instead would remove some other
+                # workspace's checkout, and someone's uncommitted work.
+                return
+            # A checkout that exists with no workspace to remove it through.
+            # Swallowed, this surfaces two dispatches later as a `worktree
+            # create --path <existing dir>` failure, which points at the wrong
+            # thing entirely. Task 12's executor is specified to catch this
+            # without killing the tick.
+            raise HerdrError(
+                f"task {task} has a worktree checkout at {checkout} but no herdr "
+                "workspace to remove it through; remove it by hand "
+                f"(git -C {self.repo_root} worktree remove --force {checkout})"
+            )
         # --force because a retired agent's worktree is usually dirty -- that is
         # what being retired mid-turn means -- and herdr refuses a dirty removal
         # with `dirty_worktree_requires_force`. Without it REAP would fail on
@@ -341,6 +397,28 @@ class RealHerdr:
             checkout = (workspace.get("worktree") or {}).get("checkout_path")
             if checkout and task_of(checkout, self.root) == task:
                 return workspace.get("workspace_id")
+        return None
+
+    def _checkout_of(self, task: int) -> Path | None:
+        """The git-level view, which `workspace list` cannot give.
+
+        A worktree whose herdr workspace has been closed is gone from
+        `workspace list` -- it is not a workspace any more -- but `herdr
+        worktree list --cwd <repo> --json` still lists the checkout, with
+        `open_workspace_id` simply absent. That difference is the only way to
+        tell "nothing to remove" from "a checkout with nothing to remove it
+        through", and it was captured live by creating a worktree and closing
+        its workspace (fixtures/herdr/worktree-list-orphan.json).
+
+        `--cwd self.repo_root` because `worktree list` is scoped to one repo:
+        without it, herdr answers for whatever repo the daemon's own working
+        directory happens to sit in.
+        """
+        listed = self._json("herdr", "worktree", "list", "--cwd", str(self.repo_root), "--json")
+        for worktree in (listed.get("result") or {}).get("worktrees", []):
+            path = worktree.get("path")
+            if path and task_of(path, self.root) == task:
+                return Path(path)
         return None
 
     # -- agents -------------------------------------------------------------

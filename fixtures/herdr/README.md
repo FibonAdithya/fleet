@@ -208,3 +208,46 @@ a checkout outside the worktree root), one is an unrelated repo, and exactly
 one is the fleet worktree. A lookup that indexed `workspace["worktree"]`
 unconditionally would raise on the first entry, and one that matched on
 `label` would have two candidates.
+
+---
+
+# `worktree-list-orphan.json`
+
+Verbatim `herdr worktree list --cwd <repo> --json`, captured on this box in a
+state built deliberately: create a worktree, then **close its workspace** and
+leave the checkout on disk. That is the leak `RealHerdr._checkout_of` exists to
+detect.
+
+The point is the disagreement between two herdr views of the same checkout:
+
+```
+$ herdr workspace list          # -> no entry for it at all
+matches: []
+
+$ herdr worktree list --cwd <repo> --json
+ path=repo                          linked=False open_workspace_id='w3S'
+ path=worktrees/12-lid-small-sample linked=True  open_workspace_id=(ABSENT)
+```
+
+Once the workspace is closed the checkout is not a workspace any more, so
+`workspace list` -- and therefore `_workspace_of` -- cannot see it. The
+git-level `worktree list` still does, with `open_workspace_id` simply absent.
+
+That difference is the only way to tell the two silent cases apart:
+
+- **nothing to remove** (no workspace, no checkout) -- a successful no-op;
+- **a checkout with no workspace to remove it through** -- a leak, which
+  `remove_worktree` raises `HerdrError` on, naming the task and the path.
+
+Collapsed into one silent `return`, the second surfaces two dispatches later as
+a `worktree create --path <existing dir>` failure, which points at the wrong
+thing entirely.
+
+Note `--cwd <repo>` is required: `worktree list` is scoped to one repo, and
+without it herdr answers for whatever repo the daemon's own working directory
+happens to sit in. The capture's own `result.source.source_workspace_id` (`w3S`)
+is the source repo's workspace, not a fleet worktree; `task_of` rejects it,
+which is why the fixture is a useful negative as well as a positive.
+
+The probe worktree, both workspaces, and the throwaway repo were removed
+afterwards.
