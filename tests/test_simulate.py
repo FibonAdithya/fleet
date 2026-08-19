@@ -179,7 +179,7 @@ def test_a_clean_exit_advances_the_task_to_its_packets_target():
             {"outcomes": {}, "expect": ["Dispatch(1, implementer, 1)"]},
             {
                 "outcomes": {1: "clean_exit"},
-                "packets": {1: {"to": "review", "head_sha": "a91c204"}},
+                "packets": {1: {"to": "review", "attempt": 1, "head_sha": "a91c204"}},
                 "expect": ["Advance(1, review)"],
             },
         ],

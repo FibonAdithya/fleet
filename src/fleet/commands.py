@@ -57,8 +57,16 @@ def _move_state(gh: GhClient, issue: int, state: str, add: list[str] | None = No
 
 
 def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
-    validate(cfg, "handoff", packet)
     issue = packet["task"]
+    # The issue outlives the attempt, so a packet that does not name its attempt
+    # cannot be told apart from a previous one by anything reading the comments.
+    # Read off the ledger row, not an argument: an agent that could set this
+    # itself could re-validate a stale packet onto a fresh attempt -- exactly
+    # the move Task 7's binding in decide._advance exists to prevent. `_post`
+    # is reached only through build_handoff's callers (do_handoff, do_block,
+    # do_escalate), so this never touches a verdict.
+    packet["attempt"] = max(read_one(gh.get_issue(issue)).attempts, 1)
+    validate(cfg, "handoff", packet)
     gh.comment(issue, render(packet))
     _move_state(gh, issue, state)
     return packet

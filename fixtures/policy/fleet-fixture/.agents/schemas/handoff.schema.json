@@ -2,12 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "fleet.handoff.v1",
   "type": "object",
-  "required": ["schema", "task", "to", "from", "base_sha", "head_sha", "branch", "did", "evidence"],
+  "required": ["schema", "task", "to", "from", "base_sha", "head_sha", "branch", "did", "evidence", "attempt"],
   "additionalProperties": false,
   "properties": {
     "schema": { "const": "fleet.handoff.v1" },
     "task": { "type": "integer", "minimum": 1 },
     "to": { "enum": ["review", "claimed", "integrating", "blocked", "human", "done"] },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The dispatch attempt this packet was written on. The issue outlives the attempt, so a receiver must be able to tell attempt 1's evidence from attempt 2's."
+    },
     "from": {
       "type": "object",
       "required": ["role", "agent", "run"],

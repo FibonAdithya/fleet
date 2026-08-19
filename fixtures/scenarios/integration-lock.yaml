@@ -35,7 +35,7 @@ ticks:
   - outcomes: {}
     expect: []
   - outcomes: {20: clean_exit}
-    packets: {20: {to: done}}
+    packets: {20: {to: done, attempt: 1}}
     expect:
       - "Advance(20, done)"
   # The lock lifts and both areas resume, at the attempt each task had reached.

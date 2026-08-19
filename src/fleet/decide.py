@@ -144,8 +144,17 @@ def _advance(task: Task) -> list[Intent]:
     next tick advances it; spec §5 calls `packet is None` a fact about the query.
     Releasing here would burn an attempt for a healthy task and escalate it in
     two ticks.
+
+    A packet from a DIFFERENT attempt is treated the same way as no packet:
+    ignored, and the caller falls through to the stall timer. The issue outlives
+    the attempt, so the newest handoff comment can be attempt 1's evidence read
+    on attempt 2 -- and advancing on it moves a task forward on work that was
+    thrown away. A missing `attempt` is a mismatch, not a pass: a permissive
+    default here makes the whole check decorative.
     """
     if task.packet is None:
+        return []
+    if task.packet.get("attempt") != max(task.attempts, 1):
         return []
     target = task.packet.get("to")
     if not target:

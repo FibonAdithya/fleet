@@ -53,7 +53,7 @@ def only(intents, kind):
 
 def test_a_clean_exit_advances_to_the_packets_target():
     """Catches a REAP that ignores the packet and releases every finished agent."""
-    task = claimed(packet={"to": "review", "head_sha": "a91c204"})
+    task = claimed(packet={"to": "review", "attempt": 1, "head_sha": "a91c204"})
     agents = [AgentState(task=1, status="done", change_seq=10)]
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
     assert Advance(task=1, to="review") in intents
@@ -94,7 +94,7 @@ def test_a_done_agent_whose_packet_has_not_arrived_yet_is_left_alone():
 def test_a_packet_with_no_target_escalates_rather_than_raising():
     """Catches `task.packet["to"]`, an unguarded index that raises KeyError out
     of the pure core and takes the whole tick with it."""
-    task = claimed(packet={"head_sha": "a91c204"})
+    task = claimed(packet={"attempt": 1, "head_sha": "a91c204"})
     agents = [AgentState(task=1, status="done", change_seq=10)]
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
     assert Escalate(task=1, reason="packet_without_target") in intents
@@ -106,7 +106,7 @@ def test_a_packet_naming_a_state_that_does_not_exist_escalates_rather_than_raisi
     Advance(to=...), which expand() then refuses with ValueError -- out of the
     tick, taking every other task's intents with it. A packet arrives from an
     issue comment, so its `to` is exactly as trustworthy as the absent one."""
-    task = claimed(packet={"to": "shipped", "head_sha": "a91c204"})
+    task = claimed(packet={"to": "shipped", "attempt": 1, "head_sha": "a91c204"})
     agents = [AgentState(task=1, status="done", change_seq=10)]
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
     assert Escalate(task=1, reason="packet_target_unknown") in intents
@@ -119,7 +119,7 @@ def test_every_advance_decide_emits_can_be_expanded():
     from fleet.expand import expand
 
     for target in ("review", "integrating", "done", "blocked", "human", "claimed"):
-        task = claimed(packet={"to": target, "head_sha": "a91c204"})
+        task = claimed(packet={"to": target, "attempt": 1, "head_sha": "a91c204"})
         agents = [AgentState(task=1, status="done", change_seq=10)]
         intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
         for intent in intents:
@@ -208,7 +208,7 @@ def test_a_finished_agent_over_budget_still_advances_its_packet():
     """Status first, cost second. Catches the reverse order, which discards a
     completed packet because the agent ended a cent over the ceiling -- paying
     for the work and then throwing it away."""
-    task = claimed(packet={"to": "review", "head_sha": "a91c204"})
+    task = claimed(packet={"to": "review", "attempt": 1, "head_sha": "a91c204"})
     agents = [AgentState(task=1, status="done", change_seq=10, cost_usd=2.5)]
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
     assert Advance(task=1, to="review") in intents
@@ -279,7 +279,7 @@ def test_escalating_a_task_drops_its_observation_too():
 
 
 def test_advancing_a_task_drops_its_observation():
-    task = claimed(packet={"to": "review", "head_sha": "a91c204"})
+    task = claimed(packet={"to": "review", "attempt": 1, "head_sha": "a91c204"})
     prev = FleetState(seen=((1, Observation(change_seq=10, since=T0)),))
     agents = [AgentState(task=1, status="done", change_seq=10)]
     _, state = decide(prev, [task], POLICY, agents, T0)
@@ -656,3 +656,33 @@ def test_a_finished_continuation_agent_over_budget_is_not_charged_for_it():
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
     assert Retire(task=5) in intents
     assert only(intents, Escalate) == []
+
+
+def test_a_packet_from_a_previous_attempt_does_not_advance_the_task():
+    """M3's shell fetches the newest handoff comment off an issue that outlives
+    the attempt, so attempt 1's packet is readable on attempt 2. Acting on it
+    advances work that never happened: a task released for a dirty exit,
+    re-dispatched, and then moved to REVIEW on the failed attempt's evidence."""
+    stale = {"to": "review", "attempt": 1, "from": {"role": "implementer"}}
+    task = claimed(number=5, state="claimed", attempts=2, packet=stale)
+    agents = [AgentState(task=5, status="done", change_seq=4)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert not any(isinstance(i, Advance) for i in intents)
+
+
+def test_a_packet_from_the_current_attempt_advances():
+    fresh = {"to": "review", "attempt": 2, "from": {"role": "implementer"}}
+    task = claimed(number=5, state="claimed", attempts=2, packet=fresh)
+    agents = [AgentState(task=5, status="done", change_seq=4)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Advance(task=5, to="review") in intents
+
+
+def test_a_packet_with_no_attempt_field_does_not_advance():
+    """A packet written before the schema required `attempt` -- or by a CLI that
+    was not upgraded. Treating a missing field as a match is the permissive
+    default that makes the whole check decorative."""
+    task = claimed(number=5, state="claimed", attempts=1, packet={"to": "review"})
+    agents = [AgentState(task=5, status="done", change_seq=4)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert not any(isinstance(i, Advance) for i in intents)

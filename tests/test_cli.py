@@ -81,6 +81,7 @@ def test_the_generated_run_timestamp_satisfies_the_schema(cfg, env):
             "schema": "fleet.handoff.v1",
             "task": 1,
             "to": "review",
+            "attempt": 1,
             "from": identity,
             "base_sha": "fb5ec5d",
             "head_sha": "a91c204",

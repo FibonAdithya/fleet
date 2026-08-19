@@ -10,6 +10,7 @@ VALID = {
     "schema": "fleet.handoff.v1",
     "task": 21,
     "to": "review",
+    "attempt": 1,
     "from": {"role": "implementer", "agent": "fleet-3", "run": "2026-08-10T02:14:00Z"},
     "base_sha": "fb5ec5d",
     "head_sha": "a91c204",

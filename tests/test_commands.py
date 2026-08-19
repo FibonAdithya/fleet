@@ -65,6 +65,33 @@ def test_handoff_carries_do_not_forward(cfg, gh):
     assert packet["do_not"] == ["Do not change the gate band."]
 
 
+def test_a_handoff_packet_records_the_attempt_it_was_written_on(cfg):
+    gh = FakeGh()
+    number = gh.create_issue("t", "b", ["fleet:claimed", "fleet:attempt-2", "area:eval"])
+    packet = do_handoff(cfg, gh, task=number, to="review", **BASE)
+    assert packet["attempt"] == 2
+
+
+def test_the_first_attempt_is_recorded_as_one_not_zero(cfg):
+    """A task dispatched once carries fleet:attempt-1, but a hand-seeded row may
+    carry none -- and `attempts == 0` written into the packet matches nothing
+    REAP will ever compare it against, so the handoff would be ignored forever."""
+    gh = FakeGh()
+    number = gh.create_issue("t", "b", ["fleet:claimed", "area:eval"])
+    packet = do_handoff(cfg, gh, task=number, to="review", **BASE)
+    assert packet["attempt"] == 1
+
+
+def test_an_agent_cannot_choose_its_own_attempt_number(cfg):
+    """The number comes from the ledger row, not from the caller. An agent that
+    could set it could re-validate a stale packet onto a fresh attempt --
+    exactly the move this binding exists to prevent."""
+    gh = FakeGh()
+    number = gh.create_issue("t", "b", ["fleet:claimed", "fleet:attempt-1", "area:eval"])
+    with pytest.raises(TypeError):
+        do_handoff(cfg, gh, task=number, to="review", attempt=99, **BASE)
+
+
 def test_invalid_packet_writes_nothing(cfg, gh):
     bad = {**BASE, "head_sha": "HEAD"}
     with pytest.raises(SchemaError):

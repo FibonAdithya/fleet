@@ -33,7 +33,7 @@ ticks:
       - "Drain(budget)"
   # In-flight work finishes during the drain rather than being discarded.
   - outcomes: {6: clean_exit}
-    packets: {6: {to: review}}
+    packets: {6: {to: review, attempt: 1}}
     expect:
       - "Advance(6, review)"
       - "Drain(budget)"
