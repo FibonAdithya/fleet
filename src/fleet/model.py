@@ -161,6 +161,25 @@ class Release:
 
 
 @dataclass(frozen=True)
+class Rebase:
+    """An integrator handed this task back to be re-based on a moved integration.
+
+    Distinct from Release for two mechanical reasons. `expand` has to write
+    `fleet:rebase-N` and only the intent can carry that number, because `expand`
+    never sees the task. And `simulate.render_intent` prints every field in
+    declaration order, so a fourth field on Release would rewrite the expected
+    output of every scenario that asserts one.
+
+    It costs no attempt on purpose -- a conflict is not a failed try -- which is
+    why it needs a counter of its own. Without one it loops: conflict, hand back,
+    re-dispatch, conflict, all night, on a counter that never moves.
+    """
+
+    task: int
+    rebase: int
+
+
+@dataclass(frozen=True)
 class Escalate:
     task: int
     reason: str
@@ -199,7 +218,7 @@ class Drain:
     reason: str
 
 
-Intent = Dispatch | Continue | Release | Escalate | Unblock | Advance | Retire | Drain
+Intent = Dispatch | Continue | Release | Rebase | Escalate | Unblock | Advance | Retire | Drain
 
 
 # ---------------------------------------------------------------- effects

@@ -20,6 +20,7 @@ from fleet.model import (
     Escalate,
     Intent,
     Policy,
+    Rebase,
     Release,
     Retire,
     SetLabels,
@@ -83,6 +84,20 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
             StopAgent(task=intent.task),
             Assign(task=intent.task, owner=None),
             _to_state(intent.task, "ready", (_attempt_label(intent.attempt, policy),)),
+        ]
+
+    if isinstance(intent, Rebase):
+        # No attempt label: the task keeps the one it already carries. Labels
+        # accumulate and `_to_state` removes only state labels, so writing none
+        # leaves the existing counter exactly where it was.
+        return [
+            StopAgent(task=intent.task),
+            Assign(task=intent.task, owner=None),
+            _to_state(
+                intent.task,
+                "ready",
+                (labels_module.rebase_label(min(intent.rebase, policy.max_rebases)),),
+            ),
         ]
 
     if isinstance(intent, Escalate):

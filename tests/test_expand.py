@@ -11,6 +11,7 @@ from fleet.model import (
     Dispatch,
     Drain,
     Escalate,
+    Rebase,
     Release,
     Retire,
     SetLabels,
@@ -113,6 +114,34 @@ def test_a_zero_attempt_raises_rather_than_being_rounded_up():
     task already on its second try."""
     with pytest.raises(ValueError, match="attempts start at 1"):
         expand(Release(task=1, reason="stalled", attempt=0), POLICY)
+
+
+def test_rebase_lands_in_ready_with_its_counter_and_no_new_attempt():
+    """The attempt label is the one already on the task. A rebase that bumped it
+    would inflate fleet:attempt-N, which is exactly what the grader's `no task
+    exceeds 2 attempts` hard fail reads -- a task could reach NEEDS_HUMAN for
+    having conflicted twice."""
+    effects = expand(Rebase(task=4, rebase=1), POLICY)
+    labelling = [e for e in effects if isinstance(e, SetLabels)]
+    assert len(labelling) == 1
+    assert "fleet:ready" in labelling[0].add
+    assert "fleet:rebase-1" in labelling[0].add
+    assert not any(label.startswith("fleet:attempt-") for label in labelling[0].add)
+    assert effects[0] == StopAgent(task=4)
+
+
+def test_rebase_never_emits_a_counter_label_beyond_the_cap():
+    """Clamped for the same reason `_attempt_label` is: labels.static_vocabulary
+    is sized from `max_rebases`, so `fleet:rebase-(cap+1)` is a label gh has
+    never heard of, and gh refuses an unknown label and changes nothing at all.
+    decide() never emits a Rebase past the cap -- it escalates instead -- but
+    expand() has no way to know that about its caller, and a rebase number
+    handed straight to `labels.rebase_label` without clamping would raise
+    ValueError past `max_rebases` labels in the static vocabulary."""
+    effects = expand(Rebase(task=4, rebase=5), POLICY)
+    add = [e for e in effects if isinstance(e, SetLabels)][0].add
+    assert not any(label.startswith("fleet:rebase-") and label != "fleet:rebase-1" for label in add)
+    assert "fleet:rebase-1" in add
 
 
 def test_escalate_reaches_human_and_stops_the_agent():

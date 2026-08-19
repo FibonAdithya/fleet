@@ -26,6 +26,7 @@ from fleet.model import (
     Intent,
     Observation,
     Policy,
+    Rebase,
     Release,
     Retire,
     Task,
@@ -33,7 +34,7 @@ from fleet.model import (
 )
 
 # Intents whose expansion stops the agent, so that agent's cost is final.
-_REAPING = (Advance, Release, Escalate, Retire)
+_REAPING = (Advance, Release, Rebase, Escalate, Retire)
 
 _DRAIN_FRACTION = 0.8
 
@@ -173,6 +174,18 @@ def _stalled(
     return now - observation.since >= timedelta(minutes=policy.stall_minutes)
 
 
+def _is_rebase_handback(task: Task) -> bool:
+    """An integrator handing a task back to CLAIMED for a rebase.
+
+    Both halves are required. The target alone would let any role dodge an
+    attempt by naming CLAIMED; the role alone would catch an integrator's
+    ordinary hand to `done`.
+    """
+    packet = task.packet or {}
+    sender = packet.get("from") or {}
+    return packet.get("to") == "claimed" and sender.get("role") == "integrator"
+
+
 def _reap(
     ledger: list[Task],
     policy: Policy,
@@ -204,6 +217,31 @@ def _reap(
         if task.state not in _LIVE:
             continue
         agent = by_task.get(task.number)
+        if _is_rebase_handback(task):
+            # An integrator handing this task back for a rebase, checked ahead
+            # of every other branch in this loop -- Ruling B3.
+            #
+            # `_post` writes the handback comment and only then moves the
+            # label (commands.py `_post`), so a tick can catch this row
+            # mid-transition: the label still reads INTEGRATING while the
+            # packet is already visible. Left to the branches below, that row
+            # falls into the non-claimed body and its done-agent case emits
+            # Retire -- an ordinary stage-handoff reading of what is actually
+            # a rebase.
+            #
+            # And once the label has caught up to CLAIMED, the integrator that
+            # wrote it still shows `status="done"` in herdr's snapshot for one
+            # more tick, until StopAgent removes it. Left to the branches
+            # below, that reads as a clean exit and `_advance` emits a
+            # meaningless Advance(task, to="claimed") self-transition instead.
+            #
+            # Neither shape is a failure and neither is ledger drift, so this
+            # precedes both the Retire branch and `_advance`.
+            if task.rebases + 1 > policy.max_rebases:
+                intents.append(Escalate(task=task.number, reason="rebases_exhausted"))
+            else:
+                intents.append(Rebase(task=task.number, rebase=task.rebases + 1))
+            continue
         if task.state != "claimed":
             # The agent moved the label itself -- `fleet handoff` for a review,
             # `fleet verdict` for an integration -- and then exited. Nothing to

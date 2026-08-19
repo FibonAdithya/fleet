@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 from fleet.decide import decide
@@ -11,6 +12,7 @@ from fleet.model import (
     FleetState,
     Observation,
     Policy,
+    Rebase,
     Release,
     Retire,
     Task,
@@ -541,6 +543,81 @@ def test_a_continuation_agent_exactly_at_the_ceiling_is_left_alone():
     agents = [AgentState(task=5, status="working", change_seq=4, cost_usd=POLICY.per_task_usd)]
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
     assert intents == []
+
+
+HANDBACK = {"to": "claimed", "from": {"role": "integrator", "agent": "fleet-1"}}
+
+
+def test_an_integrator_handback_releases_without_burning_an_attempt():
+    """integrator.md step 3 hands a task back to CLAIMED on conflict, and
+    nothing starts an agent at that moment -- so the next tick used to read it
+    as drift and release it with attempt + 1."""
+    task = claimed(number=4, state="claimed", attempts=1, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert intents == [Rebase(task=4, rebase=1)]
+
+
+def test_a_second_handback_within_the_cap_counts_up():
+    policy = dataclasses.replace(POLICY, max_rebases=2)
+    task = claimed(number=4, state="claimed", attempts=1, rebases=1, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [task], policy, [], T0)
+    assert intents == [Rebase(task=4, rebase=2)]
+
+
+def test_a_handback_past_the_cap_escalates():
+    """Parent §10's conflict storm: 'both -> NEEDS_HUMAN, stop integrating
+    rather than thrash'. Without the cap a rebase that costs no attempt cycles
+    forever, burning the fleet's budget on one task all night."""
+    task = claimed(number=4, state="claimed", attempts=1, rebases=1, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert intents == [Escalate(task=4, reason="rebases_exhausted")]
+
+
+def test_a_claimed_task_with_no_agent_and_no_handback_is_still_drift():
+    """The drift rule must survive: a daemon restart, a crashed pane, a killed
+    agent. Only an integrator's handback packet is exempt."""
+    task = claimed(number=4, state="claimed", attempts=1)
+    intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert intents == [Release(task=4, reason="no_agent", attempt=2)]
+
+
+def test_a_handback_from_a_non_integrator_is_not_a_rebase():
+    """Only the integrator hands back for a rebase. A packet claiming otherwise
+    would let any role dodge an attempt by naming the right target state."""
+    packet = {"to": "claimed", "from": {"role": "implementer", "agent": "fleet-2"}}
+    task = claimed(number=4, state="claimed", attempts=1, packet=packet)
+    intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert intents == [Release(task=4, reason="no_agent", attempt=2)]
+
+
+def test_a_handback_still_showing_a_done_agent_is_a_rebase_not_a_phantom_advance():
+    """Ruling B3. An integrator that just relabeled to CLAIMED and exited still
+    reports status="done" for one tick before StopAgent removes it from herdr's
+    snapshot -- `_post` writes the comment, then moves the label, so this row
+    reads as CLAIMED with a done agent and a handback packet in the same
+    fetch. Without the handback check running ahead of `_advance`, this done
+    agent reads as a clean exit and `_advance` emits a meaningless
+    Advance(task=4, to='claimed') self-transition instead of spending the
+    rebase."""
+    task = claimed(number=4, state="claimed", attempts=1, packet=HANDBACK)
+    agents = [AgentState(task=4, status="done", change_seq=7)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == [Rebase(task=4, rebase=1)]
+
+
+def test_a_handback_visible_before_the_label_catches_up_still_wins_over_retire():
+    """The other half of ruling B3's precedence. `_post` posts the handback
+    comment BEFORE it moves the label (commands.py `_post`), so a tick that
+    reads the issue in that exact window sees the packet with `to: claimed`
+    while the state label still says INTEGRATING. That row falls into the
+    non-claimed body, whose done-agent branch is Retire -- and without the
+    handback check running ahead of it, this handback would be read as an
+    ordinary stage handoff and its agent merely retired, one tick early and
+    with no rebase spent."""
+    task = claimed(number=4, state="integrating", attempts=1, packet=HANDBACK)
+    agents = [AgentState(task=4, status="done", change_seq=7)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == [Rebase(task=4, rebase=1)]
 
 
 def test_a_finished_continuation_agent_over_budget_is_not_charged_for_it():

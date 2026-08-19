@@ -32,6 +32,7 @@ from fleet.model import (
     Escalate,
     FleetState,
     Intent,
+    Rebase,
     Release,
     Retire,
     SetLabels,
@@ -49,7 +50,7 @@ _TICK_KEYS = {"expect", "outcomes", "packets"}
 # `[Dispatch(1, implementer, 1)]` into three scalars, and a string comparison
 # turns that into a silent mismatch instead of a complaint about the file.
 _CALL = re.compile(r"^(\w+)\((.*)\)$")
-_INTENTS = (Advance, Continue, Dispatch, Drain, Escalate, Release, Retire, Unblock)
+_INTENTS = (Advance, Continue, Dispatch, Drain, Escalate, Rebase, Release, Retire, Unblock)
 _INTENT_NAMES = frozenset(cls.__name__ for cls in _INTENTS)
 
 

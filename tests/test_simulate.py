@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from conftest import FIXTURE_POLICY
-from fleet.model import Advance, Continue, Dispatch, Release, Retire
+from fleet.model import Advance, Continue, Dispatch, Rebase, Release, Retire
 from fleet.runlog import RunLog
 from fleet.runlog import read as read_runlog
 from fleet.simulate import ScenarioError, load_scenario, render_intent, run
@@ -338,6 +338,18 @@ def test_a_rendered_continue_is_a_recognized_intent_shape():
     rendered = render_intent(Continue(task=5, role="reviewer", base="integration"))
     assert rendered == "Continue(5, reviewer)"
     assert _shape(rendered) == ("Continue", ("5", "reviewer"))
+
+
+def test_a_rendered_rebase_is_a_recognized_intent_shape():
+    """decide() emits Rebase for an integrator's handback (Task 6), and Task
+    20's rebase-storm scenario asserts one with `expect:`. `_shape` refuses any
+    name absent from `_INTENTS`; without Rebase in that list the scenario dies
+    with `'Rebase' is not an intent` before its assertion is even compared."""
+    from fleet.simulate import _shape
+
+    rendered = render_intent(Rebase(task=4, rebase=1))
+    assert rendered == "Rebase(4, 1)"
+    assert _shape(rendered) == ("Rebase", ("4", "1"))
 
 
 def test_load_scenario_reads_yaml(tmp_path):
