@@ -53,6 +53,19 @@ def _replace_if_stale(path: Path) -> None:
     answered; the file is left alone and the `bind()` that follows raises
     `OSError: Address already in use` instead of two daemons silently sharing
     one path.
+
+    That guarantee -- "a live listener is left alone" -- holds only for the
+    sequential case this hazard was written for: SIGKILL, then a restart,
+    never two daemons alive on this path at once. It does NOT close the
+    window between this probe and the caller's `bind()`: if a second `serve()`
+    raced in and bound during that window, this call would unlink that second
+    daemon's brand-new socket file and bind over it, orphaning a live server
+    that keeps running but is no longer reachable at `path`. Nothing else in
+    this codebase (no pidfile, no lock) stops two daemons from starting
+    concurrently in the first place, so closing this window here would be
+    solving a problem this module cannot see the rest of. It is named rather
+    than fixed so a future reader does not build on a promise this code
+    cannot keep.
     """
     if not path.exists():
         return
@@ -111,18 +124,31 @@ def serve(
                     # this, a full send buffer blocks `sendall` and pins the
                     # accept loop against one unresponsive client forever.
                     connection.settimeout(_TIMEOUT)
-                    # `get_snapshot()` reads a single attribute reference the
-                    # tick loop replaces with one assignment (`self.snapshot =
-                    # ...`) -- in CPython that read and that write are each a
-                    # single bytecode under the GIL, so this always observes
-                    # either the previous complete snapshot or the next one,
-                    # never a half-built object. Left unguarded: a bug here is
-                    # a real defect in the daemon's own state, not a client
-                    # that vanished, and should surface rather than be
-                    # swallowed into a socket that quietly stops answering.
-                    snapshot = get_snapshot()
-                    payload = snapshot.to_json() if snapshot is not None else {}
-                    body = (json.dumps(payload) + "\n").encode("utf-8")
+                    try:
+                        # `get_snapshot()` reads a single attribute reference
+                        # the tick loop replaces with one assignment
+                        # (`self.snapshot = ...`) -- in CPython that read and
+                        # that write are each a single bytecode under the
+                        # GIL, so this always observes either the previous
+                        # complete snapshot or the next one, never a
+                        # half-built object.
+                        #
+                        # `to_json()` and `json.dumps()` can still raise on a
+                        # bad payload -- `model.py`'s own `to_json()`
+                        # docstring warns a tuple or a `Path` in the rendered
+                        # rows is "a TypeError inside a thread nothing is
+                        # watching." Both are guarded here, scoped to
+                        # `Exception` rather than `OSError`: a render or
+                        # serialisation bug is not a transport error, but it
+                        # must still cost this one request, not the socket --
+                        # unguarded, it would unlink `path` and leave the
+                        # daemon alive but unreachable, exactly like the
+                        # unguarded broken pipe below.
+                        snapshot = get_snapshot()
+                        payload = snapshot.to_json() if snapshot is not None else {}
+                        body = (json.dumps(payload) + "\n").encode("utf-8")
+                    except Exception:
+                        continue
                     try:
                         connection.sendall(body)
                     except OSError:

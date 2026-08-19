@@ -88,6 +88,63 @@ def test_a_live_daemons_socket_is_not_stolen(tmp_path):
         thread.join(timeout=2)
 
 
+class _UnserializableSnapshot:
+    """A stand-in for a `FleetSnapshot` whose `to_json()` returns a payload
+    `json.dumps` cannot handle -- `model.py`'s own docstring warns this is
+    "a TypeError inside a thread nothing is watching"."""
+
+    def to_json(self):
+        return {"bad": {1, 2, 3}}  # a set is not JSON serialisable
+
+
+def test_a_render_error_costs_only_that_request(tmp_path):
+    """`get_snapshot()` itself can raise -- a bug in the daemon's own state,
+    not a vanished client. Uncaught, it would kill the accept-loop thread and
+    unlink the socket while the daemon keeps ticking, leaving every later
+    `fleet status` raising `NotRunning` against a live daemon forever. One bad
+    render must cost that one request, not the socket."""
+    path = tmp_path / "fleet.sock"
+    stop = threading.Event()
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return SNAPSHOT
+
+    thread = serve(path, flaky, stop)
+    try:
+        assert request(path) == {}  # the failed request gets nothing, not a crash
+        assert request(path)["tick"] == 3  # the next request is still served
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
+def test_a_serialization_error_costs_only_that_request(tmp_path):
+    """`snapshot.to_json()` or `json.dumps()` can raise on a bad payload just
+    as easily as `get_snapshot()` can. Same failure, same fix: it must cost
+    the one request that hit it, not every request after it."""
+    path = tmp_path / "fleet.sock"
+    stop = threading.Event()
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        return _UnserializableSnapshot() if calls["n"] == 1 else SNAPSHOT
+
+    thread = serve(path, flaky, stop)
+    try:
+        assert request(path) == {}
+        assert request(path)["tick"] == 3
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
 def test_a_client_that_vanishes_mid_write_costs_only_itself(tmp_path):
     """A client that connects and closes without reading makes `sendall`
     raise `BrokenPipeError`. A tick spent on a publish failure is a tick the
