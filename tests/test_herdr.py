@@ -351,12 +351,13 @@ _DEFAULT_AGENTS = {
 _DEFAULT_ROUTING = {"implementer": ("claude", "claude-opus-5")}
 
 
-def _real(tmp_path, run=None, worktree_root=None, agents=None, routing=None):
+def _real(tmp_path, run=None, worktree_root=None, agents=None, routing=None, sessions_dir=None):
     from fleet.herdr import RealHerdr
 
     herdr = RealHerdr(
         worktree_root=worktree_root or tmp_path / "worktrees",
         projects_dir=tmp_path / "projects",
+        sessions_dir=sessions_dir,
         prices={},
         repo_root=tmp_path / "repo",
         agents=_DEFAULT_AGENTS if agents is None else agents,
@@ -1136,6 +1137,73 @@ def test_real_unpriced_is_rebuilt_by_every_read(tmp_path):
     run.replies[("herdr", "api", "snapshot")] = json.dumps(_snapshot([]))
     herdr.agents()
     assert herdr.unpriced() == set()
+
+
+def test_real_agents_prices_a_codex_agent_when_a_sessions_dir_is_configured(tmp_path):
+    """Catches dropping codex from `RealHerdr`'s provider map. `PROVIDER_KINDS`
+    already advertises codex as known and the policy layer accepts a route to
+    it, but until this test the runtime map built in `RealHerdr.agents()` was
+    Claude-only regardless -- so a correctly-configured codex role would
+    launch, its agent would fall through the unknown-kind branch, and the
+    fleet would drain on the first tick even though a `[agents.codex]`
+    section and a real sessions directory both existed."""
+    session = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    sessions_dir = tmp_path / "codex-sessions"
+    day_dir = sessions_dir / "2026" / "08" / "19"
+    day_dir.mkdir(parents=True)
+    (day_dir / f"rollout-2026-08-19T00-00-00-{session}.jsonl").write_text(
+        json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 1000,
+                            "output_tokens": 0,
+                            "total_tokens": 1000,
+                            "cached_input_tokens": 0,
+                        }
+                    },
+                },
+            }
+        )
+        + "\n"
+    )
+    prices = {
+        "gpt-5.6-sol": {"input": 1000.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    }
+    root = tmp_path / "worktrees"
+    agent = _agent(str(root / "5-slug"), agent="codex", agent_session={"value": session})
+    run = RecordingRun({("herdr", "api", "snapshot"): json.dumps(_snapshot([agent]))})
+    herdr = _real(tmp_path, run, worktree_root=root, sessions_dir=sessions_dir)
+    herdr.prices = prices
+    states = herdr.agents()
+    assert states[0].cost_usd == pytest.approx(1.0)
+    assert states[0].model == "gpt-5.6-sol"
+    assert herdr.unpriced() == set()
+
+
+def test_real_agents_leaves_codex_unregistered_with_no_sessions_dir_configured(tmp_path):
+    """The default's other half: a fleet that never configured a codex
+    sessions directory must not have one silently guessed. A codex agent then
+    correctly falls through the unknown-kind branch and is collected --
+    exactly what `test_an_agent_on_an_unregistered_cli_is_collected_not_priced_at_zero`
+    covers at the `parse_snapshot` level, pinned here at the `RealHerdr`
+    level too so a default-path guess added later would be caught here even
+    if `parse_snapshot`'s own tests kept passing."""
+    session = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    root = tmp_path / "worktrees"
+    agent = _agent(str(root / "5-slug"), agent="codex", agent_session={"value": session})
+    run = RecordingRun({("herdr", "api", "snapshot"): json.dumps(_snapshot([agent]))})
+    herdr = _real(tmp_path, run, worktree_root=root)
+    assert herdr.sessions_dir is None
+    states = herdr.agents()
+    assert states[0].cost_usd == 0.0
+    assert states[0].model is None
+    assert any("codex" in message for message in herdr.unpriced())
 
 
 def test_both_clients_answer_unpriced(tmp_path):

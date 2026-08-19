@@ -376,6 +376,7 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
     herdr = RealHerdr(
         worktree_root=cfg.worktree_root,
         projects_dir=Path.home() / ".claude" / "projects",
+        sessions_dir=Path.home() / ".codex" / "sessions",
         prices=cfg.prices,
         repo_root=cfg.root,
         agents=cfg.agents,

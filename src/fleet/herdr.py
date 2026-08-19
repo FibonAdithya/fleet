@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
-from fleet.cost import ClaudeProvider, Provider, UnpricedModel, UnpricedTranscript
+from fleet.cost import ClaudeProvider, CodexProvider, Provider, UnpricedModel, UnpricedTranscript
 from fleet.model import MULTIPLE_MODELS, AgentSpec, AgentState
 
 # herdr's five statuses to AgentState's three.
@@ -415,9 +415,18 @@ class RealHerdr:
         repo_root: Path,
         agents: dict[str, AgentSpec] | None = None,
         routing: dict[str, tuple[str, str]] | None = None,
+        sessions_dir: Path | None = None,
     ) -> None:
         self.root = Path(worktree_root)
         self.projects_dir = Path(projects_dir)
+        #: codex's transcript root, `~/.codex/sessions` by convention. `None`
+        #: by default -- a fleet with no codex sessions directory configured
+        #: registers no `CodexProvider` at all, which is the honest state: an
+        #: agent of kind `codex` then still falls through the unknown-kind
+        #: branch in `parse_snapshot` and is collected into `unpriced` (or
+        #: raises), the same as any other kind nobody wired a reader for. That
+        #: is deliberately NOT papered over by inventing a default path here.
+        self.sessions_dir = Path(sessions_dir) if sessions_dir is not None else None
         self.prices = prices
         self.repo_root = Path(repo_root)
         #: Launch mechanics per agent kind -- [agents.<kind>] from fleet.toml,
@@ -498,15 +507,23 @@ class RealHerdr:
         # if the read raised partway, and the daemon reads this immediately
         # after -- a drain armed by an aborted read is a drain nothing clears.
         unpriced: set[str] = set()
-        # Built fresh from `self.projects_dir` on every read, not cached at
-        # construction: this is the one call site `parse_snapshot`'s own
-        # docstring names as passing a collector, and it is also the one place
-        # a Claude-only fleet's provider map is derivable at all. Keyword
-        # arguments here on purpose -- `parse_snapshot`'s third positional
-        # parameter used to be `projects_dir`; a bare `Path` landing in
-        # `providers` by position would match no agent kind and read every
-        # agent in the tick as free, silently.
+        # Built fresh from `self.projects_dir`/`self.sessions_dir` on every
+        # read, not cached at construction: this is the one call site
+        # `parse_snapshot`'s own docstring names as passing a collector, and
+        # it is also the one place a real fleet's provider map is derivable
+        # at all. Keyword arguments here on purpose -- `parse_snapshot`'s
+        # third positional parameter used to be `projects_dir`; a bare `Path`
+        # landing in `providers` by position would match no agent kind and
+        # read every agent in the tick as free, silently.
+        #
+        # codex is registered only when `self.sessions_dir` is configured.
+        # Leaving it out entirely for a fleet that never set one keeps a
+        # codex-kind agent falling through to the unknown-kind branch in
+        # `parse_snapshot` -- collected into `unpriced`, never priced at zero
+        # -- rather than guessing a path nobody confirmed exists.
         providers: dict[str, Provider] = {"claude": ClaudeProvider(projects_dir=self.projects_dir)}
+        if self.sessions_dir is not None:
+            providers["codex"] = CodexProvider(sessions_dir=self.sessions_dir)
         parsed = parse_snapshot(
             raw,
             self.root,
