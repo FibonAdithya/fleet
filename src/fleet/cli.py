@@ -12,7 +12,6 @@ from pathlib import Path
 import click
 
 from fleet import git, labels, statesocket
-from fleet import ledger as ledger_module
 from fleet import policy as policy_module
 from fleet import runlog as runlog_module
 from fleet import status as status_module
@@ -24,6 +23,7 @@ from fleet.gh import RealGh
 from fleet.herdr import RealHerdr
 from fleet.herdr_executor import HerdrExecutor
 from fleet.model import FleetState
+from fleet.reader import read_ledger
 from fleet.runlog import RunLog
 from fleet.simulate import render_intent
 
@@ -74,11 +74,26 @@ class ReadOnlyGh:
 def do_plan(cfg, gh, now: datetime) -> list[str]:
     """One tick of decide() against a live ledger, rendered.
 
+    Read through `reader.read_ledger`, the daemon's own ledger read, and not
+    through `gh.list_issues("open")`. A preview that disagrees with the thing it
+    previews is worse than no preview, and this one disagreed in three
+    directions at once. `Task.blocked_on` comes from a handoff packet and
+    nothing else, so with no packets fetched every one was None and UNBLOCK was
+    unreachable; `_is_rebase_handback` reads the packet too, so an integrator's
+    handback rendered as `Release(no_agent)` where the daemon emits `Rebase`;
+    and an open-only query drops the closed dependency that satisfies an
+    UNBLOCK. Task 21 uses this command as the pre-flight check before a graded
+    run, which is the worst possible place for a systematically different
+    answer.
+
+    The cost is `gh issue view` per row in a packet-carrying state, which is
+    what the daemon already pays every tick.
+
     Separate from the command because inside it -- behind `RealGh(cfg.repo_slug)`
-    -- the only wiring of ledger.read, policy.load and decide() in the CLI is
+    -- the only wiring of read_ledger, policy.load and decide() in the CLI is
     reachable by no test that does not talk to GitHub.
     """
-    tasks = ledger_module.read(gh.list_issues("open"))
+    tasks = read_ledger(gh)
     intents, _ = decide(FleetState(), tasks, policy_module.load(cfg), [], now)
     lines: list[str] = []
     if any(task.state == "claimed" for task in tasks):
@@ -273,16 +288,21 @@ def verdict(task, decision, head_sha, checks_rerun, findings, packet_was_suffici
 
 
 @main.command()
-@click.option("--dry-run/--no-dry-run", default=True, help="Print the plan; write nothing.")
-def plan(dry_run):
-    """Print what the allocator would do right now."""
+def plan():
+    """Print what the allocator would do right now. Reads only; writes nothing.
+
+    Every row is read through the daemon's own ledger read, so this is the same
+    answer the next tick would give.
+    """
     cfg = load_config()
-    # `--no-dry-run` selects the unwrapped, writing client (Ruling D6): a
-    # refusal that vanished but a body still pinned to `ReadOnlyGh` would take
-    # the flag and silently do nothing, which is worse than either refusing or
-    # writing -- an operator who asked for `--no-dry-run` and got dry-run
-    # behaviour with no error has no way to notice.
-    gh = RealGh(cfg.repo_slug) if not dry_run else ReadOnlyGh(RealGh(cfg.repo_slug))
+    # No `--no-dry-run`. It selected an unwrapped, writing client for a body
+    # that makes no write at all -- `do_plan` reads and renders -- so the flag
+    # was accepted and did nothing, which is worse than either refusing or
+    # writing: an operator who passes it believes something happened. The test
+    # that claimed to pin it monkeypatched `do_plan` away and so could never
+    # have seen that. The command previews; the wrapper is what makes "writes
+    # nothing" a property of the code path rather than of having read it.
+    gh = ReadOnlyGh(RealGh(cfg.repo_slug))
     for line in do_plan(cfg, gh, datetime.now(timezone.utc)):
         click.echo(line)
 

@@ -12,7 +12,7 @@ from conftest import FIXTURE_POLICY, git
 from fleet.cli import ReadOnlyGh, _context, _git_facts, main
 from fleet.config import load_config
 from fleet.daemon import Daemon
-from fleet.gh import FakeGh, RealGh
+from fleet.gh import FakeGh
 from fleet.herdr import FakeHerdr
 from fleet.model import FleetSnapshot, Release
 from fleet.runlog import RunLog
@@ -114,32 +114,24 @@ def test_git_facts_allows_a_detached_head_for_escalate_and_block(repo):
     assert _git_facts(cfg, allow_detached=True)["branch"].startswith("detached at ")
 
 
-# -- `fleet plan --dry-run` / `--no-dry-run` -------------------------------
+# -- `fleet plan` is read-only, with no flag to make it otherwise ------------
 
 
-def test_plan_dry_run_wraps_the_client_in_read_only(monkeypatch, cfg):
-    """The default. A caller who never says `--no-dry-run` must still get a
-    client that refuses every write."""
+def test_plan_always_wraps_the_client_in_read_only(monkeypatch, cfg):
+    """No longer a default -- the only behaviour. `--no-dry-run` selected an
+    unwrapped writing client for a body that makes no write, so it was a flag
+    that did nothing; the test that claimed to pin it monkeypatched `do_plan`
+    away and could not have noticed. It is gone, and "writes nothing" is now a
+    property of the code path with no way to opt out of it.
+
+    tests/test_plan.py holds the other half: that the option is refused and
+    that the help says so."""
     monkeypatch.chdir(cfg.root)
     seen = {}
     monkeypatch.setattr("fleet.cli.do_plan", lambda cfg_, gh, now: seen.setdefault("gh", gh) and [])
     result = CliRunner().invoke(main, ["plan"])
     assert result.exit_code == 0, result.output
     assert isinstance(seen["gh"], ReadOnlyGh)
-
-
-def test_plan_no_dry_run_selects_the_writing_client(monkeypatch, cfg):
-    """Ruling D6: the plan deletes the M3 refusal but left `plan()`'s body
-    pinned to `ReadOnlyGh`, so `--no-dry-run` would be accepted and silently do
-    nothing -- the worst of both worlds. This pins that `--no-dry-run` actually
-    swaps in the unwrapped, writing client rather than leaving it a no-op flag."""
-    monkeypatch.chdir(cfg.root)
-    seen = {}
-    monkeypatch.setattr("fleet.cli.do_plan", lambda cfg_, gh, now: seen.setdefault("gh", gh) and [])
-    result = CliRunner().invoke(main, ["plan", "--no-dry-run"])
-    assert result.exit_code == 0, result.output
-    assert type(seen["gh"]) is RealGh
-    assert not isinstance(seen["gh"], ReadOnlyGh)
 
 
 # -- `fleet status` ----------------------------------------------------------
