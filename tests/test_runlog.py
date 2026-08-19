@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
+from fleet import runlog
 from fleet.model import Dispatch, Release, Unblock
 from fleet.runlog import RunLog, read
 
@@ -63,3 +66,152 @@ def test_the_run_id_is_on_every_entry(tmp_path):
     log = RunLog(tmp_path / "run.jsonl", run_id="night-3")
     log.append(tick=1, at=T0, intent=Unblock(task=4), outcome="applied")
     assert read(tmp_path / "run.jsonl")[0]["run_id"] == "night-3"
+
+
+def test_a_reaping_entry_records_the_cost_it_finalised(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl", run_id="r1")
+    log.append(
+        tick=1,
+        at=T0,
+        intent=Release(task=5, reason="stalled", attempt=2),
+        outcome="applied",
+        cost_usd=1.75,
+    )
+    assert runlog.read(tmp_path / "run.jsonl")[0]["cost_usd"] == 1.75
+
+
+def test_a_zero_cost_entry_is_recorded_explicitly_not_omitted(tmp_path):
+    """0.0 is a legitimate cost -- a free tick, an agent that did nothing, a
+    model priced at zero. The key must be present and equal to 0.0, not
+    silently dropped, so a mixed log can tell 'costed nothing' apart from
+    'this entry predates cost tracking' (see the missing-key test below)."""
+    log = RunLog(tmp_path / "run.jsonl", run_id="r1")
+    log.append(
+        tick=1,
+        at=T0,
+        intent=Release(task=5, reason="stalled", attempt=2),
+        outcome="applied",
+        cost_usd=0.0,
+    )
+    entry = read(tmp_path / "run.jsonl")[0]
+    assert "cost_usd" in entry
+    assert entry["cost_usd"] == 0.0
+
+
+def test_spent_is_rebuilt_by_summing_the_log(tmp_path):
+    """A restarted daemon whose spent_usd resets to zero hands the fleet a
+    second full budget, and the drain rule never fires. The daemon is designed
+    to be restartable, so this is the documented recovery path, not an edge."""
+    path = tmp_path / "run.jsonl"
+    log = RunLog(path, run_id="r1")
+    log.append(
+        tick=1,
+        at=T0,
+        intent=Release(task=5, reason="stalled", attempt=2),
+        outcome="applied",
+        cost_usd=1.5,
+    )
+    log.append(
+        tick=2,
+        at=T0,
+        intent=Dispatch(task=6, role="implementer", base="integration", attempt=1),
+        outcome="applied",
+    )
+    log.append(
+        tick=3,
+        at=T0,
+        intent=Release(task=6, reason="dirty_exit", attempt=2),
+        outcome="applied",
+        cost_usd=2.25,
+    )
+    assert runlog.spent_from_log(path) == pytest.approx(3.75)
+
+
+def test_spent_from_a_missing_log_is_zero(tmp_path):
+    """First run of a fresh fleet. Raising would make the daemon unable to start
+    without a log it has not written yet."""
+    assert runlog.spent_from_log(tmp_path / "absent.jsonl") == 0.0
+
+
+def test_spent_ignores_entries_from_other_runs(tmp_path):
+    """One log file can hold several nights. Summing all of them would start
+    tonight already drained."""
+    path = tmp_path / "run.jsonl"
+    RunLog(path, run_id="old").append(
+        tick=1,
+        at=T0,
+        intent=Release(task=5, reason="stalled", attempt=2),
+        outcome="applied",
+        cost_usd=9.0,
+    )
+    RunLog(path, run_id="new").append(
+        tick=1,
+        at=T0,
+        intent=Release(task=6, reason="stalled", attempt=2),
+        outcome="applied",
+        cost_usd=1.0,
+    )
+    assert runlog.spent_from_log(path, run_id="new") == pytest.approx(1.0)
+
+
+def test_a_truncated_final_line_does_not_break_recovery(tmp_path):
+    """A daemon killed mid-write leaves a partial line, and the kill is the
+    exact event this function exists to recover from."""
+    path = tmp_path / "run.jsonl"
+    RunLog(path, run_id="r1").append(
+        tick=1,
+        at=T0,
+        intent=Release(task=5, reason="stalled", attempt=2),
+        outcome="applied",
+        cost_usd=2.0,
+    )
+    with path.open("a") as handle:
+        handle.write('{"run_id": "r1", "cost_us')
+    assert runlog.spent_from_log(path) == pytest.approx(2.0)
+
+
+def test_a_pre_task14_entry_with_no_cost_usd_key_costs_nothing_it_cannot_recall(tmp_path):
+    """Entries written before this change carry no cost_usd field at all --
+    not a zero, an absence. There is no way to recover what an old entry
+    actually cost (the log format did not capture it), and raising here would
+    make the daemon unable to restart against a log that predates this
+    change -- exactly the log the M3 gate is likely to hand it. So a missing
+    key contributes 0.0, same as an absent file, and is documented as such:
+    this is silent underestimation of true historical spend, accepted because
+    the alternative breaks every restart against a pre-existing log."""
+    path = tmp_path / "run.jsonl"
+    legacy_entry = {
+        "run_id": "r1",
+        "tick": 1,
+        "at": T0.isoformat(),
+        "intent": {"kind": "Release", "task": 5, "reason": "stalled", "attempt": 2},
+        "outcome": "applied",
+        # no "cost_usd" key at all -- this is what Task 1-13's RunLog wrote.
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(legacy_entry) + "\n")
+    RunLog(path, run_id="r1").append(
+        tick=2,
+        at=T0,
+        intent=Release(task=6, reason="dirty_exit", attempt=2),
+        outcome="applied",
+        cost_usd=4.0,
+    )
+    assert runlog.spent_from_log(path) == pytest.approx(4.0)
+
+
+def test_summing_hundreds_of_entries_does_not_drift(tmp_path):
+    """spent_from_log must be safe to call every tick against a long-running
+    night. Naive float accumulation over hundreds of small costs should still
+    land within floating-point tolerance of the exact decimal sum."""
+    path = tmp_path / "run.jsonl"
+    log = RunLog(path, run_id="r1")
+    for i in range(500):
+        log.append(
+            tick=i,
+            at=T0,
+            intent=Release(task=5, reason="stalled", attempt=2),
+            outcome="applied",
+            cost_usd=0.01,
+        )
+    assert runlog.spent_from_log(path) == pytest.approx(5.0, abs=1e-6)
