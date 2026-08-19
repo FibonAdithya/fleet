@@ -926,3 +926,45 @@ def test_a_handback_from_this_attempt_still_rebases():
     )
     intents, _ = decide(FleetState(), [current], POLICY, [], T0)
     assert intents == [Rebase(task=4, rebase=1)]
+
+
+NOW = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+DECLARED = (("implementer", "claude", "claude-opus-5"),)
+
+
+def _mismatch_case(observed_model: str | None):
+    """One CLAIMED patch task with a live agent reporting `observed_model`."""
+    task = claimed(1)
+    agent = AgentState(task=1, status="working", change_seq=5, cost_usd=0.1, model=observed_model)
+    policy = dataclasses.replace(POLICY, agents=DECLARED)
+    intents, _ = decide(prev=FleetState(), ledger=[task], policy=policy, agents=[agent], now=NOW)
+    return intents
+
+
+def test_an_agent_running_a_model_nobody_declared_is_escalated():
+    """UnpricedModel cannot see this: a silent substitution between two PRICED
+    models fires no exception and bills the night at a rate nobody chose.
+    Catches trusting the transcript as the only source of truth."""
+    assert Escalate(task=1, reason="model_mismatch") in _mismatch_case("claude-opus-4-8")
+
+
+def test_an_agent_running_the_declared_model_is_left_alone():
+    """Catches a comparison that fires on every agent -- which would escalate
+    the whole backlog on the first tick."""
+    assert not [i for i in _mismatch_case("claude-opus-5") if isinstance(i, Escalate)]
+
+
+def test_an_agent_whose_model_is_not_yet_known_is_left_alone():
+    """A transcript not yet written reports model=None. Catches escalating
+    every agent in the seconds after dispatch, when nothing is yet known."""
+    assert not [i for i in _mismatch_case(None) if isinstance(i, Escalate)]
+
+
+def test_an_agent_observed_running_two_models_is_escalated():
+    """parse_snapshot records the sentinel MULTIPLE_MODELS when a transcript
+    names more than one model carrying tokens -- a fallback substitution mid
+    session. Catches collapsing that to None, which would make the very case
+    §4 exists to catch pass vacuously."""
+    from fleet.model import MULTIPLE_MODELS
+
+    assert Escalate(task=1, reason="model_mismatch") in _mismatch_case(MULTIPLE_MODELS)
