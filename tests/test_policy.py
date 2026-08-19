@@ -163,7 +163,10 @@ def test_policy_carries_max_rebases_from_config(cfg, tmp_path):
     for role in ("implementer", "reviewer", "integrator"):
         (tmp_path / ".agents" / "roles" / f"{role}.md").write_text("x")
     with (tmp_path / "fleet.toml").open("a") as f:
-        f.write('\n[prices."m"]\ninput = 1.0\noutput = 1.0\ncache_read = 1.0\ncache_write = 1.0\n')
+        f.write(
+            '\n[agents.claude]\nmodel_flag = "--model"\nargs = []\n\n'
+            '[prices."m"]\ninput = 1.0\noutput = 1.0\ncache_read = 1.0\ncache_write = 1.0\n'
+        )
     loaded = policy_module.load(load_config(tmp_path))
     assert loaded.max_rebases == 1
 
@@ -277,4 +280,55 @@ def test_a_declared_agent_with_no_provider_is_refused_at_load(tmp_path):
     which would drain on the first tick instead of failing at startup."""
     cfg = _config_with_agent_table(tmp_path, agent="nosuchcli", model="claude-opus-5")
     with pytest.raises(PolicyError, match="nosuchcli"):
+        policy_module.load(cfg)
+
+
+def test_a_declared_kind_with_no_launch_config_is_refused_at_load(tmp_path):
+    """FINDING 1(a). Catches dropping the `kind not in agent_specs` check out of
+    `_validate_agents`. Without it, a role routed to `claude` -- a real
+    transcript-reading, priced kind -- still passes startup when fleet.toml
+    carries no `[agents.claude]` launch config. HerdrExecutor._start then
+    raises HerdrError for every task of that role, `_begin` swallows it, the
+    next tick's REAP releases the claimed row and burns an attempt, and the
+    whole backlog walks to NEEDS_HUMAN overnight having launched nothing."""
+    import shutil
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE_POLICY, root)
+    # The vendored fixture's fleet.toml declares [agents.claude]; this one
+    # deliberately does not, while still declaring the price every role's
+    # model needs so the price check does not fire first.
+    (root / "fleet.toml").write_text(
+        '[repo]\nslug = "FibonAdithya/fleet-fixture"\n'
+        'integration_branch = "integration"\n\n'
+        "[policy]\n"
+        'ownership = "docs/agent/ownership.md"\n'
+        'task_classes = "docs/agent/task-classes.md"\n'
+        'roles = ".agents/roles"\nschemas = ".agents/schemas"\n\n'
+        '[prices."claude-opus-5"]\n'
+        "input = 5.0\noutput = 25.0\ncache_read = 0.5\ncache_write = 10.0\n"
+    )
+    cfg = load_config(root)
+    with pytest.raises(PolicyError, match=r"\[agents\.claude\]"):
+        policy_module.load(cfg)
+
+
+def test_a_role_missing_from_the_agent_table_is_refused_at_load(tmp_path):
+    """FINDING 1(b). Catches dropping the routes-coverage loop out of
+    `_validate_agents`. Without it, a role a route names but the
+    `Role | Agent | Model` table omits still passes startup: dispatch fails
+    at HerdrExecutor._start exactly as (a) does, and worse --
+    `Policy.agent_for('implementer')` returns None, so `_model_mismatch`
+    silently stops checking that role's model at all, with nothing said."""
+    import shutil
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE_POLICY, root)
+    classes = root / "docs/agent/task-classes.md"
+    text = classes.read_text()
+    row = "| `implementer` | `claude` | `claude-opus-5` |\n"
+    assert row in text, "fixture shape changed; this test's precondition no longer holds"
+    classes.write_text(text.replace(row, ""))
+    cfg = load_config(root)
+    with pytest.raises(PolicyError, match="implementer"):
         policy_module.load(cfg)

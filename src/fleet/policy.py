@@ -15,7 +15,7 @@ from pathlib import Path
 from fleet import labels as labels_module
 from fleet.config import FleetConfig
 from fleet.cost import PROVIDER_KINDS
-from fleet.model import Policy
+from fleet.model import AgentSpec, Policy
 
 _CELL = re.compile(r"^\s*\|(.+)\|\s*$")
 _TICKS = re.compile(r"^`(.*)`$")
@@ -165,14 +165,37 @@ def parse_routes(text: str, roles: frozenset[str]) -> tuple[tuple[str, tuple[str
 
 
 def _validate_agents(
-    agents: tuple[tuple[str, str, str], ...], prices: dict[str, dict[str, float]]
+    agents: tuple[tuple[str, str, str], ...],
+    agent_specs: dict[str, AgentSpec],
+    prices: dict[str, dict[str, float]],
+    routes: tuple[tuple[str, tuple[str, ...]], ...],
 ) -> None:
-    """Every declared agent has a reader; every declared model has a rate.
+    """Every declared agent has a reader, a launch config, and a rate; every
+    routed role has a declaration at all.
 
-    The price check is the one that earns its place. Without a declared model an
-    unpriced model is found only when a dispatched agent's transcript is read --
-    mid-run, after spending, which is docs/m3-inputs.md §1.2's failure exactly.
-    Declaring it moves that to a startup error, before anything is dispatched.
+    The price check is the one that earns its place first. Without a declared
+    model an unpriced model is found only when a dispatched agent's transcript
+    is read -- mid-run, after spending, which is docs/m3-inputs.md §1.2's
+    failure exactly. Declaring it moves that to a startup error, before
+    anything is dispatched.
+
+    The launch-config check exists because a declared kind with no
+    `[agents.<kind>]` section used to pass this function anyway.
+    `HerdrExecutor._start` raises `HerdrError` for it, `_begin` swallows that
+    (deliberately -- see its own docstring on why a herdr failure must not take
+    the whole tick down), the claimed row ends the tick with no agent, and the
+    next tick's REAP sees a claimed task with no agent, emits
+    `Release(no_agent)`, and burns an attempt. That is identical for every task
+    routed to the role, so the whole backlog walks to NEEDS_HUMAN overnight
+    with the fleet never having launched a single agent.
+
+    The routes-coverage check exists because a role that appears in a route but
+    has no row in the `Role | Agent | Model` table used to pass this function
+    too. It fails the same way at dispatch -- but it is also worse than a
+    missing launch config: `Policy.agent_for(role)` returns `None` for it, and
+    `_model_mismatch` treats `None` as "not yet known" and returns `False`, so
+    the declared-vs-observed model check this branch exists to add is silently
+    disabled for that role, with nothing said.
     """
     known = set(PROVIDER_KINDS)
     for role, kind, model in agents:
@@ -182,6 +205,16 @@ def _validate_agents(
                 f"reader. Known: {sorted(known)}. Its agents could not be priced and "
                 "the fleet would drain on the first tick."
             )
+        if kind not in agent_specs:
+            raise PolicyError(
+                f"role {role!r} is routed to agent kind {kind!r}, but fleet.toml has "
+                f"no [agents.{kind}] launch config for it. Startup would pass and "
+                "then every dispatch of this role would fail identically at "
+                "HerdrExecutor._start: the failure is swallowed per task, the claimed "
+                "row ends the tick with no agent, the next tick releases it and burns "
+                "an attempt, and the whole backlog walks to NEEDS_HUMAN overnight "
+                "having launched nothing."
+            )
         if model not in prices:
             raise PolicyError(
                 f"role {role!r} declares model {model!r}, which has no [prices] row "
@@ -189,15 +222,29 @@ def _validate_agents(
                 "than failing here, before anything is spent."
             )
 
+    declared_roles = {role for role, _, _ in agents}
+    for klass, stages in routes:
+        for role in stages:
+            if role not in declared_roles:
+                raise PolicyError(
+                    f"class {klass!r} routes to role {role!r}, which has no row in "
+                    "the Role | Agent | Model table. Dispatch would fail for it the "
+                    "same way a missing [agents.<kind>] does -- and worse: "
+                    "Policy.agent_for(role) returns None for it, so the "
+                    "declared-vs-observed model mismatch check is silently disabled "
+                    "for this role as well."
+                )
+
 
 def load(cfg: FleetConfig) -> Policy:
     roles = known_roles(cfg.roles_dir)
     classes_text = cfg.task_classes.read_text()
     agents = parse_agents(classes_text, roles)
-    _validate_agents(agents, cfg.prices)
+    routes = parse_routes(classes_text, roles)
+    _validate_agents(agents, cfg.agents, cfg.prices, routes)
     return Policy(
         areas=parse_ownership(cfg.ownership.read_text()),
-        routes=parse_routes(classes_text, roles),
+        routes=routes,
         agents=agents,
         slots=cfg.slots,
         stall_minutes=cfg.stall_minutes,
