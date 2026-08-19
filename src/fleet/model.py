@@ -77,9 +77,20 @@ class FleetState:
 
     seen: tuple[tuple[int, Observation], ...] = ()
     spent_usd: float = 0.0
+    # task -> the state it was CONTINUED in. The one thing that tells a stage's
+    # own finished agent from the previous stage's: we started this one, for
+    # this state. Disposable like `seen` -- after a restart it is empty, every
+    # done agent reads as a handoff, and the fleet spends one extra continuation
+    # per live task before converging. That is the whole cost, and it is
+    # bounded; a durable counter would make FleetState authoritative, which
+    # parent §9 forbids.
+    dispatched: tuple[tuple[int, str], ...] = ()
 
     def observation(self, task: int) -> Observation | None:
         return dict(self.seen).get(task)
+
+    def dispatched_in(self, task: int) -> str | None:
+        return dict(self.dispatched).get(task)
 
 
 @dataclass(frozen=True)
@@ -121,6 +132,25 @@ class Dispatch:
     role: str
     base: str
     attempt: int
+
+
+@dataclass(frozen=True)
+class Continue:
+    """Start the next stage's agent on a task that is already live.
+
+    Not a Dispatch. `expand(Dispatch)` relabels to `fleet:claimed`, which for a
+    task at REVIEW destroys the state it was dispatched FOR: `fleet verdict`
+    would have no REVIEW to leave, `claimed` is in no stage table, and any later
+    route lookup resolves to route[0] -- the implementer, redoing reviewed work.
+
+    No attempt field either. A continuation is the next stage of one try, not a
+    second try, and stamping an attempt here would push a healthy three-stage
+    task to its cap before the integrator ever ran.
+    """
+
+    task: int
+    role: str
+    base: str
 
 
 @dataclass(frozen=True)
@@ -169,7 +199,7 @@ class Drain:
     reason: str
 
 
-Intent = Dispatch | Release | Escalate | Unblock | Advance | Retire | Drain
+Intent = Dispatch | Continue | Release | Escalate | Unblock | Advance | Retire | Drain
 
 
 # ---------------------------------------------------------------- effects

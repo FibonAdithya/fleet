@@ -18,6 +18,7 @@ from fleet import labels as labels_module
 from fleet.model import (
     Advance,
     AgentState,
+    Continue,
     Dispatch,
     Drain,
     Escalate,
@@ -38,9 +39,49 @@ _DRAIN_FRACTION = 0.8
 
 # States that hold an area and a slot. REVIEW is live because someone is working
 # on the task: it keeps its area until `fleet verdict` moves it out, which is the
-# only legal exit (spec §5 ruling 4). Nothing here dispatches for those states --
-# a reviewer and an integrator are M3's to start.
+# only legal exit (spec §5 ruling 4).
 _LIVE = ("claimed", "review", "integrating")
+
+# Which role a task's state is owed, as an index into its class's route.
+# `integrating` is route[-1] rather than route[2] because M4 adds the invariant
+# reviewer and a four-role patch route still ends at the integrator. M4 edits
+# this table regardless -- an invariant-review stage needs a state of its own --
+# and three explicit rows are a better thing to edit than a positional guess.
+_STAGE = {"ready": 0, "review": 1, "integrating": -1}
+
+# The states that are already holding a slot and an area: their own.
+_CONTINUATIONS = ("review", "integrating")
+
+
+def _role_for(task: Task, policy: Policy) -> str | None:
+    """The role this task's state is owed, or None when the policy has none.
+
+    None is never a crash and never a silent skip: `_unroutable` turns it into
+    an Escalate naming which of the two policy errors it is.
+    """
+    route = policy.route_for(task.klass)
+    if not route:
+        return None
+    index = _STAGE[task.state]
+    if index >= len(route):
+        return None
+    if task.state == "integrating" and len(route) < 2:
+        # route[-1] on a one-role route resolves to route[0], which would send a
+        # `spec` task's planner to merge the integration branch. A route that
+        # cannot produce an INTEGRATING state cannot legitimately arrive here.
+        return None
+    return route[index]
+
+
+def _writes_integration(task: Task) -> bool:
+    """Both halves of the global exclusive lock.
+
+    `klass == "integration"` was complete only while nothing could dispatch an
+    integrator any other way. A class:patch task at INTEGRATING has one writing
+    the same branch, and two of those at once is exactly the collision the lock
+    exists to prevent.
+    """
+    return task.klass == "integration" or task.state == "integrating"
 
 
 def _open(ledger: list[Task]) -> list[Task]:
@@ -138,8 +179,16 @@ def _reap(
     agents: list[AgentState],
     observations: dict[int, Observation],
     now: datetime,
+    dispatched: dict[int, str],
 ) -> list[Intent]:
-    """Status first, cost second, per spec §5's table read in order."""
+    """Status first, cost second, per spec §5's table read in order.
+
+    `dispatched` is the previous tick's `FleetState.dispatched` as a mapping:
+    task -> the state that task's agent was CONTINUED in. `AgentState` carries no
+    role, so a reviewer that exited without writing a verdict and an implementer
+    that handed off to REVIEW are the same snapshot -- a done agent on a REVIEW
+    row. The allocator started one of them, and this is the record of that.
+    """
     by_task = {a.task: a for a in agents}
     intents: list[Intent] = []
     for task in ledger:
@@ -167,16 +216,31 @@ def _reap(
             # waiting its turn.
             if agent is None:
                 continue
-            if agent.status in ("done", "dirty"):
-                intents.append(
-                    Retire(task=task.number)
-                    if agent.status == "done"
-                    else Escalate(task=task.number, reason="dirty_exit")
-                )
+            if agent.status == "done":
+                if dispatched.get(task.number) == task.state:
+                    # We started this agent FOR this state and the state has not
+                    # moved, so the stage produced nothing -- a reviewer that
+                    # wrote no verdict, an integrator that merged nothing.
+                    # Escalate rather than retire: retiring starts another one,
+                    # and another, until the fleet budget runs out.
+                    intents.append(Escalate(task=task.number, reason="stage_produced_nothing"))
+                else:
+                    intents.append(Retire(task=task.number))
+            elif agent.status == "dirty":
+                intents.append(Escalate(task=task.number, reason="dirty_exit"))
             elif _stalled(task, observations, policy, now):
                 # Not _fail: Release relabels to READY, restarting the task from
                 # its implementer and discarding a review that already happened.
                 intents.append(Escalate(task=task.number, reason="stalled"))
+            elif agent.cost_usd > policy.per_task_usd:
+                # Task 3 left this branch with no cost check at all, so a
+                # reviewer that was healthy, moving and far over its ceiling got
+                # no intent and ran until the whole FLEET ceiling drained.
+                # Escalate for the same reason the stall above does: a Release
+                # relabels to READY and throws away a review that happened.
+                # Status first, cost second -- a finished stage is already paid
+                # for, and the `done` branch above returns before this.
+                intents.append(Escalate(task=task.number, reason="over_budget"))
             continue
         if agent is None:
             # Ledger drift, and spec §5's table states this row unconditionally:
@@ -255,14 +319,14 @@ def _unblock(ledger: list[Task], all_rows: list[Task]) -> list[Intent]:
 
 
 def _unroutable(ledger: list[Task], policy: Policy) -> list[Intent]:
-    """READY, auto-ok tasks the policy cannot route. A human is the only fix.
+    """Dispatchable tasks the policy cannot route. A human is the only fix.
 
-    Not dispatching them is right -- `route[0]` on an empty route is an
-    IndexError out of the pure core. Saying nothing about them is not: the task
-    was skipped silently on every tick, with no intent, no runlog line and
-    `fleet plan` printing "no action", so a missing `class:` label or a class
-    absent from task-classes.md parked real work in READY for the whole night
-    with nothing able to notice.
+    Two distinct policy errors, named apart because the run log is where an
+    operator finds out which one it was: `unroutable` is a task whose class has
+    no route at all -- a missing `class:` label, or a class absent from
+    task-classes.md. `unroutable_stage` is a task that reached a state its route
+    has no role for, which is the failure M4's invariant reviewer will produce if
+    it is added to a route without its state.
 
     Its own phase rather than a branch in `_dispatch`, so the escalation is not
     gated on a free slot or a free area: it is a fact about the policy, not about
@@ -270,13 +334,17 @@ def _unroutable(ledger: list[Task], policy: Policy) -> list[Intent]:
     exactly as long as it stayed busy.
 
     `auto_ok` is required. Its absence is a human's decision not to run this task
-    unattended, which is why it is sitting in READY -- escalating that is noise.
+    unattended, which is why it is sitting there -- escalating that is noise.
     """
-    return [
-        Escalate(task=task.number, reason="unroutable")
-        for task in ledger
-        if task.state == "ready" and task.auto_ok and not policy.route_for(task.klass)
-    ]
+    out: list[Intent] = []
+    for task in ledger:
+        if task.state not in _STAGE or not task.auto_ok:
+            continue
+        if not policy.route_for(task.klass):
+            out.append(Escalate(task=task.number, reason="unroutable"))
+        elif _role_for(task, policy) is None:
+            out.append(Escalate(task=task.number, reason="unroutable_stage"))
+    return out
 
 
 def _dispatch(
@@ -293,18 +361,59 @@ def _dispatch(
         return [Drain(reason="budget")]
 
     live = [t for t in ledger if t.state in _LIVE]
-    if any(t.klass == "integration" for t in live):
-        # Global exclusive lock. The integrator touches every area, so per-area
-        # exclusion does not cover it (harness amendment 2).
-        return []
-
-    held = {t.area for t in live if t.area}
     # A running agent occupies a slot whatever its row says. Counting off live
     # LABELS alone lets the two sources of truth disagree -- REAP and the drain
     # read `agents`, this read the ledger -- and drift in that gap pushed the
     # fleet past its own ceiling AND started a second agent on a task that
     # already had one, in the same worktree.
     busy = {a.task for a in agents}
+    integrators = {t.number for t in live if _writes_integration(t)}
+    intents: list[Intent] = []
+    # One integrator at a time, armed by whichever pass starts one. Pass 2 never
+    # sees pass 1's arming -- a continued integrator is itself a live row that
+    # writes integration, so `integrators` is non-empty and pass 2 returns first
+    # -- but the two passes mean the same thing by it, and one flag is one rule.
+    integrating = False
+
+    # Pass 1 -- continuations. A task at REVIEW or INTEGRATING already holds its
+    # area and its slot: itself. Charged either, it can never advance, and at
+    # `slots` live tasks the whole fleet deadlocks with every task one stage from
+    # done. Matched against OTHER live tasks only, for the same reason.
+    #
+    # The lock here counts integrators that are actually RUNNING plus the one
+    # this tick starts, not every live INTEGRATING row: a row at INTEGRATING with
+    # no agent is waiting FOR an integrator, not holding one, and excluding it
+    # deadlocks two such tasks against each other -- both a stage from done,
+    # neither ever started, which is the same shape as charging a continuation
+    # its own slot. `task.number in busy` above already removed this task from
+    # the running set, so no self-exclusion is needed.
+    running_integrators = integrators & busy
+    for task in sorted(ledger, key=lambda t: t.number):
+        if task.state not in _CONTINUATIONS or not task.auto_ok:
+            continue
+        if task.number in busy:
+            continue
+        if _writes_integration(task) and (integrating or running_integrators):
+            continue
+        role = _role_for(task, policy)
+        if role is None:
+            continue
+        # Continue, not Dispatch. Dispatch relabels to CLAIMED, which for a task
+        # at REVIEW destroys the state it is being continued FOR.
+        intents.append(Continue(task=task.number, role=role, base=policy.integration_branch))
+        if _writes_integration(task):
+            integrating = True
+
+    # Pass 2 -- new work. A live integrator holds a GLOBAL lock: it touches every
+    # area by definition, so per-area exclusion does not cover it. Computed from
+    # tasks that were already live, not from pass 1's dispatches, because M2's
+    # integration-lock.yaml pins the distinction: a live integrator blocks all
+    # new dispatch, while one dispatched by this tick blocks only other
+    # integrators in the same tick.
+    if integrators:
+        return intents
+
+    held = {t.area for t in live if t.area}
     free = policy.slots - len({t.number for t in live} | busy)
     # An integration task dispatched by THIS tick arms the lock for the rest of
     # it. The check above only sees tasks that were already live, so two READY
@@ -314,8 +423,6 @@ def _dispatch(
     # short-circuiting the loop: the lock is one integrator at a time, not one
     # dispatch at a time, and tick 1 of integration-lock.yaml pins that an
     # integrator and ordinary tasks may still start together.
-    integrating = False
-    intents: list[Intent] = []
     for task in sorted(ledger, key=lambda t: t.number):
         if free <= 0:
             break
@@ -323,17 +430,17 @@ def _dispatch(
             continue
         if task.number in busy:
             continue
-        route = policy.route_for(task.klass)
-        if not route:
+        role = _role_for(task, policy)
+        if role is None:
             continue
-        if task.klass == "integration" and integrating:
+        if _writes_integration(task) and integrating:
             continue
         if task.area is not None and task.area in held:
             continue
         intents.append(
             Dispatch(
                 task=task.number,
-                role=route[0],
+                role=role,
                 base=policy.integration_branch,
                 # The attempt already on the task, not the next one: a dispatch
                 # does not consume an attempt, a release does. One number,
@@ -343,7 +450,7 @@ def _dispatch(
         )
         if task.area is not None:
             held.add(task.area)
-        if task.klass == "integration":
+        if _writes_integration(task):
             integrating = True
         free -= 1
     return intents
@@ -378,7 +485,7 @@ def decide(
     # agent that nothing else can stop, and its cost counts against the ceiling
     # until something does. DISPATCH and UNBLOCK must not act on a closed row,
     # so the filter cannot stay one blanket call shared by all three phases.
-    intents += _reap(ledger, policy, agents, observations, now)
+    intents += _reap(ledger, policy, agents, observations, now, dict(prev.dispatched))
     intents += _unblock(open_ledger, ledger)
     intents += _unroutable(open_ledger, policy)
     intents += _dispatch(open_ledger, policy, agents, prev.spent_usd)
@@ -393,8 +500,21 @@ def decide(
     # merely flickered -- the carry-forward in `_observe` exists to survive that
     # exact gap, and dropping the entry here would undo it one line later.
     stopped = _stopped(intents) & {a.task for a in agents}
+    # The continuation record dies with the agent it describes, for the same
+    # reason an observation does: carried past the reap, the task's NEXT agent
+    # inherits it and its first clean finish reads as "produced nothing".
+    # Pruned on `_stopped` with no intersection against `agents`, unlike `seen`:
+    # this record is about a stage the allocator started, and every reaping
+    # intent ends that stage whether or not the snapshot still shows its agent.
+    continued = {i.task for i in intents if isinstance(i, Continue)}
+    stopped_now = _stopped(intents)
+    carried = {t: s for t, s in prev.dispatched if t not in stopped_now and t not in continued}
+    rows = {t.number: t for t in ledger}
+    for task in continued:
+        carried[task] = rows[task].state
     state = FleetState(
         seen=tuple(sorted((t, o) for t, o in observations.items() if t not in stopped)),
         spent_usd=prev.spent_usd + _final_cost(intents, agents),
+        dispatched=tuple(sorted(carried.items())),
     )
     return intents, state

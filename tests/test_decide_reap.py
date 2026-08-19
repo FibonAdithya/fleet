@@ -323,7 +323,7 @@ def test_state_is_derived_and_carries_no_authority():
     """FleetState holds observations and spend, nothing else. Anything that
     looks like task state or ownership belongs in the ledger."""
     _, state = decide(FleetState(), [claimed()], POLICY, [], T0)
-    assert set(vars(state)) == {"seen", "spent_usd"}
+    assert set(vars(state)) == {"seen", "spent_usd", "dispatched"}
 
 
 def test_a_finished_agent_on_a_reviewing_task_is_retired():
@@ -468,3 +468,87 @@ def test_an_orphan_already_reaped_this_pass_is_not_retired_twice():
     agents = [AgentState(task=5, status="working", change_seq=1)]
     intents, _ = decide(FleetState(), [closed], POLICY, agents, T0)
     assert intents == [Retire(task=5)]
+
+
+def test_a_reviewer_that_writes_no_verdict_escalates_rather_than_looping():
+    """Retiring it starts another reviewer, and another, until the fleet-wide
+    budget drains -- one task consuming a whole night's ceiling. The state not
+    having moved IS the evidence the stage produced nothing."""
+    task = claimed(number=5, state="review")
+    state = FleetState(dispatched=((5, "review"),))
+    agents = [AgentState(task=5, status="done", change_seq=4)]
+    intents, _ = decide(state, [task], POLICY, agents, T0)
+    assert Escalate(task=5, reason="stage_produced_nothing") in intents
+    assert Retire(task=5) not in intents
+
+
+def test_the_previous_stage_s_agent_is_still_retired():
+    """The normal handoff: the implementer wrote fleet:review itself and exited.
+    We never continued this task INTO review, so its done agent is not this
+    stage's."""
+    task = claimed(number=5, state="review")
+    agents = [AgentState(task=5, status="done", change_seq=4)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Retire(task=5) in intents
+
+
+def test_a_continuation_that_moved_the_state_is_not_an_escalation():
+    """The reviewer DID write its verdict: the task is at integrating while
+    `dispatched` still says review. Comparing against the recorded state rather
+    than merely 'was continued' is what keeps the happy path happy."""
+    task = claimed(number=5, state="integrating")
+    state = FleetState(dispatched=((5, "review"),))
+    agents = [AgentState(task=5, status="done", change_seq=4)]
+    intents, _ = decide(state, [task], POLICY, agents, T0)
+    assert Retire(task=5) in intents
+
+
+def test_the_record_is_dropped_when_the_agent_is_reaped():
+    """Carried past the reap, the task's NEXT agent inherits a record from the
+    dead one and its first clean finish reads as 'produced nothing' -- the same
+    defect `seen` is pruned to avoid."""
+    task = claimed(number=5, state="review")
+    state = FleetState(dispatched=((5, "review"),))
+    agents = [AgentState(task=5, status="done", change_seq=4)]
+    _, after = decide(state, [task], POLICY, agents, T0)
+    assert after.dispatched_in(5) is None
+
+
+def test_a_continued_stage_is_recorded_against_the_state_it_was_started_in():
+    """The other half of the record: without the write there is nothing for the
+    check above to read, and every runaway stage reads as a handoff forever."""
+    task = claimed(number=5, state="review")
+    _, after = decide(FleetState(), [task], POLICY, [], T0)
+    assert after.dispatched_in(5) == "review"
+
+
+def test_a_working_agent_over_the_per_task_ceiling_on_a_continuation_escalates():
+    """Task 3's gap: the CLAIMED branch checks cost, the continuation branch did
+    not, so a reviewer that is healthy, moving and far over budget got no intent
+    at all and ran until the whole fleet ceiling drained. Escalate rather than
+    _fail: a Release relabels the task to READY and throws away a completed
+    review, which is what this branch already refuses to do for a stall."""
+    task = claimed(number=5, state="review")
+    agents = [AgentState(task=5, status="working", change_seq=4, cost_usd=2.5)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == [Escalate(task=5, reason="over_budget")]
+
+
+def test_a_continuation_agent_exactly_at_the_ceiling_is_left_alone():
+    """The boundary, pinned the way the CLAIMED branch's already is. Catches `>`
+    flipped to `>=`, which kills a reviewer that has spent exactly its budget."""
+    task = claimed(number=5, state="review")
+    agents = [AgentState(task=5, status="working", change_seq=4, cost_usd=POLICY.per_task_usd)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == []
+
+
+def test_a_finished_continuation_agent_over_budget_is_not_charged_for_it():
+    """Status first, cost second, here as in the CLAIMED branch. The stage
+    finished; its work is already paid for, and escalating instead of retiring
+    would strand a completed review at NEEDS_HUMAN over arithmetic."""
+    task = claimed(number=5, state="review")
+    agents = [AgentState(task=5, status="done", change_seq=4, cost_usd=2.5)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Retire(task=5) in intents
+    assert only(intents, Escalate) == []

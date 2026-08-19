@@ -7,6 +7,7 @@ from fleet.labels import static_vocabulary
 from fleet.model import (
     Advance,
     Assign,
+    Continue,
     Dispatch,
     Drain,
     Escalate,
@@ -143,6 +144,14 @@ def test_retire_stops_the_agent_and_changes_no_state():
     effects = expand(Retire(task=5), POLICY)
     assert effects == [StopAgent(task=5), Assign(task=5, owner=None)]
     assert not any(isinstance(e, SetLabels) for e in effects)
+
+
+def test_continue_starts_an_agent_and_touches_no_label():
+    """A SetLabels here relabels a REVIEW task to CLAIMED, which destroys the
+    state the continuation was dispatched for and routes the next lookup back to
+    the implementer."""
+    effects = expand(Continue(task=5, role="reviewer", base="integration"), POLICY)
+    assert effects == [StartAgent(task=5, role="reviewer", base="integration")]
 
 
 def test_drain_produces_no_effects():

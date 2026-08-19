@@ -139,6 +139,7 @@ def test_no_intent_or_effect_exists_that_nothing_emits():
     when M3 wants these back it re-adds them together with their emitter."""
     assert {t.__name__ for t in get_args(Intent)} == {
         "Dispatch",
+        "Continue",
         "Release",
         "Escalate",
         "Unblock",

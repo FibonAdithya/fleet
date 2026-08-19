@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from conftest import FIXTURE_POLICY
-from fleet.model import Advance, Dispatch, Release, Retire
+from fleet.model import Advance, Continue, Dispatch, Release, Retire
 from fleet.runlog import RunLog
 from fleet.runlog import read as read_runlog
 from fleet.simulate import ScenarioError, load_scenario, render_intent, run
@@ -325,6 +325,19 @@ def test_a_rendered_retire_is_a_recognized_intent_shape():
     from fleet.simulate import _shape
 
     assert _shape(render_intent(Retire(task=5))) == ("Retire", ("5",))
+
+
+def test_a_rendered_continue_is_a_recognized_intent_shape():
+    """A continuation is an intent a scenario must be able to `expect:`, and
+    `_shape` refuses any name absent from `_INTENTS`. Without Continue in that
+    list every scenario that carries a task past REVIEW dies with `'Continue' is
+    not an intent` before its assertion is compared -- which is the whole of M3's
+    vertical slice."""
+    from fleet.simulate import _shape
+
+    rendered = render_intent(Continue(task=5, role="reviewer", base="integration"))
+    assert rendered == "Continue(5, reviewer)"
+    assert _shape(rendered) == ("Continue", ("5", "reviewer"))
 
 
 def test_load_scenario_reads_yaml(tmp_path):

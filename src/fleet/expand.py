@@ -13,6 +13,7 @@ from fleet import labels as labels_module
 from fleet.model import (
     Advance,
     Assign,
+    Continue,
     Dispatch,
     Drain,
     Effect,
@@ -70,6 +71,12 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
             _to_state(intent.task, "claimed", (_attempt_label(intent.attempt, policy),)),
             StartAgent(task=intent.task, role=intent.role, base=intent.base),
         ]
+
+    if isinstance(intent, Continue):
+        # StartAgent alone. The state label is already what this stage needs --
+        # the previous stage's agent wrote it -- and no counter moves, because
+        # nothing failed.
+        return [StartAgent(task=intent.task, role=intent.role, base=intent.base)]
 
     if isinstance(intent, Release):
         return [
