@@ -102,4 +102,12 @@ def main(repo: str, spec_path: str, gh: GhClient | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # A clean usage exit here, not a bare IndexError traceback, is also what
+    # tests/test_reset.py's subprocess coverage of `reset.sh`'s exact
+    # invocation (`python -m fixtures.seed.reset`) exercises: it must fail at
+    # argument parsing, before `main` ever constructs a `RealGh` or touches
+    # the network, on a missing-argument invocation.
+    if len(sys.argv) != 3:
+        print(f"usage: {sys.argv[0]} <repo> <spec_path>", file=sys.stderr)
+        raise SystemExit(2)
     raise SystemExit(main(sys.argv[1], sys.argv[2]))

@@ -23,14 +23,44 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 CLONE="${FLEET_FIXTURE_CLONE:-$HOME/TIG/fleet-fixture}"
 
+# This script mutates real GitHub issues irreversibly -- deletes comments,
+# strips labels, closes and reopens issues -- and a human triggers it by hand.
+# Unlike seed_issues.sh (idempotent, additive, safe to re-run blind), a wrong
+# invocation here leaves a fixture repo in a state nobody can reconstruct.
+# `--yes` or `FORCE=1` skips the prompt for scripted/gate use.
+CONFIRMED=0
+for arg in "$@"; do
+  case "$arg" in
+    --yes) CONFIRMED=1 ;;
+  esac
+done
+if [ "${FORCE:-0}" = "1" ]; then
+  CONFIRMED=1
+fi
+if [ "$CONFIRMED" -ne 1 ]; then
+  read -r -p "About to reset $REPO: delete run comments, strip labels, close/reopen issues. Type 'yes' to continue: " REPLY
+  if [ "$REPLY" != "yes" ]; then
+    echo "Aborted -- nothing was touched." >&2
+    exit 1
+  fi
+fi
+
 echo "Resetting $REPO. Did you capture fixtures/ledger/issues.json first? (see this script's header)" >&2
 
 # --- Issue-side reset: labels, comments, assignees, open/closed state -------
 # Run from the project root, not the caller's cwd -- reset.py imports fleet.gh
 # and fleet.labels, so it needs this project's environment rather than
 # whatever `uv run` would resolve elsewhere. Same reasoning as seed_issues.sh.
+#
+# `-m fixtures.seed.reset`, NOT `python "$HERE/reset.py"`: running a script by
+# path sets sys.path[0] to the script's own directory (fixtures/seed/), never
+# the CWD, so reset.py's `from fixtures.seed.seed_issues import issue_labels`
+# could not resolve -- reproduced live: `uv run python fixtures/seed/reset.py`
+# from $ROOT fails with `ModuleNotFoundError: No module named 'fixtures'`
+# every time, before ever constructing a client. `-m` runs the module with the
+# CWD on sys.path instead, which is exactly what running from `$ROOT` needs.
 cd "$ROOT"
-uv run python "$HERE/reset.py" "$REPO" "$HERE/issues.yaml"
+uv run python -m fixtures.seed.reset "$REPO" "$HERE/issues.yaml"
 
 # --- Label-side cleanup: discovered-by:* labels ------------------------------
 # `discovered-by:<n>` is generated at runtime by do_discover and is not part

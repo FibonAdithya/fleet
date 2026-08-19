@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from fleet.gh import FakeGh
 SEEDED = {n: ["fleet:ready", "area:eval", "class:patch", "fleet:auto-ok"] for n in range(1, 12)}
 
 SPEC = Path(__file__).resolve().parents[1] / "fixtures/seed/issues.yaml"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _after_a_run() -> FakeGh:
@@ -195,3 +197,34 @@ def test_reset_main_wires_seeded_from_spec_into_reset():
     assert reset_main("o/r", str(SPEC), gh) == 0
     assert "fleet:ready" in gh.get_issue(1)["labels"]
     assert "fleet:done" not in gh.get_issue(1)["labels"]
+
+
+def test_reset_sh_can_actually_invoke_reset_py_as_a_module():
+    """reset.sh runs `uv run python -m fixtures.seed.reset "$REPO" "$HERE/
+    issues.yaml"` from the project root (see reset.sh's comment on this exact
+    line). An earlier version ran `python "$HERE/reset.py"` instead --
+    invoking a script *by path* sets sys.path[0] to the script's own
+    directory (fixtures/seed/), never the CWD, so reset.py's `from
+    fixtures.seed.seed_issues import issue_labels` could not resolve.
+    Reproduced live: `uv run python fixtures/seed/reset.py` from the repo root
+    fails with `ModuleNotFoundError: No module named 'fixtures'` every time,
+    before reset.py ever gets as far as looking at its arguments.
+
+    This drives the exact module path reset.sh invokes, but with zero
+    arguments: reset.py's usage guard (`len(sys.argv) != 3`) then exits before
+    `main` constructs a RealGh or makes a single network call, so this proves
+    the import resolves without going anywhere near GitHub -- offline
+    coverage for exactly the class of defect ("does the module even load
+    when invoked the way the shell script invokes it") the rest of this file,
+    running in-process against FakeGh, cannot see.
+    """
+    result = subprocess.run(
+        ["uv", "run", "python", "-m", "fixtures.seed.reset"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "ModuleNotFoundError" not in result.stderr
+    assert result.returncode == 2
+    assert "usage:" in result.stderr
