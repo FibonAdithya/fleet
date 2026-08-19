@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from fleet.gh import FakeGh, GhError
+from fleet.gh import FakeGh, GhClient, GhError, RealGh
 from fleet.labels import area_label, attempt_label, state_label, static_vocabulary
 
 
@@ -188,6 +188,84 @@ def test_removing_a_label_the_repo_never_had_fails_like_gh_does():
     with pytest.raises(GhError, match="discovered-by:1"):
         gh.remove_labels(n, ["discovered-by:1"])
     assert gh.get_issue(n)["labels"] == ["area:eval"]
+
+
+def test_close_issue_is_on_the_protocol_not_only_the_fake():
+    """A fake able to perform a transition the real client cannot is the exact
+    divergence class that did all the damage in M1 -- it passes the whole
+    offline suite and fails against GitHub."""
+    assert hasattr(GhClient, "close_issue")
+    assert hasattr(RealGh, "close_issue")
+    assert hasattr(FakeGh, "close_issue")
+
+
+def test_assign_is_on_the_protocol_not_only_the_fake():
+    assert hasattr(GhClient, "assign")
+    assert hasattr(RealGh, "assign")
+    assert hasattr(FakeGh, "assign")
+
+
+def test_assign_sets_and_clears_the_owner():
+    gh = FakeGh()
+    number = gh.create_issue("t", "b", ["fleet:ready"])
+    gh.assign(number, "FibonAdithya")
+    assert gh.get_issue(number)["assignees"] == ["FibonAdithya"]
+    gh.assign(number, None)
+    assert gh.get_issue(number)["assignees"] == []
+
+
+def test_a_closed_issue_reports_closed():
+    gh = FakeGh()
+    number = gh.create_issue("t", "b", ["fleet:ready"])
+    gh.close_issue(number)
+    assert gh.get_issue(number)["state"] == "CLOSED"
+    assert gh.list_issues("open") == []
+    assert len(gh.list_issues("all")) == 1
+
+
+def test_assign_rejects_a_login_gh_does_not_recognise():
+    """Real `gh issue edit --add-assignee X` resolves X first and fails the
+    whole edit when it cannot -- exactly the M1 divergence class (docs/m2-
+    inputs.md §6): a fake that accepts any string here would pass this whole
+    offline suite and then fail the first live write against GitHub."""
+    gh = FakeGh()
+    number = gh.create_issue("t", "b", ["fleet:ready"])
+    with pytest.raises(GhError, match="not-a-real-user"):
+        gh.assign(number, "not-a-real-user")
+    assert gh.get_issue(number)["assignees"] == []
+
+
+def test_assign_accepts_a_known_login():
+    gh = FakeGh(known_logins={"octocat"})
+    number = gh.create_issue("t", "b", ["fleet:ready"])
+    gh.assign(number, "octocat")
+    assert gh.get_issue(number)["assignees"] == ["octocat"]
+
+
+def test_get_issue_returns_a_copy_of_assignees_not_the_live_list():
+    """The same aliasing defect `get_issue`'s own docstring warns about for
+    `labels` and `comments`: a shallow dict copy still shares the `assignees`
+    list, so a caller mutating what it gets back would silently corrupt the
+    fake's ledger while doing nothing live."""
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [])
+    gh.assign(n, "FibonAdithya")
+    snapshot = gh.get_issue(n)
+    snapshot["assignees"].append("someone-else")
+    assert gh.get_issue(n)["assignees"] == ["FibonAdithya"]
+
+
+def test_list_issues_returns_a_copy_of_assignees_not_the_live_list():
+    """`list_issues` had the same aliasing bug fixed for `labels` -- `assignees`
+    needs the identical fix, or a caller that mutates a listed row's assignees
+    corrupts the fake's ledger and passes every test here while doing nothing
+    against GitHub."""
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [])
+    gh.assign(n, "FibonAdithya")
+    row = gh.list_issues("open")[0]
+    row["assignees"].append("someone-else")
+    assert gh.get_issue(n)["assignees"] == ["FibonAdithya"]
 
 
 def test_the_label_vocabulary_tracks_the_configured_attempt_cap():

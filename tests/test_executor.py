@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from fleet.executor import FakeExecutor
-from fleet.model import Assign, SetLabels, StartAgent, StopAgent
+from fleet.model import Assign, CloseIssue, SetLabels, StartAgent, StopAgent
 from test_decide_reap import POLICY
 
 PACKET = {"to": "review", "head_sha": "a91c204"}
@@ -145,6 +145,29 @@ def test_stopping_an_agent_removes_it():
     started(ex)
     ex.apply([StopAgent(task=1)])
     assert ex.agents() == []
+
+
+def test_closing_an_issue_removes_any_lingering_live_agent():
+    """Defense in depth, the same reasoning `_reap`'s own comment gives for
+    retiring an agent on a row closed under the fleet: a live agent on a
+    closed issue is not meant to exist, and if one still shows up as live it
+    must not keep reporting cost every tick. `Advance` already stops the
+    agent before it closes the issue, so this only bites if something ever
+    applies `CloseIssue` on its own -- which is exactly why the fake must not
+    silently ignore it and trust that ordering forever."""
+    ex = executor()
+    started(ex)
+    ex.apply([CloseIssue(task=1)])
+    assert ex.agents() == []
+
+
+def test_closing_an_issue_drops_its_pending_packet_too():
+    ex = executor()
+    started(ex)
+    ex.script(1, "clean_exit", packet=PACKET)
+    ex.tick()
+    ex.apply([CloseIssue(task=1)])
+    assert ex.packets() == {}
 
 
 def test_a_restarted_agent_carries_no_packet_from_its_last_attempt():

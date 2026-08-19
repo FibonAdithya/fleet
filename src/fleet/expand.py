@@ -13,6 +13,7 @@ from fleet import labels as labels_module
 from fleet.model import (
     Advance,
     Assign,
+    CloseIssue,
     Continue,
     Dispatch,
     Drain,
@@ -63,11 +64,9 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         return []
 
     if isinstance(intent, Dispatch):
-        # No Assign: `fleet-1` is not a GitHub login, and gh fails the whole
-        # edit on an assignee it cannot resolve. Nothing in M2 knows the
-        # identity the executor runs agents as -- fleet.toml names none and
-        # GhClient has no assignee method -- so ownership is written in M3 by
-        # the executor that does.
+        # No Assign: `fleet-1` is not a GitHub login, and this layer has no way
+        # to learn the one `gh` is authenticated as. HerdrExecutor writes
+        # ownership when it starts the agent -- see herdr_executor.apply.
         return [
             _to_state(intent.task, "claimed", (_attempt_label(intent.attempt, policy),)),
             StartAgent(task=intent.task, role=intent.role, base=intent.base),
@@ -125,6 +124,12 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         # StopAgent because the agent that wrote the packet has exited. Left in
         # the executor's live set it keeps reporting cost every tick, and the
         # budget drain is computed from live agents.
-        return [StopAgent(task=intent.task), _to_state(intent.task, intent.to)]
+        effects: list[Effect] = [StopAgent(task=intent.task), _to_state(intent.task, intent.to)]
+        if intent.to == "done":
+            # Last, not first: the label is what a grader reads, and an edit
+            # that fails after the close would leave a closed issue with no
+            # terminal state at all.
+            effects.append(CloseIssue(task=intent.task))
+        return effects
 
     raise ValueError(f"cannot expand {intent!r}")

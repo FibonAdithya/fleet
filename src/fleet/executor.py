@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from fleet.model import AgentState, Effect, StartAgent, StopAgent
+from fleet.model import AgentState, CloseIssue, Effect, StartAgent, StopAgent
 
 # `conflict` is deliberately absent. At this seam it is a dirty exit -- same
 # status, same everything -- so decide() cannot distinguish the two and no
@@ -88,6 +88,14 @@ class FakeExecutor:
                     task=effect.task, status="working", change_seq=self._seq, cost_usd=0.0
                 )
             elif isinstance(effect, StopAgent):
+                self._live.pop(effect.task, None)
+                self._packets.pop(effect.task, None)
+            elif isinstance(effect, CloseIssue):
+                # Belt and suspenders: `Advance` always emits a `StopAgent`
+                # before this, but nothing in this type guarantees a caller
+                # applies them together, and a live agent left on a closed
+                # issue would keep reporting cost every tick for a task that
+                # is already over.
                 self._live.pop(effect.task, None)
                 self._packets.pop(effect.task, None)
 

@@ -25,6 +25,7 @@ from fleet.executor import FakeExecutor
 from fleet.expand import expand
 from fleet.model import (
     Advance,
+    CloseIssue,
     Continue,
     Dispatch,
     Drain,
@@ -156,23 +157,28 @@ def _numbered(mapping: dict | None) -> dict[int, dict]:
 
 
 def _apply_to_rows(rows: list[dict], effects: list[Effect]) -> list[dict]:
-    """Fold this intent's label effects back into the seeded rows, so the next
-    tick reads a ledger that reflects the last one.
+    """Fold this intent's label and close effects back into the seeded rows, so
+    the next tick reads a ledger that reflects the last one.
 
-    Only `SetLabels` is folded. `decide()` reads no other field a scenario can
-    observe -- notably not `assignee` -- and a fold no assertion can see is code
-    no test can keep honest.
+    Only `SetLabels` and `CloseIssue` are folded. `decide()` reads no other
+    field a scenario can observe -- notably not `assignee` -- and a fold no
+    assertion can see is code no test can keep honest. `CloseIssue` is folded
+    because `ledger.read_one` turns a row's `state` into `Task.is_open`, which
+    `_reap` reads on its own to retire a lingering agent on a row closed by our
+    own Advance-to-done -- a fold that skipped it would leave that row OPEN
+    forever, no matter how many ticks pass.
     """
     updated = [dict(row, labels=list(row["labels"])) for row in rows]
     by_number = {row["number"]: row for row in updated}
     for effect in effects:
-        if not isinstance(effect, SetLabels):
-            continue
         target = by_number.get(effect.task)
         if target is None:
             continue
-        kept = [name for name in target["labels"] if name not in effect.remove]
-        target["labels"] = kept + [name for name in effect.add if name not in kept]
+        if isinstance(effect, SetLabels):
+            kept = [name for name in target["labels"] if name not in effect.remove]
+            target["labels"] = kept + [name for name in effect.add if name not in kept]
+        elif isinstance(effect, CloseIssue):
+            target["state"] = "CLOSED"
     return updated
 
 

@@ -254,4 +254,9 @@ class StopAgent:
     task: int
 
 
-Effect = SetLabels | Assign | StartAgent | StopAgent
+@dataclass(frozen=True)
+class CloseIssue:
+    task: int
+
+
+Effect = SetLabels | Assign | StartAgent | StopAgent | CloseIssue

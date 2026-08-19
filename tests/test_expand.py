@@ -7,6 +7,7 @@ from fleet.labels import static_vocabulary
 from fleet.model import (
     Advance,
     Assign,
+    CloseIssue,
     Continue,
     Dispatch,
     Drain,
@@ -157,6 +158,20 @@ def test_advance_moves_to_the_named_state_and_stops_the_finished_agent():
     effects = expand(Advance(task=1, to="review"), POLICY)
     assert StopAgent(task=1) in effects
     assert "fleet:review" in labels_of(effects)[0].add
+
+
+def test_advancing_to_done_closes_the_issue():
+    """Closing on completion is what makes the UNBLOCK fix load-bearing: a
+    closed issue is a satisfied dependency, and until something closes one that
+    rule never fires."""
+    effects = expand(Advance(task=5, to="done"), POLICY)
+    assert CloseIssue(task=5) in effects
+    assert effects.index(CloseIssue(task=5)) == len(effects) - 1
+
+
+def test_advancing_to_review_does_not_close_the_issue():
+    effects = expand(Advance(task=5, to="review"), POLICY)
+    assert not any(isinstance(e, CloseIssue) for e in effects)
 
 
 def test_advance_refuses_a_state_outside_the_vocabulary():

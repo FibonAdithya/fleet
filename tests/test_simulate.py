@@ -6,10 +6,10 @@ import pytest
 import yaml
 
 from conftest import FIXTURE_POLICY
-from fleet.model import Advance, Continue, Dispatch, Rebase, Release, Retire
+from fleet.model import Advance, CloseIssue, Continue, Dispatch, Rebase, Release, Retire
 from fleet.runlog import RunLog
 from fleet.runlog import read as read_runlog
-from fleet.simulate import ScenarioError, load_scenario, render_intent, run
+from fleet.simulate import ScenarioError, _apply_to_rows, load_scenario, render_intent, run
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -248,6 +248,28 @@ def test_the_rows_carry_the_last_ticks_labels_into_the_next():
         ],
     }
     run(scenario, ROOT)
+
+
+def test_apply_to_rows_closes_the_row_on_close_issue():
+    """CloseIssue is an effect, not merely a label move -- a fold that only
+    watches SetLabels leaves the row's `state` at OPEN forever. That `state` is
+    what `ledger.read_one` turns into `is_open`, the field `_reap`'s own
+    comment names 'our own Advance-to-done on a previous tick' as one of the
+    two ways a row goes stale under -- and it is what makes Task 22 able to
+    seed a scenario that carries a closed row from one tick into the next."""
+    rows = [{"number": 1, "title": "t", "state": "OPEN", "labels": [], "assignees": []}]
+    updated = _apply_to_rows(rows, [CloseIssue(task=1)])
+    assert updated[0]["state"] == "CLOSED"
+
+
+def test_apply_to_rows_leaves_other_rows_open_on_close_issue():
+    rows = [
+        {"number": 1, "title": "t", "state": "OPEN", "labels": [], "assignees": []},
+        {"number": 2, "title": "t", "state": "OPEN", "labels": [], "assignees": []},
+    ]
+    updated = _apply_to_rows(rows, [CloseIssue(task=1)])
+    assert updated[0]["state"] == "CLOSED"
+    assert updated[1]["state"] == "OPEN"
 
 
 def test_an_unknown_scenario_key_is_refused():

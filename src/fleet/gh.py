@@ -27,6 +27,8 @@ class GhClient(Protocol):
     def list_issues(self, state: str = "open") -> list[dict]: ...
     def search_titles(self, text: str) -> list[dict]: ...
     def ensure_label(self, name: str, colour: str = "ededed") -> None: ...
+    def assign(self, issue: int, login: str | None) -> None: ...
+    def close_issue(self, issue: int) -> None: ...
 
 
 class RealGh:
@@ -73,11 +75,16 @@ class RealGh:
     def get_issue(self, issue: int) -> dict:
         raw = json.loads(
             self._run(
-                "issue", "view", str(issue), "--json", "number,title,body,labels,state,comments"
+                "issue",
+                "view",
+                str(issue),
+                "--json",
+                "number,title,body,labels,state,comments,assignees",
             )
         )
         raw["labels"] = [label["name"] for label in raw.get("labels", [])]
         raw["comments"] = [c["body"] for c in raw.get("comments", [])]
+        raw["assignees"] = [a["login"] for a in raw.get("assignees", [])]
         return raw
 
     def list_issues(self, state: str = "open") -> list[dict]:
@@ -90,12 +97,33 @@ class RealGh:
                 "--limit",
                 "200",
                 "--json",
-                "number,title,body,labels,state",
+                "number,title,body,labels,state,assignees",
             )
         )
         for row in raw:
             row["labels"] = [label["name"] for label in row.get("labels", [])]
+            row["assignees"] = [a["login"] for a in row.get("assignees", [])]
         return raw
+
+    def assign(self, issue: int, login: str | None) -> None:
+        """`login=None` clears every assignee.
+
+        Parent §3 makes the allocator the sole writer of ownership, and the
+        clearing half is what a Release and an Escalate need: a task released
+        back to READY that still shows an owner is the drift REAP exists to
+        clear.
+        """
+        if login is None:
+            current = json.loads(self._run("issue", "view", str(issue), "--json", "assignees"))
+            logins = [a["login"] for a in current.get("assignees", [])]
+            if not logins:
+                return
+            self._run("issue", "edit", str(issue), "--remove-assignee", ",".join(logins))
+            return
+        self._run("issue", "edit", str(issue), "--add-assignee", login)
+
+    def close_issue(self, issue: int) -> None:
+        self._run("issue", "close", str(issue))
 
     def search_titles(self, text: str) -> list[dict]:
         """Case-insensitive substring match over the most recent 200 issues.
@@ -127,11 +155,18 @@ class RealGh:
 class FakeGh:
     """In-memory ledger with the same surface. The only client tests use."""
 
+    #: Logins `assign` accepts when no explicit set is given. Real `gh` resolves
+    #: an assignee against the repo's actual collaborators; a fake that accepts
+    #: any string is the M1 divergence class docs/m2-inputs.md §6 warns about --
+    #: it would pass this whole offline suite and fail the first live write.
+    DEFAULT_KNOWN_LOGINS = frozenset({"FibonAdithya"})
+
     def __init__(
         self,
         max_attempts: int = labels_module.DEFAULT_MAX_ATTEMPTS,
         max_fix_passes: int = labels_module.DEFAULT_MAX_FIX_PASSES,
         max_rebases: int = labels_module.DEFAULT_MAX_REBASES,
+        known_logins: set[str] | frozenset[str] = DEFAULT_KNOWN_LOGINS,
     ) -> None:
         self.issues: dict[int, dict] = {}
         self._next = 1
@@ -140,6 +175,7 @@ class FakeGh:
         # same counters that repo was seeded with, or its idea of "this label
         # exists" diverges from the real one. See labels.static_vocabulary.
         self.vocabulary = labels_module.static_vocabulary(max_attempts, max_fix_passes, max_rebases)
+        self.known_logins = set(known_logins)
 
     def _check_labels(self, names: list[str]) -> None:
         """Mirror gh: naming a label that does not exist fails the whole edit and
@@ -175,6 +211,7 @@ class FakeGh:
             "labels": list(labels),
             "state": "OPEN",
             "comments": [],
+            "assignees": [],
         }
         return number
 
@@ -202,13 +239,29 @@ class FakeGh:
         JSON every call, so a caller mutating what it gets back is a no-op
         against GitHub. Returning the stored record directly here would let that
         same mutation silently corrupt the fake's ledger -- passing every test
-        while doing nothing live. Copy `labels` and `comments` too: they are
-        lists, and a shallow dict copy would still share them with the store."""
+        while doing nothing live. Copy `labels`, `comments` and `assignees` too:
+        they are lists, and a shallow dict copy would still share them with the
+        store."""
         record = self._get(issue)
         copy = dict(record)
         copy["labels"] = list(record["labels"])
         copy["comments"] = list(record["comments"])
+        copy["assignees"] = list(record["assignees"])
         return copy
+
+    def assign(self, issue: int, login: str | None) -> None:
+        """`login=None` clears the assignee. Mirrors RealGh: an unrecognised
+        login fails the whole edit and changes nothing, the same guard
+        `_check_labels` enforces for a label gh has never heard of -- a fake
+        that accepted any string here would pass this whole offline suite and
+        fail against GitHub."""
+        record = self._get(issue)
+        if login is None:
+            record["assignees"] = []
+            return
+        if login not in self.known_logins:
+            raise GhError(f"could not assign issue: {login!r} not found")
+        record["assignees"] = [login]
 
     def close_issue(self, issue: int) -> None:
         self._get(issue)["state"] = "CLOSED"
@@ -226,13 +279,17 @@ class FakeGh:
         from both callers and gh.
 
         Each row is a snapshot, for the same reason get_issue's is: a dict
-        comprehension is a shallow copy, so handing back the stored `labels`
-        list would let a caller that builds a label list in place corrupt this
-        ledger -- passing every test here and doing nothing against GitHub,
-        which returns freshly-parsed JSON every call."""
+        comprehension is a shallow copy, so handing back the stored `labels` or
+        `assignees` list would let a caller that builds either list in place
+        corrupt this ledger -- passing every test here and doing nothing
+        against GitHub, which returns freshly-parsed JSON every call."""
         normalized = state.upper()
         return [
-            {**{k: v for k, v in issue.items() if k != "comments"}, "labels": list(issue["labels"])}
+            {
+                **{k: v for k, v in issue.items() if k != "comments"},
+                "labels": list(issue["labels"]),
+                "assignees": list(issue["assignees"]),
+            }
             for issue in self.issues.values()
             if normalized == "ALL" or issue["state"] == normalized
         ]
