@@ -12,6 +12,7 @@ to be quietly wrong, so it is the part that gets a pure function.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -42,34 +43,16 @@ class UnpricedModel(Exception):
 
 
 def price_lines(lines: list[str], prices: dict[str, dict[str, float]]) -> float:
-    total = 0.0
-    for raw in lines:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            entry = json.loads(raw)
-        except ValueError:
-            # A transcript being appended to while we read it ends mid-line.
-            # Skipping the partial line costs one message of accuracy for one
-            # tick; crashing costs the whole tick.
-            continue
-        if not isinstance(entry, dict):
-            continue
-        message = entry.get("message") or {}
-        usage = message.get("usage")
-        if not usage:
-            continue
-        model = message.get("model")
-        table = prices.get(model)
-        if table is None:
-            raise UnpricedModel(
-                f"no price for model {model!r}. Add it to [prices] in fleet.toml. "
-                "Pricing it at zero would disable the budget ceiling instead."
-            )
-        for key, field in _COUNTERS.items():
-            total += (usage.get(field) or 0) * table[key] / _PER
-    return total
+    """Delegates to `_claude_cost` over one `_decode_lines` pass.
+
+    Used to carry its own decode loop; that copy and `_claude_cost` were
+    compared over 10 cases (blank/malformed lines, non-dict entries,
+    missing/empty/null usage, all four counters, zero usage, `<synthetic>`,
+    multi-message) with zero divergences, so the loop was retired in favour of
+    this delegation rather than kept as a second copy for `ClaudeProvider.read`
+    to diverge from silently.
+    """
+    return _claude_cost(list(_decode_lines(lines)), prices)
 
 
 def price_transcript(path: Path, prices: dict[str, dict[str, float]]) -> float:
@@ -123,7 +106,7 @@ class Provider(Protocol):
     def read(self, lines: list[str], prices: Prices) -> Reading: ...
 
 
-def _decode_lines(lines: list[str]):
+def _decode_lines(lines: list[str]) -> Iterator[dict]:
     """Strip, parse, and filter raw transcript lines to decoded dict records.
 
     Shared by every provider's `read` so the cost and the model set come from
@@ -147,14 +130,13 @@ def _decode_lines(lines: list[str]):
 
 
 def _claude_cost(entries: list[dict], prices: Prices) -> float:
-    """`price_lines`' pricing rule, over entries `read` has already decoded.
+    """The pricing rule, over entries `read` (or `price_lines`) has decoded.
 
-    Kept apart from `price_lines` rather than calling it, because
-    `price_lines` takes raw lines and decodes them itself; calling it here
-    would silently reintroduce the second JSON pass `Reading`'s docstring
-    says does not happen. `price_lines` stays as the public, independently
-    used entry point (`price_transcript`, `herdr.py`, its own tests) and is
-    untouched.
+    The single copy of the loop `price_lines` used to carry directly: kept as
+    entries-in rather than lines-in so `ClaudeProvider.read` can price and
+    collect the model set from one `_decode_lines` pass instead of decoding
+    twice, and so `price_lines`' own tests exercise this function's
+    `UnpricedModel` raise instead of a second, untested copy of it.
     """
     total = 0.0
     for entry in entries:
@@ -240,6 +222,15 @@ def _codex_last_total(entries: list[dict]) -> dict | None:
 
 
 def _codex_models(entries: list[dict]) -> frozenset[str]:
+    """Every model the session named, unfiltered by token count.
+
+    Unlike `_claude_models`, this cannot narrow to models that "carried
+    nonzero tokens" -- codex reports one cumulative total for the whole
+    session with no per-model attribution, so there is no per-model token
+    count to filter on. `CodexProvider.read`'s single-model refusal is what
+    keeps that sound: any session naming more than one model here is refused
+    before this set's contents matter.
+    """
     out: set[str] = set()
     for entry in entries:
         if entry.get("type") != "turn_context":
@@ -285,13 +276,21 @@ class CodexProvider:
 
         inp = total.get("input_tokens") or 0
         out = total.get("output_tokens") or 0
-        if inp == 0 and out == 0 and (total.get("total_tokens") or 0) > 0:
+        total_tokens = total.get("total_tokens") or 0
+        if inp + out != total_tokens:
+            # The invariant that matters is "the components account for the
+            # total", not "the components are not entirely absent" -- a guard
+            # on the latter misses input_tokens=0, output_tokens=5 against a
+            # total of 39,958, which prices ~40k missing tokens near zero
+            # instead of refusing them. Verified over 1,358 real records:
+            # every one with a breakdown satisfies this sum; the 50 without
+            # one report input=output=0, which this also catches.
             raise UnpricedTranscript(
-                f"codex transcript reports {total.get('total_tokens')} total tokens "
-                "with no input/output breakdown, so it cannot be priced. Measured on "
-                "50 of 80 local sessions, all with an absent session_meta."
-                "thread_source. Pricing the bare total would put a guessed rate "
-                "inside the budget ceiling."
+                f"codex transcript reports total_tokens={total_tokens} but "
+                f"input_tokens={inp} + output_tokens={out} = {inp + out}, so the "
+                "breakdown does not account for the total and cannot be trusted. "
+                "Pricing a breakdown that doesn't sum to the total would put a "
+                "guessed number inside the budget ceiling."
             )
         cached = total.get("cached_input_tokens") or 0
         if cached > inp:
@@ -302,13 +301,23 @@ class CodexProvider:
                 "difference as a negative would read an expensive agent as a credit."
             )
         cache_write = total.get("cache_write_input_tokens") or 0
+        if cache_write:
+            # Nonzero in 0 of 1,358 real records, so there is no observed case
+            # to calibrate against: whether it is included in input_tokens
+            # (like cached reads) or additional to it is unknown, and pricing
+            # it either way would be a guess inside the ceiling. Refuse rather
+            # than guess, same posture as the total-only and cached-exceeding
+            # refusals above.
+            raise UnpricedTranscript(
+                f"codex reports cache_write_input_tokens={cache_write}, never "
+                "nonzero in the sessions this adapter was calibrated against, so "
+                "its relationship to input_tokens is unknown and pricing it "
+                "either way would be a guess inside the budget ceiling."
+            )
         # `input_tokens` INCLUDES the cached ones here, unlike Claude Code's.
         # `reasoning_output_tokens` is a SUBSET of `output_tokens` and is
         # deliberately not added.
         cost = (
-            (inp - cached) * table["input"]
-            + out * table["output"]
-            + cached * table["cache_read"]
-            + cache_write * table["cache_write"]
+            (inp - cached) * table["input"] + out * table["output"] + cached * table["cache_read"]
         ) / _PER
         return Reading(cost_usd=cost, models=models)

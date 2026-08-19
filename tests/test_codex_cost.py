@@ -121,3 +121,32 @@ def test_a_transcript_with_no_usage_yet_is_free_and_nameless():
     reading = PROVIDER.read([_model()], PRICES)
     assert reading.cost_usd == 0.0
     assert reading.models == frozenset()
+
+
+def test_a_total_inconsistent_with_its_components_refuses():
+    """A partial breakdown that does not sum to the reported total is refused,
+    not priced on whatever fragment is present. Catches a guard that only
+    fires when BOTH components are exactly zero: input_tokens=0,
+    output_tokens=5 against total_tokens=39_958 would price ~40k missing
+    tokens at effectively zero instead of refusing them."""
+    lines = [
+        _model(),
+        _tokens(input_tokens=0, output_tokens=5, total_tokens=39_958),
+    ]
+    with pytest.raises(UnpricedTranscript):
+        PROVIDER.read(lines, PRICES)
+
+
+def test_nonzero_cache_write_refuses():
+    """cache_write_input_tokens is nonzero in 0 of 1,358 real records, so
+    whether it sits inside input_tokens (like cached reads) or beside it is
+    uncalibratable. Catches pricing it via either guess -- both put a number
+    with no observed basis inside the spending ceiling -- and catches
+    silently dropping the term, which would under-bill any session where it
+    does turn out to be additional to input_tokens."""
+    lines = [
+        _model(),
+        _tokens(input_tokens=1_000, cache_write_input_tokens=500, total_tokens=1_000),
+    ]
+    with pytest.raises(UnpricedTranscript):
+        PROVIDER.read(lines, PRICES)
