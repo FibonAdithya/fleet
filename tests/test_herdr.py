@@ -8,7 +8,7 @@ import pytest
 
 from fleet.cost import UnpricedModel
 from fleet.herdr import STATUS, FakeHerdr, HerdrError, error_code, parse_snapshot, task_of
-from fleet.model import AgentState
+from fleet.model import AgentSpec, AgentState
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/herdr/snapshot-fleet.json"
 ROOT = Path("/home/u/.fleet/worktrees")
@@ -336,7 +336,21 @@ def _captured_replies():
     }
 
 
-def _real(tmp_path, run=None, worktree_root=None):
+#: What every pre-existing test in this file assumes `RealHerdr` does when
+#: nobody has told it otherwise: one agent kind, launched with the historical
+#: default args, on the one role these fixtures ever start. `_real`'s
+#: `agents`/`routing` defaults exist ONLY to keep those tests' behaviour
+#: unchanged now that `RealHerdr` no longer hardcodes `agent_kind`/`agent_args`
+#: itself -- a test that cares about routing passes its own.
+_DEFAULT_AGENTS = {
+    "claude": AgentSpec(
+        kind="claude", model_flag="--model", args=("--permission-mode", "acceptEdits")
+    ),
+}
+_DEFAULT_ROUTING = {"implementer": ("claude", "claude-opus-5")}
+
+
+def _real(tmp_path, run=None, worktree_root=None, agents=None, routing=None):
     from fleet.herdr import RealHerdr
 
     herdr = RealHerdr(
@@ -344,6 +358,8 @@ def _real(tmp_path, run=None, worktree_root=None):
         projects_dir=tmp_path / "projects",
         prices={},
         repo_root=tmp_path / "repo",
+        agents=_DEFAULT_AGENTS if agents is None else agents,
+        routing=_DEFAULT_ROUTING if routing is None else routing,
     )
     herdr._run = run if run is not None else RecordingRun(_captured_replies())
     return herdr
@@ -877,13 +893,20 @@ def test_real_start_agent_grants_permissions_up_front(tmp_path):
 def test_real_start_agent_passes_agent_args_after_a_separator(tmp_path):
     """`herdr agent start <NAME> --kind K --pane P [-- [AGENT_ARG]...]`: without
     the `--`, `--permission-mode` is parsed as one of herdr's own options and
-    the start fails instead of reaching claude."""
+    the start fails instead of reaching claude.
+
+    Asserts a *prefix* of the post-separator args rather than the whole tuple:
+    since task 7, the model always lands after `spec.args` on that same side of
+    `--` (see `test_a_role_is_started_on_its_declared_agent_and_model`), so a
+    tuple that ended exactly at `acceptEdits` would now be wrong by
+    construction. The separator and ordering this test exists to pin are
+    unchanged."""
     run = RecordingRun(_captured_replies())
     herdr = _real(tmp_path, run)
     herdr.create_worktree(task=1, slug="lid", base="integration")
     herdr.start_agent(task=1, role="implementer", prompt="x")
     start = run.herdr_calls("herdr", "agent", "start")[0]
-    assert start[start.index("--") + 1 :] == ("--permission-mode", "acceptEdits")
+    assert start[start.index("--") + 1 :][:2] == ("--permission-mode", "acceptEdits")
     assert start[3] == "fleet-1"
     assert start[start.index("--kind") + 1] == "claude"
 
@@ -1218,3 +1241,36 @@ def test_a_timed_out_herdr_call_takes_the_cautious_path(tmp_path, monkeypatch):
         herdr._subprocess("sh", "-c", "sleep 30")
     assert caught.value.code is None
     assert caught.value.code not in AGENT_ABSENT_CODES
+
+
+# -- launching each role on its declared agent and model ---------------------
+
+
+def test_a_role_is_started_on_its_declared_agent_and_model(tmp_path):
+    """Catches a launcher that keeps one global agent_kind, which would run
+    every role on claude no matter what policy declares."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(
+        tmp_path,
+        run,
+        agents={
+            "codex": AgentSpec(kind="codex", model_flag="--model", args=("--full-auto",)),
+        },
+        routing={"implementer": ("codex", "gpt-5.6-sol")},
+    )
+    herdr.create_worktree(task=7, slug="lid", base="integration")
+    herdr.start_agent(7, "implementer", "do the thing")
+    start = run.herdr_calls("herdr", "agent", "start")[0]
+    assert "--kind" in start and start[start.index("--kind") + 1] == "codex"
+    assert "--model" in start and start[start.index("--model") + 1] == "gpt-5.6-sol"
+    assert "--full-auto" in start
+
+
+def test_a_role_with_no_declared_agent_raises_before_launching(tmp_path):
+    """Catches falling back to a default kind, which would start an agent whose
+    transcript the fleet cannot attribute to a declared model."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run, agents={}, routing={})
+    with pytest.raises(HerdrError, match="reviewer"):
+        herdr.start_agent(7, "reviewer", "do the thing")
+    assert not run.herdr_calls("herdr", "agent", "start")

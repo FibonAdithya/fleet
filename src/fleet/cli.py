@@ -378,6 +378,8 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
         projects_dir=Path.home() / ".claude" / "projects",
         prices=cfg.prices,
         repo_root=cfg.root,
+        agents=cfg.agents,
+        routing={role: (kind, model) for role, kind, model in policy.agents},
     )
     owner = _gh_login()
     executor = HerdrExecutor(herdr, gh, cfg, owner=owner)

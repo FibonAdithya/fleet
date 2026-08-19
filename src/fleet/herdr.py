@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Protocol
 
 from fleet.cost import UnpricedModel, price_transcript, transcript_path
-from fleet.model import AgentState
+from fleet.model import AgentSpec, AgentState
 
 # herdr's five statuses to AgentState's three.
 #
@@ -373,15 +373,29 @@ class RealHerdr:
         projects_dir: Path,
         prices: dict[str, dict[str, float]],
         repo_root: Path,
-        agent_kind: str = "claude",
-        agent_args: tuple[str, ...] = ("--permission-mode", "acceptEdits"),
+        agents: dict[str, AgentSpec] | None = None,
+        routing: dict[str, tuple[str, str]] | None = None,
     ) -> None:
         self.root = Path(worktree_root)
         self.projects_dir = Path(projects_dir)
         self.prices = prices
         self.repo_root = Path(repo_root)
-        self.agent_kind = agent_kind
-        self.agent_args = tuple(agent_args)
+        #: Launch mechanics per agent kind -- [agents.<kind>] from fleet.toml,
+        #: mechanics only (Task 4). Empty by default so a herdr built for
+        #: anything other than launching (worktree bookkeeping, cost reads)
+        #: needs neither this nor `routing` populated.
+        #:
+        #: Named `agent_specs`, not `agents`: this class already has an
+        #: `agents()` method (the snapshot poll), and `self.agents = {...}`
+        #: would shadow it with a plain dict -- every caller of
+        #: `herdr.agents()` would then get `TypeError: 'dict' object is not
+        #: callable` instead of the fleet's live agent states.
+        self.agent_specs = dict(agents or {})
+        #: role -> (agent kind, model), from the policy layer's Role|Agent|Model
+        #: table (Tasks 5-6). Looked up fresh per `start_agent` call rather than
+        #: cached on self at construction, because it is the thing that decides
+        #: which CLI a role's transcript can be attributed to.
+        self.routing = dict(routing or {})
         self.worktrees: dict[int, Path] = {}
         self.workspaces: dict[int, str] = {}
         self.panes: dict[int, str] = {}
@@ -682,6 +696,26 @@ class RealHerdr:
     # -- agents -------------------------------------------------------------
 
     def start_agent(self, task: int, role: str, prompt: str) -> None:
+        # Checked first, before any herdr call at all: a role the policy layer
+        # never routed has no kind and no model to attribute a transcript to.
+        # Starting it anyway -- on some default kind -- would produce a running
+        # agent that the declared-vs-observed check a later task adds cannot
+        # tell apart from one nobody meant to start.
+        routed = self.routing.get(role)
+        if routed is None:
+            raise HerdrError(
+                f"role {role!r} has no declared agent; the policy's role/agent "
+                "table must name one. Starting it on a default kind would "
+                "produce a transcript the fleet cannot attribute to a "
+                "declared model."
+            )
+        kind, model = routed
+        spec = self.agent_specs.get(kind)
+        if spec is None:
+            raise HerdrError(
+                f"role {role!r} is routed to agent kind {kind!r}, but "
+                f"fleet.toml has no [agents.{kind}] launch config for it."
+            )
         pane = self.panes.get(task) or self._pane_of(task)
         # Exported into the pane BEFORE the agent starts: the CLI reads them at
         # the moment a packet is written, and an unset FLEET_AGENT attributes
@@ -707,15 +741,19 @@ class RealHerdr:
             "start",
             f"fleet-{task}",
             "--kind",
-            self.agent_kind,
+            kind,
             "--pane",
             pane,
         ]
-        if self.agent_args:
-            # The separator is not decoration: without it herdr parses
-            # `--permission-mode` as one of its own options and the start fails
-            # before claude is ever launched.
-            start += ["--", *self.agent_args]
+        # The separator is not decoration: without it herdr parses
+        # `--permission-mode` as one of its own options and the start fails
+        # before the CLI is ever launched. The model is appended unconditionally
+        # as `[model_flag, model]`, on the CLI side of that separator, rather
+        # than interpolated into `spec.args` -- a placeholder inside args is
+        # something a config author can forget, and forgetting it would run the
+        # operator's default model with no error at all.
+        extra = [*spec.args, spec.model_flag, model]
+        start += ["--", *extra]
         self._run(*start)
         # After the start, never before: `agent start` needs a pane sitting at
         # an interactive shell prompt, and `agent prompt` needs an agent herdr
