@@ -173,6 +173,32 @@ the repo root would show up as untracked in `git status`).
 `max_rebases` exactly as an implementer's attempts are capped by
 `max_attempts`, and a reviewer's fix passes by `max_fix_passes`.
 
+## Declaring agents and models
+
+Two config surfaces are required since the multi-provider branch, and both
+now fail loudly at startup — `policy.load`, which runs on `fleet plan` as
+well as `fleet run` — rather than passing quietly and failing mid-run:
+
+- **`fleet.toml`**: one `[agents.<kind>]` table per agent CLI kind any role
+  is routed to, naming `model_flag` (how that CLI spells its model flag —
+  `--model` for `claude`, `-m`/`--model` for `codex`) and, optionally,
+  `args` (fixed launch flags, e.g. `--permission-mode acceptEdits` for
+  `claude`, `--full-auto` for `codex`). A role routed to a kind with no
+  matching `[agents.<kind>]` table used to pass startup and then fail
+  identically at every dispatch of that role — `HerdrExecutor._start` raises,
+  `_begin` swallows it per task, and the whole backlog walks to NEEDS_HUMAN
+  overnight having launched nothing.
+- **The target repo's `task-classes.md`**: a `| Role | Agent | Model |`
+  table naming, for every role any task class routes to, which CLI it runs
+  on and which model. A role missing from this table used to pass startup
+  too, and is worse than a missing `[agents.<kind>]`: besides failing at
+  dispatch the same way, `Policy.agent_for(role)` returns `None` for it,
+  which silently disables the declared-vs-observed model mismatch check for
+  that role.
+
+Get either wrong and `fleet plan` or `fleet run` refuses before dispatching
+anything, naming the role and the missing table or config entry.
+
 ## The codex gate
 
 Before routing any role to `codex` in a graded run, launch one codex agent
@@ -189,6 +215,39 @@ fixtures/cost/codex-breakdown.jsonl are real captured examples of both
 shapes, and locally 50 of 80 sessions were total-only against 30 with
 breakdowns, on the same CLI version and the same day — so neither the date
 nor `codex --version` tells you which one a given launch will produce.
+
+**Subagent threads are unattributed spend.** codex writes each spawned thread
+to its own rollout file, named by the *child* thread's id, not by the session
+id herdr reports for the parent. Measured across 81 local rollouts: 64 are
+top-level (filename uuid == `payload.session_id`), 17 are subagent threads
+(filename uuid is the child id; `session_id` inside the file still names the
+parent). On the one local session with children, the parent's own final
+`total_token_usage.total_tokens` was 13,435,746 while its 14 children totalled
+**37,366,303** — 74% of that session's real spend, in files
+`CodexProvider.transcript()` cannot resolve from the parent's session id,
+priced at $0.00 and never added to the `unpriced` collector that arms the
+drain. Inherited from the Claude path (subagents get their own transcript
+files there too), and out of scope for this branch to fix — but before a
+`--full-auto` codex agent runs unattended, establish whether it spawns
+subagent threads at all. If it does, the ceiling is short by whatever they
+spend, and nothing says so.
+
+**The codex session id herdr reports is environment state, not repo state.**
+It reaches herdr via `~/.codex/herdr-agent-state.sh`, a `SessionStart` hook on
+the run box that calls `pane.report_agent_session` — nothing in this repo can
+confirm it is installed. If it is missing, every codex agent's transcript is
+unresolvable, every codex agent reads as free with an empty `unpriced`
+collector, and the drain this whole design relies on never arms. Confirm the
+hook is present before a graded run, the same way the breakdown shape above
+is confirmed.
+
+**One more asymmetry worth knowing at 2am:** a codex transcript naming two
+models raises `UnpricedTranscript` and drains the whole fleet, while the same
+situation on the Claude path records `MULTIPLE_MODELS` and escalates just
+that one task. Both are correct — codex's cumulative totals genuinely cannot
+be split between two rates, where Claude Code's per-message totals can — but
+a codex model substitution costs the whole night's remaining dispatches where
+the equivalent Claude one costs a single task.
 
 ## Running the scenarios
 

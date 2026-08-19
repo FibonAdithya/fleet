@@ -249,6 +249,34 @@ lost either way.
 
 This is cheap to check and must not be assumed.
 
+**Second gate: subagent threads are unattributed spend.** codex writes each
+spawned thread to its own rollout file, named by the *child* thread's id, not
+by the session id herdr reports for the parent. Measured across 81 local
+rollouts: 64 are top-level sessions (filename uuid == `payload.session_id`),
+17 are subagent threads whose filename uuid is the child thread's id while
+`session_id` inside that file still names the parent. On the one local
+session with children, the parent's own final `total_token_usage
+.total_tokens` was 13,435,746 while its 14 children totalled **37,366,303** —
+74% of that session's real spend, living in files `CodexProvider.transcript()`
+has no session id to resolve, priced at $0.00 and never added to the
+`unpriced` collector that arms the drain. This is inherited, not introduced by
+this branch — the Claude path has the same shape, subagents get their own
+transcript files there too — and fixing it is out of scope for this branch.
+But it is a silent under-billing path, which is the exact failure class this
+design exists to prevent, so: before routing a role to a `--full-auto` codex
+agent (the flag that spawns subagents), establish whether it does spawn
+subagent threads. If it does, the ceiling is short by whatever they spend,
+with nothing to notice.
+
+**Third gate: the codex session id is environment state, not repo state.** It
+reaches herdr via `~/.codex/herdr-agent-state.sh`, a `SessionStart` hook that
+calls `pane.report_agent_session` — a script that lives on the run box, not in
+this repo, and that nothing in `fleet.toml` or the policy layer can verify is
+installed. If it is absent when a graded run starts, every codex agent's
+`agent_session` is empty, `CodexProvider.transcript` resolves nothing,
+`RealHerdr.agents` reads every codex agent as free with an empty `unpriced`
+collector, and the drain this whole design relies on never arms.
+
 ## 7. Testing
 
 Fixtures are **captured from real sessions**, not invented, alongside the

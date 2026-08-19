@@ -76,17 +76,21 @@ def _prices(raw: dict) -> dict[str, dict[str, float]]:
     hole as an unpriced model: the missing rate prices those tokens at nothing,
     and cache reads are most of what an agent spends.
 
-    An absent [prices] table is an empty mapping, not an error *here*. `fleet
-    plan` starts no agents and needs no prices, and requiring the table would
-    refuse every fleet.toml written before it existed, on a key only the daemon
-    reads.
+    An absent [prices] table is an empty mapping, not an error *here* -- this
+    function only shapes whatever raw TOML gave it. It is not permission to run
+    unpriced, though: `policy.load`'s `_validate_agents` requires every model
+    the `Role | Agent | Model` table declares to have a row in this mapping,
+    and raises `PolicyError` at load time if one is missing. That load runs on
+    `fleet plan` as well as the daemon, so a `fleet.toml` with no [prices] --
+    or one missing a rate for a declared model -- now fails at startup, before
+    either command does anything, rather than being read here as merely empty.
 
-    It is not permission to run unpriced. An empty mapping prices nothing, so
-    `cost.price_transcript` raises `UnpricedModel` for the first agent whose
-    transcript names any model at all, `RealHerdr.agents` records that in
-    `unpriced()`, and `Daemon.tick` turns a non-empty `unpriced()` into a
-    Drain. The refusal is the daemon's, at the moment it would otherwise spend,
-    and it is loud there rather than here.
+    `Provider.read` is the second line behind that gate, for a model this
+    function never saw at all: an agent's transcript naming a model no policy
+    declared. That path still runs during a live tick and still refuses rather
+    than pricing at zero, but it is a backstop for an undeclared model, not the
+    mechanism for a declared one with a missing rate -- `_validate_agents`
+    catches that earlier, at startup.
     """
     out: dict[str, dict[str, float]] = {}
     for model, table in raw.items():
