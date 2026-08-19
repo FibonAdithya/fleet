@@ -150,3 +150,40 @@ def test_nonzero_cache_write_refuses():
     ]
     with pytest.raises(UnpricedTranscript):
         PROVIDER.read(lines, PRICES)
+
+
+def test_codex_transcript_is_found_under_the_date_nested_layout(tmp_path):
+    """codex writes `sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`, not
+    `<uuid>.jsonl`. Catches reusing the Claude glob, which finds nothing and
+    silently reads every codex agent as free."""
+    sid = "019ff017-820a-73c1-aa2c-748d025ad0b5"
+    nested = tmp_path / "2026" / "08" / "11"
+    nested.mkdir(parents=True)
+    target = nested / f"rollout-2026-08-11T10-11-40-{sid}.jsonl"
+    target.write_text("{}\n")
+    assert CodexProvider(sessions_dir=tmp_path).transcript(sid) == target
+
+
+def test_a_missing_codex_transcript_is_none_not_a_crash(tmp_path):
+    """Ordinary in the seconds after dispatch."""
+    assert CodexProvider(sessions_dir=tmp_path).transcript("no-such-session") is None
+
+
+def test_the_registry_exposes_both_providers_by_herdr_agent_kind():
+    """The keys must match the `agent` field in herdr's snapshot, which is what
+    parse_snapshot dispatches on. Catches a registry keyed by display name."""
+    from fleet.cost import build_providers
+
+    providers = build_providers(Path("/home/nobody"))
+    assert set(providers) == {"claude", "codex"}
+    assert providers["claude"].name == "claude"
+    assert providers["codex"].name == "codex"
+
+
+def test_provider_kinds_matches_build_providers_keys():
+    """The constant and registry cannot drift apart without breaking validation.
+    Catches editing one without updating the other."""
+    from fleet.cost import PROVIDER_KINDS, build_providers
+
+    providers = build_providers(Path("/home/nobody"))
+    assert set(providers) == PROVIDER_KINDS

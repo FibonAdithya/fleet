@@ -249,7 +249,14 @@ class CodexProvider:
     name: str = "codex"
 
     def transcript(self, session_id: str) -> Path | None:
-        raise NotImplementedError  # Task 3
+        """`<sessions>/YYYY/MM/DD/rollout-<timestamp>-<session-id>.jsonl`, or None.
+
+        The session id is a suffix of the filename, not the whole stem, and the
+        file is date-nested rather than flat -- neither is true of Claude Code's
+        layout, so the glob cannot be shared.
+        """
+        hits = sorted(Path(self.sessions_dir).glob(f"**/*{session_id}.jsonl"))
+        return hits[0] if hits else None
 
     def read(self, lines: list[str], prices: Prices) -> Reading:
         entries = list(_decode_lines(lines))
@@ -321,3 +328,23 @@ class CodexProvider:
             (inp - cached) * table["input"] + out * table["output"] + cached * table["cache_read"]
         ) / _PER
         return Reading(cost_usd=cost, models=models)
+
+
+#: The agent kinds that have a transcript reader. `build_providers` returns
+#: exactly these keys; validation compares against the names alone so it needs
+#: no filesystem and no home directory.
+PROVIDER_KINDS = frozenset({"claude", "codex"})
+
+
+def build_providers(home: Path) -> dict[str, Provider]:
+    """Agent kind -> Provider, keyed by herdr's `agent` field.
+
+    Keyed by what the snapshot actually says, not by a display name:
+    `parse_snapshot` dispatches on `agent["agent"]`, and a registry keyed on
+    anything else would miss every agent and read the fleet as free.
+    """
+    home = Path(home)
+    return {
+        "claude": ClaudeProvider(projects_dir=home / ".claude" / "projects"),
+        "codex": CodexProvider(sessions_dir=home / ".codex" / "sessions"),
+    }
