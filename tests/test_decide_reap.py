@@ -247,14 +247,14 @@ def test_a_reaped_agents_final_cost_reaches_the_running_total():
 
 
 def test_a_retired_agent_s_cost_is_final():
-    """Cost is finalised by _REAPING membership. Left out, a whole stage's spend
+    """Cost is finalised by REAPING membership. Left out, a whole stage's spend
     -- every implementer that ever handed off -- is silently never counted, and
     the fleet ceiling is short by that much for the entire night."""
-    from fleet.decide import _final_cost
+    from fleet.decide import charge_of
     from fleet.model import Retire
 
     agents = [AgentState(task=5, status="done", change_seq=9, cost_usd=1.25)]
-    assert _final_cost([Retire(task=5)], agents) == 1.25
+    assert charge_of([Retire(task=5)], agents, {}) == {5: 1.25}
 
 
 def test_reaping_a_task_drops_the_observation_it_no_longer_describes():
@@ -326,7 +326,7 @@ def test_state_is_derived_and_carries_no_authority():
     """FleetState holds observations and spend, nothing else. Anything that
     looks like task state or ownership belongs in the ledger."""
     _, state = decide(FleetState(), [claimed()], POLICY, [], T0)
-    assert set(vars(state)) == {"seen", "spent_usd", "dispatched"}
+    assert set(vars(state)) == {"seen", "spent_usd", "dispatched", "charged"}
 
 
 def test_a_finished_agent_on_a_reviewing_task_is_retired():
@@ -786,3 +786,85 @@ def test_closing_a_done_row_charges_its_agent_once():
     agents = [AgentState(task=5, status="done", change_seq=3, cost_usd=1.75)]
     _, state = decide(FleetState(), [done], POLICY, agents, T0)
     assert state.spent_usd == 1.75
+
+
+# ------------------------------------------------- cost is charged once, ever
+
+
+def _ready(number=5, **kw):
+    return Task(
+        number=number, title="t", state="ready", area="eval", klass="patch", auto_ok=True, **kw
+    )
+
+
+def test_an_agent_reaped_on_every_tick_is_charged_once():
+    """The stubborn-stop loop, which is not hypothetical.
+
+    When `stop_agent` fails for any reason outside `AGENT_ABSENT_CODES` the
+    executor deliberately leaves the agent alive -- it may still be running --
+    and the orphan pass re-emits `Retire` for it on the next tick, and the next.
+    `_final_cost` summed `AgentState.cost_usd`, which is CUMULATIVE, with no
+    memory across ticks: a $2 agent added $2 to `spent_usd` every tick and
+    drained a $25 fleet in thirteen. The run log carried the same inflation into
+    any restart, so the fleet came back already drained on money it never spent.
+    """
+    agents = [AgentState(task=5, status="working", change_seq=3, cost_usd=2.0)]
+    state = FleetState()
+    for minute in range(6):
+        intents, state = decide(state, [_ready()], POLICY, agents, T0 + timedelta(minutes=minute))
+        assert only(intents, Retire) == [Retire(task=5)]
+    assert state.spent_usd == 2.0
+
+
+def test_a_reaped_agent_that_keeps_spending_is_charged_the_increment():
+    """Once is not the same as never again. The stop failed and the agent is
+    still running, so it is still spending -- and those new dollars are real.
+    Charging the delta is what makes "counted once" a statement about each
+    dollar rather than about the agent."""
+    state = FleetState()
+    intents, state = decide(
+        state,
+        [_ready()],
+        POLICY,
+        [AgentState(task=5, status="working", change_seq=3, cost_usd=2.0)],
+        T0,
+    )
+    assert state.spent_usd == 2.0
+    _, state = decide(
+        state,
+        [_ready()],
+        POLICY,
+        [AgentState(task=5, status="working", change_seq=4, cost_usd=3.25)],
+        T0 + timedelta(minutes=1),
+    )
+    assert state.spent_usd == 3.25
+
+
+def test_a_replacement_agent_on_the_same_task_is_charged_in_full():
+    """The memory is per AGENT, keyed by task, and a Dispatch or Continue starts
+    a new one -- new worktree, new session, `cost_usd` back at zero. Keeping the
+    old agent's total against the task would net the replacement's whole spend
+    off to nothing, which is the mirror of the defect above and just as silent.
+    """
+    policy = dataclasses.replace(POLICY, max_attempts=5)
+    state = FleetState()
+    _, state = decide(
+        state,
+        [claimed(number=5)],
+        policy,
+        [AgentState(task=5, status="dirty", change_seq=1, cost_usd=2.0)],
+        T0,
+    )
+    assert state.spent_usd == 2.0
+    # The Release moved #5 back to READY; the next tick dispatches it again.
+    intents, state = decide(state, [_ready()], policy, [], T0 + timedelta(minutes=1))
+    assert only(intents, Dispatch)
+    # A second attempt, a second agent, its own dollars.
+    _, state = decide(
+        state,
+        [claimed(number=5, attempts=2)],
+        policy,
+        [AgentState(task=5, status="dirty", change_seq=1, cost_usd=1.5)],
+        T0 + timedelta(minutes=2),
+    )
+    assert state.spent_usd == 3.5

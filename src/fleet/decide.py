@@ -590,12 +590,45 @@ def _stopped(intents: list[Intent]) -> set[int]:
     return {i.task for i in intents if isinstance(i, REAPING)}
 
 
-def _final_cost(intents: list[Intent], agents: list[AgentState]) -> float:
-    """Only a reaped agent's cost is final, so only a reaped agent's cost lands
-    in the running total. `AgentState.cost_usd` is cumulative per agent: adding
-    every live agent every tick re-adds the same dollars, and six agents at
-    $0.50 drain a $25 fleet in seven ticks of a night that spent three."""
-    return sum(a.cost_usd for a in agents if a.task in _stopped(intents))
+def charge_of(
+    intents: list[Intent], agents: list[AgentState], already: dict[int, float]
+) -> dict[int, float]:
+    """Dollars this tick adds, per task. One definition, two readers.
+
+    Only a reaped agent's cost is final, so only a reaped agent's cost lands in
+    the running total. `AgentState.cost_usd` is cumulative per agent, so adding
+    every live agent every tick re-adds the same dollars -- six agents at $0.50
+    drain a $25 fleet in seven ticks of a night that spent three.
+
+    Once per tick was not enough, and that was the hole. A reaping intent
+    REPEATS: when `stop_agent` fails for a reason outside `AGENT_ABSENT_CODES`
+    the executor deliberately leaves the agent alive, and the orphan pass
+    re-emits `Retire` on the next tick, and the next. `Daemon._log` deduped
+    within a tick; nothing deduped across them, so a $2 agent added $2 every
+    tick and the run log carried the inflation into any restart.
+
+    `already` is the high-water mark per task -- `FleetState.charged` -- so what
+    is added is the INCREMENT. An agent whose stop failed is still running and
+    still spending, and those dollars are real; only the ones already counted
+    are not. A negative delta (a replacement agent whose cumulative cost is
+    below the last one's) contributes nothing rather than a refund; the caller
+    drops the mark when it starts a new agent, so that case is a snapshot
+    anomaly, not a new attempt.
+
+    Public for the same reason `REAPING` is: `Daemon._log` writes the number a
+    restart reads back, and a second copy of this rule in that file is how the
+    run log and `spent_usd` come to disagree.
+    """
+    by_task = {a.task: a for a in agents}
+    out: dict[int, float] = {}
+    for task in _stopped(intents):
+        agent = by_task.get(task)
+        if agent is None:
+            continue
+        delta = agent.cost_usd - already.get(task, 0.0)
+        if delta > 0:
+            out[task] = delta
+    return out
 
 
 def decide(
@@ -640,9 +673,22 @@ def decide(
     rows = {t.number: t for t in ledger}
     for task in continued:
         carried[task] = rows[task].state
+    # The high-water mark per task, advanced by exactly what was charged. Then
+    # dropped for every task this tick starts a new agent on -- a Dispatch or a
+    # Continue means a new worktree and a new session, so that agent's
+    # `cost_usd` restarts at zero and the previous mark would swallow its whole
+    # spend. Popped after the charge rather than before, because the two cannot
+    # collide: `_dispatch` treats any task with a live agent as busy, so a task
+    # reaped this tick is never also started by it.
+    charged = dict(prev.charged)
+    charges = charge_of(intents, agents, charged)
+    for task, amount in charges.items():
+        charged[task] = charged.get(task, 0.0) + amount
+    started = {i.task for i in intents if isinstance(i, (Dispatch, Continue))}
     state = FleetState(
         seen=tuple(sorted((t, o) for t, o in observations.items() if t not in stopped)),
-        spent_usd=prev.spent_usd + _final_cost(intents, agents),
+        spent_usd=prev.spent_usd + sum(charges.values()),
         dispatched=tuple(sorted(carried.items())),
+        charged=tuple(sorted((t, c) for t, c in charged.items() if t not in started)),
     )
     return intents, state

@@ -696,3 +696,28 @@ def test_a_closed_row_produces_no_further_intents(cfg, tmp_path):
     for index in range(4):
         daemon.tick(T0 + timedelta(minutes=index))
     assert _kinds(tmp_path) == ["Close"]
+
+
+def test_an_agent_whose_stop_keeps_failing_is_charged_once(cfg, tmp_path):
+    """The reachable shape of the leak, end to end through the executor.
+
+    `_StubbornHerdr` fails every stop with a code outside `AGENT_ABSENT_CODES`,
+    so `HerdrExecutor._stop_agent` returns False and deliberately leaves the
+    agent alive -- it may still be running. The agent therefore stays in every
+    snapshot and the orphan pass re-emits `Retire` for it on every tick.
+    `AgentState.cost_usd` is cumulative, and `Daemon._log` deduped only within a
+    tick: a $2 agent added $2 to `spent_usd` and to the run log every tick, so
+    it drained a $25 fleet in thirteen and a restart resumed on the inflated
+    figure.
+    """
+    herdr = _StubbornHerdr()
+    daemon, gh, herdr = _daemon(cfg, tmp_path, herdr=herdr)
+    number = gh.create_issue("Fix LID", "b", READY)
+    herdr.add_agent(task=number, status="working", change_seq=3, cost_usd=2.0)
+    for index in range(6):
+        daemon.tick(T0 + timedelta(minutes=index))
+    assert _kinds(tmp_path).count("Retire") == 6, "the loop this test exists for did not happen"
+    assert daemon.state.spent_usd == pytest.approx(2.0)
+    # The log and the live figure are the same number, or the restart resumes on
+    # a different budget from the one it stopped with.
+    assert spent_from_log(tmp_path / "run.jsonl", run_id="r1") == pytest.approx(2.0)

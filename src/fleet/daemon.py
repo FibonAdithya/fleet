@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from fleet import runlog as runlog_module
 from fleet.config import FleetConfig
-from fleet.decide import REAPING, decide
+from fleet.decide import REAPING, charge_of, decide
 from fleet.expand import expand
 from fleet.gh import GhClient
 from fleet.model import (
@@ -202,23 +202,28 @@ class Daemon:
     def _log(self, intents: list[Intent], agents: list[AgentState], now: datetime) -> None:
         """Every intent, with the cost it finalised.
 
-        Charged per TASK, not per intent, exactly as `decide._final_cost` does:
-        it sums over `_stopped(intents)`, a set. One task can draw two REAPING
-        intents in one tick -- a `spec` row at REVIEW with a finished agent gets
+        The figure comes from `decide.charge_of`, the same function `decide`
+        folds into `spent_usd`, and it is called with the PREVIOUS state's
+        `charged` because `self.state` has not been advanced yet. One definition
+        with two readers, not two definitions: the number this file writes is
+        the number a restart reads back, so a rule copied here and edited there
+        makes the run log and the live ceiling disagree about the same night.
+
+        Two dedups, and both are needed. Within a tick, one task can draw two
+        REAPING intents -- a `spec` row at REVIEW with a finished agent gets
         Retire from `_reap` and Escalate(unroutable_stage) from `_unroutable` --
-        and a log that charged both would record twice what the fleet spent.
-        The number this file writes is the number a restart reads back, so a
-        double charge there drains a fleet that spent half its budget.
+        and `charged` below attributes the charge to the first of them so the
+        log records one spend, not two. Across ticks, `charge_of` itself only
+        returns the increment, so an agent whose stop keeps failing and whose
+        Retire is re-emitted every tick is not charged its whole cumulative
+        total on each one.
         """
-        cost_of = {a.task: a.cost_usd for a in agents}
+        charges = charge_of(intents, agents, dict(self.state.charged))
         charged: set[int] = set()
         for intent in intents:
             cost = 0.0
             if isinstance(intent, REAPING) and intent.task not in charged:
-                # Only a reaped agent's cost is final. `AgentState.cost_usd` is
-                # cumulative, so charging a live agent re-adds the same dollars
-                # every tick.
-                cost = cost_of.get(intent.task, 0.0)
+                cost = charges.get(intent.task, 0.0)
                 charged.add(intent.task)
             self.runlog.append(
                 tick=self.tick_number, at=now, intent=intent, outcome="applied", cost_usd=cost

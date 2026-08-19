@@ -85,6 +85,23 @@ class FleetState:
     # bounded; a durable counter would make FleetState authoritative, which
     # parent §9 forbids.
     dispatched: tuple[tuple[int, str], ...] = ()
+    # task -> the cumulative `AgentState.cost_usd` already added to spent_usd
+    # for the agent currently on that task. `cost_usd` is cumulative per agent
+    # and a reaping intent can repeat: when a stop fails for a reason outside
+    # AGENT_ABSENT_CODES the executor leaves the agent alive and the orphan pass
+    # re-emits Retire every tick, so without this the same $2 was charged every
+    # tick and drained a $25 fleet in thirteen -- with the run log carrying the
+    # inflation into any restart.
+    #
+    # A high-water mark rather than a flag, so an agent that is still running
+    # and still spending is charged the increment. Dropped when a Dispatch or
+    # Continue starts a NEW agent on the task: that agent's cost_usd restarts at
+    # zero, and keeping the old mark would net its whole spend off to nothing.
+    #
+    # Disposable like the two above. After a restart it is empty, so an agent
+    # caught mid-stubborn-stop can be charged once more -- bounded by one
+    # duplicate per restart per stuck agent, against a per-tick leak.
+    charged: tuple[tuple[int, float], ...] = ()
 
     def observation(self, task: int) -> Observation | None:
         return dict(self.seen).get(task)
