@@ -21,6 +21,23 @@ Raw output of `herdr api snapshot`, unmodified, captured on this box with a live
   parser reads `agent.cwd` directly rather than going through workspaces at
   all, so it never hits that key.
 
+## The positive path is covered by a derived case, not a captured one
+
+None of this capture's seven agent records has a `cwd` under a fleet worktree
+-- all seven are the real, independently-running sessions listed above, none
+of them fleet's. `test_the_captured_snapshot_parses_to_no_fleet_agents`
+(`tests/test_herdr.py`) asserts exactly that: `parse_snapshot` on this file
+returns `[]`, and that is the *correct* result, not an unexercised one.
+
+Task-number extraction's positive path is covered separately, by
+`test_a_captured_agent_record_derived_to_a_fleet_path_parses_to_its_task`: it
+deep-copies one genuine agent record out of this file and rewrites only its
+`cwd` to a fleet worktree path, leaving `agent_status`, `state_change_seq`,
+`agent_session`, and `foreground_cwd` exactly as captured. Labelled here as
+well as in the test so nobody mistakes this for captured coverage of a live
+fleet agent -- it is a derived case with real field shape, not a second real
+capture, and it does not substitute for the still-open gate item below.
+
 ## What was NOT achieved, and why
 
 The task called for a live agent running *inside* the `fleet/1-capture`
