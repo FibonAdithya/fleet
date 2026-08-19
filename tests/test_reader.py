@@ -95,10 +95,30 @@ def test_packet_states_is_exactly_the_four_states_the_core_reads_packets_in():
     assert PACKET_STATES == ("claimed", "review", "integrating", "blocked")
 
 
-def test_the_captured_issue_parses_into_a_task_with_its_packet():
-    """The fidelity obligation. gh returns label and assignee OBJECTS where
-    FakeGh stores names, and comment objects where FakeGh stores bodies -- four
-    such divergences did all the damage in M1."""
+def test_the_captured_packet_recovers_through_parse_latest_with_no_attempt():
+    """The fidelity obligation, exercised through the real path rather than
+    just checked for well-formed JSON. gh returns comment OBJECTS
+    (`{"body": ..., ...}`) where `FakeGh` stores bodies directly -- one of the
+    four shape divergences that did all the damage in M1 -- so this feeds the
+    captured comments' bodies through `packet.parse_latest` exactly as
+    `reader.read_ledger` does, and asserts on the packet that comes back.
+
+    `to == "review"` pins that the capture is not just parseable JSON but a
+    real handoff this repo would act on. The missing-`attempt` assertion pins
+    the capture's age: it was taken before Task 7 added `attempt` to the
+    handoff schema, so a reader of this fixture must not mistake it for a
+    current-format packet. The reader itself does not care -- it carries
+    whatever `parse_latest` returns straight through -- but `decide._advance`
+    does: `task.packet.get("attempt") != max(task.attempts, 1)` treats a
+    missing `attempt` as a mismatch and refuses to act on it. That boundary
+    -- the reader carries an attempt-less packet through untouched, and only
+    the core refuses to advance on it -- is the fact this capture documents.
+    """
+    from fleet import packet as packet_module
+
     raw = json.loads(CAPTURE.read_text())
-    assert "comments" in raw
-    assert isinstance(raw["comments"], list)
+    bodies = [c["body"] for c in raw["comments"]]
+    recovered = packet_module.parse_latest(bodies, "handoff")
+    assert recovered is not None
+    assert recovered["to"] == "review"
+    assert "attempt" not in recovered
