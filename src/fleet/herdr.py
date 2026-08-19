@@ -299,16 +299,16 @@ class RealHerdr:
         # `--base <base>` for the same reason -- the fetch updates the
         # remote-tracking ref, so only that name carries what was fetched.
         self._run("git", "-C", str(self.repo_root), "fetch", "origin", base)
-        created = self._json(
-            "herdr",
-            "worktree",
-            "create",
-            "--cwd",
-            str(self.repo_root),
-            "--branch",
-            f"fleet/{task}-{slug}",
-            "--base",
-            f"origin/{base}",
+        branch = f"fleet/{task}-{slug}"
+        args = ["--cwd", str(self.repo_root), "--branch", branch]
+        if not self._branch_exists(branch):
+            # `--base` only when the branch is new. Every stage after the first
+            # arrives here on a branch that already exists -- the reviewer's
+            # continuation, and a re-dispatch after a rebase handback -- and
+            # re-basing it on `origin/<base>` would silently discard the commits
+            # that are the entire reason the next stage was started.
+            args += ["--base", f"origin/{base}"]
+        args += [
             "--path",
             str(path),
             "--label",
@@ -319,7 +319,8 @@ class RealHerdr:
             # The only place herdr hands back the workspace id at creation
             # time, and that id is the only handle `worktree remove` accepts.
             "--json",
-        )
+        ]
+        created = self._json("herdr", "worktree", "create", *args)
         result = created.get("result") or {}
         workspace = (result.get("workspace") or {}).get("workspace_id")
         if not workspace:
@@ -337,6 +338,33 @@ class RealHerdr:
             self.panes[task] = pane
         self.worktrees[task] = path
         return path
+
+    def _branch_exists(self, branch: str) -> bool:
+        """Does `refs/heads/<branch>` resolve in the target repo?
+
+        The full ref and not the bare name: `rev-parse --verify fleet/1-lid`
+        would also resolve a *tag* called that, and a worktree created on a tag
+        is not what a re-dispatch means.
+
+        Both signals are read, because `--quiet` produces both at once: a
+        missing ref prints nothing AND exits 1, and `_subprocess` turns that
+        exit code into a HerdrError. Reading only the exception would miss a
+        client whose `_run` returns instead of raising; reading only the output
+        would let the exception escape the create.
+        """
+        try:
+            out = self._run(
+                "git",
+                "-C",
+                str(self.repo_root),
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}",
+            )
+        except HerdrError:
+            return False
+        return bool(out.strip())
 
     def remove_worktree(self, task: int) -> None:
         """Removes the checkout. The branch survives -- verified live.

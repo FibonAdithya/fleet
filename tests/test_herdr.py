@@ -412,6 +412,75 @@ def test_real_create_worktree_does_not_steal_focus(tmp_path):
     assert "--focus" not in create
 
 
+def _rev_parse(tmp_path):
+    """The argv prefix `_branch_exists` builds. Derived from the same tmp_path
+    the client is built with, so a repo-root change cannot leave this keyed on a
+    path nothing calls and silently answer "no branch" for every test."""
+    return ("git", "-C", str(tmp_path / "repo"), "rev-parse")
+
+
+def test_real_create_worktree_asks_git_whether_the_branch_is_already_there(tmp_path):
+    """A ref, not a name: `rev-parse --verify fleet/1-lid` would also resolve a
+    TAG called that, and creating a worktree on a tag is not what a re-dispatch
+    means."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    checks = run.herdr_calls(*_rev_parse(tmp_path))
+    assert checks, f"no branch check: {run.calls}"
+    assert "refs/heads/fleet/1-lid" in checks[0]
+
+
+def test_real_create_worktree_reuses_a_branch_that_already_exists(tmp_path):
+    """A re-dispatch after a rebase handback, and every continuation: the branch
+    carries the work of the stage before it -- the commits the integrator asked
+    to have re-based, or the implementation the reviewer was started to read.
+    Recreating it from the base would discard exactly those commits, silently,
+    and the next stage would begin from an empty tree."""
+    replies = _captured_replies()
+    replies[_rev_parse(tmp_path)] = "a91c2041c4c4b1c0b1e0f4d0a0b0c0d0e0f00112\n"
+    run = RecordingRun(replies)
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert create[create.index("--branch") + 1] == "fleet/1-lid"
+    assert "--base" not in create
+
+
+def test_real_create_worktree_bases_a_branch_that_does_not_exist_yet(tmp_path):
+    """`rev-parse --verify --quiet` reports a missing ref two ways at once --
+    nothing on stdout AND exit 1 -- and `_subprocess` turns the exit code into a
+    HerdrError. Reading only the empty output would make the exception escape
+    the create; reading only the exception would make a first dispatch reuse a
+    branch that is not there, which herdr refuses."""
+
+    class FailingRevParse(RecordingRun):
+        def __call__(self, *args):
+            if "rev-parse" in args:
+                self.calls.append(args)
+                raise HerdrError(f"{' '.join(args)} failed: ")
+            return super().__call__(*args)
+
+    run = FailingRevParse(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert create[create.index("--base") + 1] == "origin/integration"
+
+
+def test_real_create_worktree_treats_an_empty_branch_check_as_no_branch(tmp_path):
+    """`rev-parse --verify --quiet` prints nothing for a ref that is not there,
+    so an empty answer is a missing branch and not a present one. Only the
+    exception path above proves that for the live client; this pins the other
+    half, for any `_run` that returns rather than raises -- which is every
+    double in this file."""
+    run = RecordingRun(_captured_replies())  # nothing keyed on rev-parse: ""
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert "--base" in create
+
+
 def test_real_remove_worktree_addresses_the_workspace_not_the_path(tmp_path):
     """`herdr worktree remove <path>` does not exist. Run live it returns
     `unknown option: /some/path` and exit 2; the real command takes

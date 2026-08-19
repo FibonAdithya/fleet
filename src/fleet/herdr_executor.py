@@ -1,0 +1,185 @@
+"""The real executor. Composes herdr, gh and the prompt layer behind M2's seam.
+
+M2's `Executor` protocol is `apply(effects)` and `agents()`, and it does not
+move: FakeExecutor and all seven scenarios stand on it, and they are M2's whole
+deliverable. Everything real happens on this side of it.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from collections import deque
+
+from fleet import packet as packet_module
+from fleet.config import FleetConfig
+from fleet.gh import GhClient
+from fleet.herdr import Herdr, HerdrError
+from fleet.model import (
+    AgentState,
+    Assign,
+    CloseIssue,
+    Effect,
+    SetLabels,
+    StartAgent,
+    StopAgent,
+)
+
+_LOG = logging.getLogger(__name__)
+
+_UNSAFE = re.compile(r"[^a-z0-9]+")
+_SLUG_MAX = 48
+# A title with nothing sluggable in it -- "###", or one written entirely in a
+# non-latin script -- would otherwise make the directory `<n>-` and the branch
+# `fleet/<n>-`. Both are legal and both read as truncated.
+_SLUG_FALLBACK = "task"
+# Cleanup failures are recorded rather than raised, so the record is bounded:
+# a herdr that fails every removal would otherwise append once per task per
+# tick, all night, into a list nothing ever drains.
+_FAILURE_LIMIT = 64
+
+
+def slug_of(title: str) -> str:
+    """A branch and directory name. Bounded, lowercase, no separators.
+
+    It becomes `fleet/<n>-<slug>` and `<worktree_root>/<n>-<slug>`: a slash would
+    make a nested ref, a space would need quoting in every shell call downstream,
+    and a 200-character issue title makes a path some filesystems refuse.
+
+    Two different titles can slug to the same string -- `eval/lid: clamp` and
+    `eval lid clamp` do -- and that is deliberately not fixed here. The task
+    number in front of it is what keeps two tasks apart, so a collision is only
+    ever within one task, where it is the same worktree by definition. A hash
+    suffix would buy nothing and cost the property `herdr.task_of` depends on:
+    that a path names its task.
+    """
+    slug = _UNSAFE.sub("-", title.lower()).strip("-")[:_SLUG_MAX].strip("-")
+    # `or` and not `if not slug.strip()`: the empty string is the only falsy
+    # value this expression can produce, and it is exactly the case meant.
+    return slug or _SLUG_FALLBACK
+
+
+def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
+    """Role prompt + issue body + latest handoff packet + AGENTS.md. Nothing else.
+
+    Parent §7.2 is exact about the list, and parent §6's zero-history test is
+    enforced by this function's construction rather than by anyone's discipline.
+    Every extra thing added here weakens that test silently -- the packet stops
+    having to be sufficient, and nobody finds out until the packet is the only
+    thing a receiver gets.
+
+    A missing role prompt raises. An agent handed an empty role does something
+    plausible and wrong, and a blank prompt buries the policy error that caused
+    it. A missing AGENTS.md does not: a target repo that has not written one yet
+    is a repo without one, not a misconfiguration.
+    """
+    role_prompt = (cfg.roles_dir / f"{role}.md").read_text(encoding="utf-8")
+    issue = gh.get_issue(task)
+    agents_md = ""
+    candidate = cfg.root / "AGENTS.md"
+    if candidate.is_file():
+        agents_md = candidate.read_text(encoding="utf-8")
+    latest = packet_module.parse_latest(issue.get("comments") or [], "handoff")
+    parts = [
+        role_prompt,
+        f"# Issue #{task}: {issue.get('title', '')}\n\n{issue.get('body', '')}",
+    ]
+    if latest is not None:
+        parts.append("# Handoff packet\n\n```json\n" + json.dumps(latest, indent=2) + "\n```")
+    if agents_md:
+        parts.append(agents_md)
+    return "\n\n---\n\n".join(parts)
+
+
+class HerdrExecutor:
+    """Implements M2's Executor against real worktrees, agents and GitHub."""
+
+    def __init__(
+        self, herdr: Herdr, gh: GhClient, cfg: FleetConfig, owner: str | None = None
+    ) -> None:
+        self.herdr = herdr
+        self.gh = gh
+        self.cfg = cfg
+        self.owner = owner
+        #: Cleanup failures this executor swallowed, newest last and bounded.
+        #: Read by the daemon's runlog; a failure that is only logged is a
+        #: failure no test and no operator report can see.
+        self.failures: deque[str] = deque(maxlen=_FAILURE_LIMIT)
+
+    def agents(self) -> list[AgentState]:
+        return self.herdr.agents()
+
+    def apply(self, effects: list[Effect]) -> None:
+        for effect in effects:
+            if isinstance(effect, SetLabels):
+                # Add first. expand._to_state excludes the added label from
+                # `remove` precisely so this order is safe; reversed, a failure
+                # between the two calls strands the task with no state label at
+                # all, invisible to every label query.
+                self.gh.add_labels(effect.task, list(effect.add))
+                self.gh.remove_labels(effect.task, list(effect.remove))
+            elif isinstance(effect, Assign):
+                self.gh.assign(effect.task, effect.owner)
+            elif isinstance(effect, CloseIssue):
+                self.gh.close_issue(effect.task)
+            elif isinstance(effect, StartAgent):
+                self._start(effect)
+            elif isinstance(effect, StopAgent):
+                self._stop(effect.task)
+            else:
+                raise ValueError(f"cannot apply {effect!r}")
+
+    def _start(self, effect: StartAgent) -> None:
+        issue = self.gh.get_issue(effect.task)
+        self.herdr.create_worktree(effect.task, slug_of(issue.get("title", "")), effect.base)
+        # Ownership is written here because this is the layer that knows the
+        # identity gh is authenticated as. `fleet-1` is not a GitHub login, and
+        # gh fails the whole edit on an assignee it cannot resolve.
+        if self.owner:
+            self.gh.assign(effect.task, self.owner)
+        self.herdr.start_agent(
+            effect.task, effect.role, build_prompt(self.cfg, self.gh, effect.task, effect.role)
+        )
+
+    def _stop(self, task: int) -> None:
+        """Stop the agent, then remove its worktree. Neither may kill the tick.
+
+        The worktree goes with the agent: a re-dispatch creates one at the same
+        path on the same branch, and a leftover makes that create fail --
+        turning one stall into a task that never runs again.
+
+        Both calls are best-effort, and for the same reason: this is the only
+        effect whose desired end state is an *absence*, so the two ways it fails
+        are "already absent" and "cannot be made absent", and neither is worth
+        the rest of the tick. Concretely --
+
+        * `stop_agent` shells `herdr agent send-keys fleet-<n>`, which answers
+          `agent_not_found` and exits 1 when the agent has gone. That is the
+          ledger-drift scenario's ordinary path, not an exception: decide emits
+          `Release(no_agent)` precisely when the snapshot shows no agent, and
+          expand turns it into this effect. Raising here would crash on the
+          drift the effect exists to clear -- and skip the worktree removal,
+          which is the half that still had work to do.
+        * `remove_worktree` raises when a checkout exists on disk with no herdr
+          workspace to remove it through. Nothing this process can do fixes
+          that; the message names the `git worktree remove` a human runs. The
+          task will fail its next dispatch on the occupied path, which is one
+          task -- an exception out of `apply` is every task in the batch.
+
+        The failure is recorded and logged rather than swallowed. Silence here
+        would make a fleet-wide herdr outage look like a quiet night.
+        """
+        self._best_effort(task, "stop agent", self.herdr.stop_agent)
+        self._best_effort(task, "remove worktree", self.herdr.remove_worktree)
+
+    def _best_effort(self, task: int, what: str, call) -> None:
+        try:
+            call(task)
+        except HerdrError as exc:
+            # HerdrError only. A GhError or a TypeError from this same call is a
+            # defect in this layer, not a worktree that has already gone, and
+            # swallowing those would turn a broken executor into a silent one.
+            message = f"task {task}: could not {what}: {exc}"
+            _LOG.warning("%s", message)
+            self.failures.append(message)
