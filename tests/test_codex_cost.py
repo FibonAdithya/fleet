@@ -7,6 +7,34 @@ import pytest
 
 from fleet.cost import CodexProvider, UnpricedModel, UnpricedTranscript
 
+CAPTURED = Path(__file__).resolve().parents[1] / "fixtures/cost"
+
+
+def _codex_models(lines: list[str]) -> frozenset[str]:
+    """Every model a captured transcript names, read straight off raw lines.
+
+    A test-only mirror of `fleet.cost._codex_models`, which takes decoded
+    entries rather than raw lines -- kept separate (not imported) so these
+    tests build their `prices` table the same way a caller with only raw
+    lines would, rather than reaching into the module's private decode step.
+    """
+    out: set[str] = set()
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "turn_context":
+            continue
+        model = (entry.get("payload") or {}).get("model")
+        if isinstance(model, str) and model:
+            out.add(model)
+    return frozenset(out)
+
+
 PRICES = {
     "gpt-test": {"input": 10.0, "output": 100.0, "cache_read": 1.0, "cache_write": 20.0},
 }
@@ -211,3 +239,40 @@ def test_codex_transcript_glob_requires_separator_before_session_id(tmp_path):
 
     # Must return the correct file, not the decoy
     assert CodexProvider(sessions_dir=tmp_path).transcript(sid) == correct
+
+
+def test_a_real_captured_codex_session_prices():
+    """Against a real shape, not an invented one -- the parent spec's rule.
+    Catches an adapter that only handles the hand-written fixtures above: a
+    real session's field set, record ordering, and repeated `turn_context`
+    entries (this one has five, all naming the same model, across a session
+    that ran many turns) differ from anything invented by hand, and this is
+    the only test that reads one end to end and demands a positive cost out
+    the other side."""
+    lines = (CAPTURED / "codex-breakdown.jsonl").read_text().splitlines()
+    models = _codex_models(lines)
+    prices = {
+        m: {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0} for m in models
+    }
+    assert CodexProvider(sessions_dir=Path("/nonexistent")).read(lines, prices).cost_usd > 0
+
+
+def test_a_real_captured_total_only_session_refuses():
+    """The 50-of-80 case, from a real session. Unlike every hand-written
+    total-only fixture above (which pairs `_model()` with an all-zero
+    breakdown), this real session names no model at all -- verified across
+    all 50 local sessions of this shape, none carries a single
+    `turn_context` record -- so it reaches `UnpricedTranscript` through the
+    model-count guard rather than the total/breakdown-mismatch guard the
+    hand-written tests above exercise. Catches an adapter that treats "no
+    model named, but usage present" as "not started yet" and returns
+    `Reading(0.0, frozenset())` instead of refusing -- the one branch of
+    that guard no other test here reaches, because every other test's lines
+    include at least one `_model()`."""
+    lines = (CAPTURED / "codex-total-only.jsonl").read_text().splitlines()
+    models = _codex_models(lines)
+    prices = {
+        m: {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0} for m in models
+    }
+    with pytest.raises(UnpricedTranscript):
+        CodexProvider(sessions_dir=Path("/nonexistent")).read(lines, prices)

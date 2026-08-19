@@ -173,6 +173,23 @@ the repo root would show up as untracked in `git status`).
 `max_rebases` exactly as an implementer's attempts are capped by
 `max_attempts`, and a reviewer's fix passes by `max_fix_passes`.
 
+## The codex gate
+
+Before routing any role to `codex` in a graded run, launch one codex agent
+through herdr and confirm its transcript emits component breakdowns
+(`input_tokens` / `output_tokens` populated in `event_msg.payload.info
+.total_token_usage`), not just a cumulative `total_tokens` with every
+component zero. `CodexProvider.read` refuses the latter shape rather than
+pricing it at $0 — correct, but it means a codex agent stuck on that shape
+never gets a `Reading` its cost can be checked against, and the run drains
+on the first tick that tries to account for it. That refusal is loud (an
+`UnpricedTranscript` on the first tick, not a slow leak), but check before
+the run rather than during it: fixtures/cost/codex-total-only.jsonl and
+fixtures/cost/codex-breakdown.jsonl are real captured examples of both
+shapes, and locally 50 of 80 sessions were total-only against 30 with
+breakdowns, on the same CLI version and the same day — so neither the date
+nor `codex --version` tells you which one a given launch will produce.
+
 ## Running the scenarios
 
     uv run pytest tests/test_scenarios.py -v
