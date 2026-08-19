@@ -24,6 +24,7 @@ T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
 POLICY = Policy(
     areas=(("src/eval/**", "eval"),),
     routes=(("patch", ("implementer", "reviewer", "integrator")),),
+    agents=(),
     integration_branch="integration",
     slots=6,
     stall_minutes=10,

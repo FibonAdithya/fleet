@@ -24,6 +24,7 @@ def _policy(**kw) -> Policy:
     fields = {
         "areas": (("src/eval/**", "eval"),),
         "routes": (("patch", ("implementer", "reviewer", "integrator")),),
+        "agents": (),
         "slots": 6,
         "stall_minutes": 10,
         "max_attempts": 2,

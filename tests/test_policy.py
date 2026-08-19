@@ -5,7 +5,14 @@ import pytest
 from conftest import FIXTURE_POLICY
 from fleet import policy as policy_module
 from fleet.config import load_config
-from fleet.policy import PolicyError, known_roles, load, parse_ownership, parse_routes
+from fleet.policy import (
+    PolicyError,
+    known_roles,
+    load,
+    parse_agents,
+    parse_ownership,
+    parse_routes,
+)
 
 OWNERSHIP = """# Ownership map
 
@@ -172,3 +179,52 @@ def test_load_reads_the_vendored_fixture_policy():
     assert policy.route_for("investigation") == ("implementer",)
     assert dict(policy.areas)["src/eval/**"] == "eval"
     assert dict(policy.areas)["gates/**"] == "configs"
+
+
+# A local name distinct from the module-level ROLES above: the whole module
+# executes before any test runs, so reusing ROLES here would silently rebind
+# the constant every earlier test in this file reads, shrinking their role
+# vocabulary out from under them.
+AGENT_ROLES = frozenset({"implementer", "reviewer", "integrator", "planner"})
+
+AGENT_TABLE = """
+| Role | Agent | Model |
+|---|---|---|
+| `implementer` | `codex` | `gpt-5.6-sol` |
+| `reviewer` | `claude` | `claude-opus-5` |
+"""
+
+
+def test_the_agent_table_is_parsed_into_role_agent_model_triples():
+    """Catches a parser that reads only two columns and drops the model, which
+    would leave every role on the operator's default model."""
+    assert parse_agents(AGENT_TABLE, AGENT_ROLES) == (
+        ("implementer", "codex", "gpt-5.6-sol"),
+        ("reviewer", "claude", "claude-opus-5"),
+    )
+
+
+def test_an_unknown_role_in_the_agent_table_raises():
+    """Same strictness parse_routes applies to an unknown class. Catches
+    skipping the row, which leaves that role silently unrouted."""
+    text = "\n| Role | Agent | Model |\n|---|---|---|\n| `nobody` | `claude` | `m` |\n"
+    with pytest.raises(PolicyError, match="nobody"):
+        parse_agents(text, AGENT_ROLES)
+
+
+def test_a_missing_agent_table_raises():
+    """Required, not defaulted to all-claude -- the reasoning the Policy
+    docstring gives for integration_branch having no default. Catches an empty
+    tuple, which would make every downstream lookup return None."""
+    with pytest.raises(PolicyError, match="no role/agent"):
+        parse_agents("# no tables here\n", AGENT_ROLES)
+
+
+def test_a_role_listed_twice_raises():
+    """Catches last-wins, which silently discards the first assignment."""
+    text = (
+        "\n| Role | Agent | Model |\n|---|---|---|\n"
+        "| `reviewer` | `claude` | `a` |\n| `reviewer` | `codex` | `b` |\n"
+    )
+    with pytest.raises(PolicyError, match="reviewer"):
+        parse_agents(text, AGENT_ROLES)

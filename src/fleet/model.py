@@ -188,6 +188,7 @@ class Policy:
 
     areas: tuple[tuple[str, str], ...]  # (glob, area)
     routes: tuple[tuple[str, tuple[str, ...]], ...]  # (class, role sequence)
+    agents: tuple[tuple[str, str, str], ...]  # (role, agent kind, model)
     slots: int
     stall_minutes: int
     max_attempts: int
@@ -199,6 +200,13 @@ class Policy:
 
     def route_for(self, klass: str | None) -> tuple[str, ...]:
         return dict(self.routes).get(klass or "", ())
+
+    def agent_for(self, role: str) -> tuple[str, str] | None:
+        """(agent kind, model) for a role, or None when the policy has none."""
+        for name, kind, model in self.agents:
+            if name == role:
+                return kind, model
+        return None
 
 
 # ---------------------------------------------------------------- intents
