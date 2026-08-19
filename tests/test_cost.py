@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from fleet.cost import UnpricedModel, price_lines, price_transcript, transcript_path
+from fleet.cost import (
+    ClaudeProvider,
+    Reading,
+    UnpricedModel,
+    price_lines,
+    price_transcript,
+    transcript_path,
+)
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/cost/transcript.jsonl"
 
@@ -104,3 +111,36 @@ def test_transcript_path_returns_none_for_an_unknown_session(tmp_path):
     """An agent herdr knows about whose transcript has not been written yet.
     None is a fact about the filesystem; raising would take down the tick."""
     assert transcript_path("nope", tmp_path) is None
+
+
+def test_claude_provider_reports_cost_and_models_from_one_parse():
+    """One read yields both facts. Catches a provider that returns cost but an
+    empty model set, which would make every declared-vs-observed check pass
+    vacuously."""
+    lines = [
+        _line(model="alpha", input_tokens=1_000_000),
+        _line(model="beta", output_tokens=1_000_000),
+    ]
+    prices = {
+        "alpha": {"input": 10.0, "output": 100.0, "cache_read": 1.0, "cache_write": 20.0},
+        "beta": {"input": 10.0, "output": 100.0, "cache_read": 1.0, "cache_write": 20.0},
+    }
+    reading: Reading = ClaudeProvider(Path("/nonexistent")).read(lines, prices)
+    assert reading.cost_usd == pytest.approx(110.0)
+    assert reading.models == frozenset({"alpha", "beta"})
+
+
+def test_claude_provider_omits_zero_token_models_from_the_observed_set():
+    """`<synthetic>` carries a usage block whose counters are all zero. It must
+    be priced (its key is required) but must NOT count as an observed model, or
+    every run reports a mismatch against its declared model."""
+    prices = {
+        "test-model": {"input": 10.0, "output": 100.0, "cache_read": 1.0, "cache_write": 20.0},
+        "<synthetic>": {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0},
+    }
+    lines = [
+        _line(model="test-model", input_tokens=1_000_000),
+        _line(model="<synthetic>", input_tokens=0, output_tokens=0),
+    ]
+    reading: Reading = ClaudeProvider(Path("/nonexistent")).read(lines, prices)
+    assert reading.models == frozenset({"test-model"})

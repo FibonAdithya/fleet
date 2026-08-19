@@ -12,7 +12,9 @@ to be quietly wrong, so it is the part that gets a pure function.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 # fleet.toml's [prices] tables are keyed by model and carry these four rates, in
 # dollars per million tokens. The mapping to Claude Code's counter names lives
@@ -83,3 +85,77 @@ def transcript_path(session_id: str, projects_dir: Path) -> Path | None:
     """
     hits = sorted(Path(projects_dir).glob(f"*/{session_id}.jsonl"))
     return hits[0] if hits else None
+
+
+Prices = dict[str, dict[str, float]]
+
+
+@dataclass(frozen=True)
+class Reading:
+    """One transcript read: what it cost, and which models actually ran.
+
+    Both facts come from one parse because the declared-vs-observed check needs
+    the model set and the ceiling needs the cost, and re-reading every
+    transcript twice per agent per tick is waste the daemon pays every minute.
+
+    `models` is the set of models that carried NONZERO tokens. That definition
+    excludes `<synthetic>` -- whose usage block is all zeros -- for free, so the
+    pseudo-model needs no special case here or in `decide`.
+    """
+
+    cost_usd: float
+    models: frozenset[str]
+
+
+class Provider(Protocol):
+    """One agent CLI's transcript format.
+
+    `read` is pure: a function of lines and rates, nothing else. Only
+    `transcript` touches the filesystem. That split is the same one the module
+    docstring already defends -- the ceiling is the part most likely to be
+    quietly wrong, so it is the part that stays a pure function.
+    """
+
+    name: str
+
+    def transcript(self, session_id: str) -> Path | None: ...
+
+    def read(self, lines: list[str], prices: Prices) -> Reading: ...
+
+
+def _claude_models(lines: list[str]) -> frozenset[str]:
+    out: set[str] = set()
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        message = entry.get("message") or {}
+        usage = message.get("usage")
+        if not usage:
+            continue
+        if not any((usage.get(field) or 0) for field in _COUNTERS.values()):
+            continue
+        model = message.get("model")
+        if isinstance(model, str) and model:
+            out.add(model)
+    return frozenset(out)
+
+
+@dataclass(frozen=True)
+class ClaudeProvider:
+    """Claude Code. Per-message usage deltas: the fold is a SUM."""
+
+    projects_dir: Path
+    name: str = "claude"
+
+    def transcript(self, session_id: str) -> Path | None:
+        return transcript_path(session_id, self.projects_dir)
+
+    def read(self, lines: list[str], prices: Prices) -> Reading:
+        return Reading(cost_usd=price_lines(lines, prices), models=_claude_models(lines))
