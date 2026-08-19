@@ -26,6 +26,13 @@ max_attempts = 2
 max_fix_passes = 1
 """
 
+BASE = (
+    '[repo]\nslug = "o/r"\n\n[policy]\n'
+    'ownership = "docs/agent/ownership.md"\n'
+    'task_classes = "docs/agent/task-classes.md"\n'
+    'roles = ".agents/roles"\nschemas = ".agents/schemas"\n'
+)
+
 
 def _repo(tmp_path):
     (tmp_path / "fleet.toml").write_text(TOML)
@@ -207,3 +214,25 @@ def test_daemon_paths_are_read_from_fleet_toml_and_tilde_is_expanded(tmp_path):
     assert cfg.poll_seconds == 15
     for path in (cfg.socket_path, cfg.runlog_path, cfg.worktree_root):
         assert "~" not in str(path)
+
+
+def test_agents_section_is_parsed_per_kind(tmp_path):
+    """Launch flags are CLI-specific: `--permission-mode acceptEdits` means
+    nothing to codex. Catches one global arg list shared across kinds."""
+    (tmp_path / "fleet.toml").write_text(
+        BASE
+        + '\n[agents.claude]\nmodel_flag = "--model"\nargs = ["--permission-mode", "acceptEdits"]\n'
+        + '\n[agents.codex]\nmodel_flag = "--model"\nargs = ["--full-auto"]\n'
+    )
+    agents = load_config(tmp_path).agents
+    assert agents["codex"].args == ("--full-auto",)
+    assert agents["claude"].model_flag == "--model"
+
+
+def test_an_agent_without_a_model_flag_is_refused(tmp_path):
+    """The model is always appended as [model_flag, model]. Without a flag the
+    agent would silently run the operator's default model -- the exact
+    silent-success the declared-model design exists to close."""
+    (tmp_path / "fleet.toml").write_text(BASE + '\n[agents.codex]\nargs = ["--full-auto"]\n')
+    with pytest.raises(ConfigError, match="model_flag"):
+        load_config(tmp_path)

@@ -165,6 +165,21 @@ class FleetSnapshot:
 
 
 @dataclass(frozen=True)
+class AgentSpec:
+    """How to launch one agent CLI. Mechanics, not policy.
+
+    `model_flag` is a separate field rather than a placeholder inside `args` so
+    the launcher can always append `[model_flag, model]`. A placeholder someone
+    forgets to include fails by running the operator's default model with no
+    error at all.
+    """
+
+    kind: str
+    model_flag: str
+    args: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Policy:
     """The parsed policy layer. `integration_branch` has no default on purpose:
     a Policy built without it fails at construction rather than dispatching every

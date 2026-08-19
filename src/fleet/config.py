@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fleet.cost import PRICE_KEYS
 from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES, DEFAULT_MAX_REBASES
+from fleet.model import AgentSpec
 
 try:
     import tomllib
@@ -61,6 +62,7 @@ class FleetConfig:
     per_task_usd: float
     fleet_usd: float
     prices: dict[str, dict[str, float]]
+    agents: dict[str, AgentSpec]
     socket_path: Path
     runlog_path: Path
     worktree_root: Path
@@ -99,6 +101,28 @@ def _prices(raw: dict) -> dict[str, dict[str, float]]:
     return out
 
 
+def _agents(raw: dict) -> dict[str, AgentSpec]:
+    """Launch mechanics per CLI kind. Which role runs on which kind is a
+    routing decision that belongs to the target repo's policy layer, not here
+    -- this only says how to start a given kind once something has chosen it.
+    """
+    out: dict[str, AgentSpec] = {}
+    for kind, table in raw.items():
+        flag = table.get("model_flag")
+        if not flag:
+            raise ConfigError(
+                f"[agents.{kind}] has no model_flag. The declared model is always "
+                "appended as [model_flag, model]; without it the agent runs the "
+                "operator's default model and nothing says so."
+            )
+        out[kind] = AgentSpec(
+            kind=kind,
+            model_flag=str(flag),
+            args=tuple(str(a) for a in table.get("args", ())),
+        )
+    return out
+
+
 def _find_root(start: Path) -> Path:
     for candidate in [start, *start.parents]:
         if (candidate / "fleet.toml").is_file():
@@ -130,6 +154,7 @@ def load_config(start: Path | None = None) -> FleetConfig:
         ),
         fleet_usd=_positive(float(budget.get("fleet_usd", DEFAULT_FLEET_USD)), "fleet_usd"),
         prices=_prices(data.get("prices", {})),
+        agents=_agents(data.get("agents", {})),
         socket_path=Path(daemon.get("socket", root / ".fleet" / "fleet.sock")).expanduser(),
         runlog_path=Path(daemon.get("runlog", root / ".fleet" / "run.jsonl")).expanduser(),
         worktree_root=Path(daemon.get("worktrees", "~/.fleet/worktrees")).expanduser(),
