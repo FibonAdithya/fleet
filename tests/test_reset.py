@@ -251,3 +251,111 @@ def test_reset_sh_does_not_claim_the_project_never_fetches():
     # And it must name the ref it cannot reset, or "local only" is a fact the
     # script knows and the operator does not.
     assert "origin/integration" in script
+
+
+# -- the git-side reset must not report a success it did not have ------------
+
+RESET_GIT = REPO_ROOT / "fixtures/seed/reset_git.sh"
+
+
+def _git(root, *args):
+    return subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
+    )
+
+
+def _clone(tmp_path):
+    """A fixture clone as a graded run leaves it: `integration` moved off main,
+    a `fleet/*` branch, and a worktree checked out on that branch."""
+    root = tmp_path / "fleet-fixture"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "t@t")
+    _git(root, "config", "user.name", "t")
+    (root / "README.md").write_text("seed\n")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-qm", "seed")
+    _git(root, "branch", "integration")
+    # A run's merge: integration is ahead of main and must not survive.
+    _git(root, "checkout", "-q", "integration")
+    (root / "merged.txt").write_text("run 1\n")
+    _git(root, "add", "merged.txt")
+    _git(root, "commit", "-qm", "run 1 merge")
+    _git(root, "checkout", "-q", "main")
+    # A run's implementer branch, still checked out in its worktree.
+    _git(root, "worktree", "add", "-q", "-b", "fleet/1-lid", str(tmp_path / "wt-1"))
+    return root
+
+
+def _run_reset_git(root):
+    return subprocess.run(
+        ["bash", str(RESET_GIT), str(root)], capture_output=True, text=True, timeout=60
+    )
+
+
+def test_the_git_side_reset_removes_the_worktree_before_its_branch(tmp_path):
+    """The ordering that made the false green possible.
+
+    The old script deleted `fleet/*` branches FIRST and removed worktrees
+    second. git refuses to delete a branch that is checked out in a linked
+    worktree -- "used by worktree at ..." -- so on the ordinary shape, where a
+    run leaves both, every branch deletion failed. `2>/dev/null || true`
+    swallowed it, the worktree was then removed, and the branch survived. Run 2's
+    `RealHerdr._existing_branch` finds it, skips `--base`, and starts run 2's
+    implementer on run 1's commits.
+    """
+    root = _clone(tmp_path)
+    result = _run_reset_git(root)
+    assert result.returncode == 0, result.stderr
+    assert _git(root, "branch", "--list", "fleet/*").stdout.strip() == ""
+
+
+def test_the_git_side_reset_puts_the_local_integration_ref_back_on_main(tmp_path):
+    root = _clone(tmp_path)
+    assert _run_reset_git(root).returncode == 0
+    integration = _git(root, "rev-parse", "integration").stdout.strip()
+    main = _git(root, "rev-parse", "main").stdout.strip()
+    assert integration == main
+
+
+def test_a_git_side_reset_that_could_not_finish_says_so_and_exits_nonzero(tmp_path):
+    """The finding itself. A reset that left run 1's branches behind looked
+    identical to one that worked, which is a FALSE GREEN on the gate -- worse
+    than a failure, because a failure stops the run and this does not.
+
+    A locked worktree is the reachable way to produce it: `git worktree remove`
+    refuses one, so the branch checked out in it cannot be deleted either.
+    """
+    root = _clone(tmp_path)
+    _git(root, "worktree", "lock", str(tmp_path / "wt-1"))
+    result = _run_reset_git(root)
+    assert result.returncode != 0
+    assert "fleet/1-lid" in result.stderr
+    # And it must not have claimed otherwise.
+    assert "complete" not in result.stdout.lower()
+
+
+def test_the_git_side_reset_refuses_a_path_that_is_not_a_repository(tmp_path):
+    """Silently doing nothing here is the same false green by another route:
+    a mistyped FLEET_FIXTURE_CLONE would reset nothing and report success."""
+    (tmp_path / "not-a-repo").mkdir()
+    result = _run_reset_git(tmp_path / "not-a-repo")
+    assert result.returncode != 0
+    assert "not a git repository" in result.stderr
+
+
+def test_reset_sh_does_not_claim_completion_when_the_git_side_failed():
+    """The epilogue used to print `Reset complete` unconditionally, after a
+    block whose every failure was swallowed. The message must be conditional on
+    what actually happened, or the script's own output is the false green."""
+    script = (REPO_ROOT / "fixtures/seed/reset.sh").read_text()
+    tail = script.split("# --- Git-side reset")[1]
+    # Comment lines stripped: this block now DESCRIBES the swallow it removed,
+    # and a check that could not tell the description from the code would fail
+    # on the explanation of its own fix.
+    code = "\n".join(line for line in tail.splitlines() if not line.strip().startswith("#"))
+    assert "2>/dev/null || true" not in code
+    assert "Reset INCOMPLETE" in code
+    # And the success message must be unreachable when the git side failed.
+    assert code.index("Reset INCOMPLETE") < code.index("Reset complete")
+    assert "exit 1" in code.split("Reset complete")[0]

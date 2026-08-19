@@ -79,57 +79,49 @@ gh label list --repo "$REPO" --limit 200 --json name --jq '.[].name' \
   | xargs -r -I{} gh label delete {} --repo "$REPO" --yes
 
 # --- Git-side reset: integration branch, fleet/* branches, worktrees --------
-# Only attempted if the fixture repo is actually checked out locally -- a
-# fresh environment with no clone yet has nothing to reset here, and the next
+# Delegated to reset_git.sh, which checks every step, verifies the end state,
+# and answers non-zero if any of it did not hold. This block used to swallow
+# every failure (`2>/dev/null || true`, an unchecked xargs) and the epilogue
+# below printed "Reset complete" regardless -- so a reset that left run 1's
+# fleet/* branches behind was indistinguishable from one that worked, and run 2
+# started its implementer on run 1's commits. A false green on the gate is
+# worse than a red, because a red stops the run.
+#
+# Only attempted if the fixture repo is actually checked out locally -- a fresh
+# environment with no clone yet has nothing to reset here, and the next
 # `git clone` starts from `main` regardless.
+GIT_OK=1
+GIT_SKIPPED=0
 if [ -d "$CLONE/.git" ]; then
-  (
-    cd "$CLONE"
-    # LOCAL ONLY, and that is a limit rather than a design. This script
-    # resets refs inside this one clone and pushes nothing.
-    #
-    # The old comment here said "nothing in this project ever runs `git push`
-    # or `git fetch`". The push half is still true. The fetch half is not:
-    # src/fleet/herdr.py's create_worktree runs `git fetch origin <base>` and
-    # branches every new worktree off `origin/<base>`, which is spec §8.2's
-    # fresh-base rule. So the branch a graded run actually starts from is
-    # `origin/integration`, and THIS LINE CANNOT RESET IT.
-    #
-    # What the line below does do: move the local `integration` ref back to
-    # `main`, so a run's rebases and merges do not survive into the next one
-    # and run 2's integrator does not start mid-integration. `branch -f`
-    # moves the ref without a checkout of its own.
-    #
-    # What a human still has to do, if run 1 pushed anything (docs/m3-inputs.md
-    # §1.1 and §1.3):
-    #
-    #     git -C "$CLONE" push --force-with-lease origin integration:integration
-    #
-    # Not done here on purpose. Pushing is outward-facing, and a cleanup script
-    # that force-pushes a remote branch is a much worse failure than one that
-    # leaves a human a line to run.
-    git branch -f integration main
-    # Can't delete a branch that is currently checked out -- switch to main
-    # first, the same order docs/runbook.md's manual reset already uses.
-    git checkout main
-    git branch -D $(git branch --list 'fleet/*') 2>/dev/null || true
-    # Worktrees live under [daemon] worktrees (default ~/.fleet/worktrees,
-    # outside this repo on purpose -- see docs/runbook.md), so removing a
-    # fleet/*-named one has to go by name, not by checking this repo's
-    # worktree list for a path prefix that may not match.
-    git worktree list --porcelain \
-      | awk '/^worktree /{path=$2} /^branch refs\/heads\/fleet\//{print path}' \
-      | xargs -r -I{} git worktree remove --force {}
-    git worktree prune
-  )
+  if ! bash "$HERE/reset_git.sh" "$CLONE"; then
+    GIT_OK=0
+  fi
 else
+  GIT_SKIPPED=1
   echo "no local clone at $CLONE -- skipping the git-side reset" >&2
 fi
 
+if [ "$GIT_OK" -ne 1 ]; then
+  echo >&2
+  echo "Reset INCOMPLETE. The issue-side reset ran, but the git-side reset" >&2
+  echo "reported the failures above and the clone at $CLONE is NOT clean." >&2
+  echo "Do not start another graded run until it is: a surviving fleet/* branch" >&2
+  echo "makes _existing_branch skip --base, which starts the next run's" >&2
+  echo "implementer on this run's commits -- a green that means nothing." >&2
+  exit 1
+fi
+
 echo "Reset complete: issues 1-11 carry their seeded labels again, everything" >&2
-echo "past 11 is closed, and the LOCAL integration/fleet:*/worktrees are back" >&2
-echo "to main. No re-seed needed -- reset.py restores labels directly rather" >&2
-echo "than relying on seed_issues.sh's idempotent-by-title re-run." >&2
+echo "past 11 is closed. No re-seed needed -- reset.py restores labels directly" >&2
+echo "rather than relying on seed_issues.sh's idempotent-by-title re-run." >&2
+if [ "$GIT_SKIPPED" -eq 1 ]; then
+  echo >&2
+  echo "The git-side reset was SKIPPED: there is no clone at $CLONE. Nothing" >&2
+  echo "local needed resetting; the next clone starts from main." >&2
+else
+  echo "The LOCAL integration ref, fleet/* branches and their worktrees are" >&2
+  echo "gone, verified rather than assumed." >&2
+fi
 echo >&2
 echo "NOT reset, because this script never pushes: origin/integration, which is" >&2
 echo "the ref create_worktree actually branches from (spec §8.2). If run 1" >&2
