@@ -236,3 +236,17 @@ def test_an_agent_without_a_model_flag_is_refused(tmp_path):
     (tmp_path / "fleet.toml").write_text(BASE + '\n[agents.codex]\nargs = ["--full-auto"]\n')
     with pytest.raises(ConfigError, match="model_flag"):
         load_config(tmp_path)
+
+
+def test_a_bare_string_args_is_refused(tmp_path):
+    """A bare TOML string is iterable, so `tuple(str(a) for a in "--full-auto")`
+    silently explodes it into eleven single-character flags
+    ('-', '-', 'f', 'u', 'l', 'l', ...) handed straight to the CLI with no
+    error anywhere. Catches a missing type check on `args` that lets that
+    typo -- `args = "--full-auto"` instead of `args = ["--full-auto"]` --
+    through as a nonsense command line instead of a load-time refusal."""
+    (tmp_path / "fleet.toml").write_text(
+        BASE + '\n[agents.codex]\nmodel_flag = "--model"\nargs = "--full-auto"\n'
+    )
+    with pytest.raises(ConfigError, match="args"):
+        load_config(tmp_path)

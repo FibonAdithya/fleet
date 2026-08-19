@@ -115,10 +115,17 @@ def _agents(raw: dict) -> dict[str, AgentSpec]:
                 "appended as [model_flag, model]; without it the agent runs the "
                 "operator's default model and nothing says so."
             )
+        args = table.get("args", ())
+        if isinstance(args, str) or not isinstance(args, list | tuple):
+            raise ConfigError(
+                f"[agents.{kind}] args must be a list, got {type(args).__name__}. "
+                "A bare string is iterable too, so it would silently explode into "
+                "one flag per character instead of raising here."
+            )
         out[kind] = AgentSpec(
             kind=kind,
             model_flag=str(flag),
-            args=tuple(str(a) for a in table.get("args", ())),
+            args=tuple(str(a) for a in args),
         )
     return out
 
