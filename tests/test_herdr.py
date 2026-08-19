@@ -8,6 +8,7 @@ import pytest
 
 from fleet.cost import UnpricedModel
 from fleet.herdr import STATUS, FakeHerdr, parse_snapshot, task_of
+from fleet.model import AgentState
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/herdr/snapshot-fleet.json"
 ROOT = Path("/home/u/.fleet/worktrees")
@@ -193,3 +194,406 @@ def test_the_captured_snapshot_has_the_fields_the_parser_reads():
         assert "agent_status" in agent
         assert "cwd" in agent
         assert "value" in (agent.get("agent_session") or {})
+
+
+# --- RealHerdr -------------------------------------------------------------
+#
+# RealHerdr is never executed by the offline suite, so these tests can only pin
+# the argv it BUILDS. That is a weak instrument on its own -- a wrong flag
+# passes every one of them and fails first against the live CLI. So the replies
+# below are not hand-written: they are verbatim captures of what `herdr` on this
+# box actually printed (fixtures/herdr/README.md records the session), and every
+# flag asserted here was executed live at least once. Where a flag was rejected
+# live, the test names the error code herdr returned.
+
+WORKTREE_CREATED = Path(__file__).resolve().parents[1] / "fixtures/herdr/worktree-created.json"
+PANE_LIST = Path(__file__).resolve().parents[1] / "fixtures/herdr/pane-list.json"
+WORKSPACE_LIST = Path(__file__).resolve().parents[1] / "fixtures/herdr/workspace-list.json"
+AGENT_IN_WORKTREE = Path(__file__).resolve().parents[1] / "fixtures/herdr/agent-fleet-worktree.json"
+
+# The worktree root the captures were taken under, read out of the capture
+# rather than retyped: a copy-paste drift between the two would make every
+# workspace-lookup test resolve to None and pass for the wrong reason.
+CAPTURE_ROOT = Path(json.loads(WORKTREE_CREATED.read_text())["result"]["worktree"]["path"]).parent
+CAPTURE_TASK = 12
+CAPTURE_WORKSPACE = "w3R"
+CAPTURE_PANE = "w3R:p1"
+
+
+class RecordingRun:
+    """Captures argv instead of running it.
+
+    Replies are keyed by argv *prefix*, not by `args[0]`: every herdr call
+    starts with the literal "herdr", so a first-element key cannot tell
+    `worktree create` from `pane list` and would hand the same reply to both.
+    """
+
+    def __init__(self, replies=None):
+        self.calls: list[tuple[str, ...]] = []
+        self.replies = dict(replies or {})
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        for prefix, reply in self.replies.items():
+            if args[: len(prefix)] == prefix:
+                return reply
+        return ""
+
+    def herdr_calls(self, *prefix):
+        return [c for c in self.calls if c[: len(prefix)] == prefix]
+
+    @property
+    def flat(self):
+        return " ".join(" ".join(c) for c in self.calls)
+
+
+def _captured_replies():
+    return {
+        ("herdr", "worktree", "create"): WORKTREE_CREATED.read_text(),
+        ("herdr", "pane", "list"): PANE_LIST.read_text(),
+        ("herdr", "workspace", "list"): WORKSPACE_LIST.read_text(),
+    }
+
+
+def _real(tmp_path, run=None, worktree_root=None):
+    from fleet.herdr import RealHerdr
+
+    herdr = RealHerdr(
+        worktree_root=worktree_root or tmp_path / "worktrees",
+        projects_dir=tmp_path / "projects",
+        prices={},
+        repo_root=tmp_path / "repo",
+    )
+    herdr._run = run if run is not None else RecordingRun(_captured_replies())
+    return herdr
+
+
+def test_real_create_worktree_fetches_the_base_before_branching(tmp_path):
+    """Parent §8.2's fresh-base rule is a fetch, not a sentence. Branching off a
+    stale local `integration` is exactly the staleness the branch exists to
+    remove."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    fetches = [c for c in run.calls if c[0] == "git" and "fetch" in c]
+    assert fetches, f"no fetch before branching: {run.calls}"
+    creates = run.herdr_calls("herdr", "worktree", "create")
+    assert creates, f"no worktree create: {run.calls}"
+    assert run.calls.index(fetches[0]) < run.calls.index(creates[0])
+
+
+def test_real_create_worktree_names_the_branch_and_the_path(tmp_path):
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    path = herdr.create_worktree(task=1, slug="lid", base="integration")
+    assert path == tmp_path / "worktrees" / "1-lid"
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert create[create.index("--branch") + 1] == "fleet/1-lid"
+    assert create[create.index("--path") + 1] == str(path)
+    assert create[create.index("--label") + 1] == "fleet-1"
+
+
+def test_real_create_worktree_bases_the_branch_on_the_fetched_remote_ref(tmp_path):
+    """`--base integration` would branch off the stale local ref and make the
+    fetch decorative -- the fetch updates `origin/integration`, not
+    `integration`, so only the remote-tracking name carries what was fetched.
+    Live: `herdr worktree create ... --base origin/integration` succeeded and
+    produced a worktree tracking `origin/integration`."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert create[create.index("--base") + 1] == "origin/integration"
+
+
+def test_real_create_worktree_asks_for_json_and_records_the_workspace_id(tmp_path):
+    """The workspace id is the only handle `worktree remove` accepts, and the
+    only place herdr offers it at creation time is the `--json` body. Without
+    `--json` the id is never learned and every later removal falls back to a
+    list scan."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=CAPTURE_TASK, slug="lid-small-sample", base="integration")
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert "--json" in create
+    assert herdr.workspaces[CAPTURE_TASK] == CAPTURE_WORKSPACE
+    assert herdr.panes[CAPTURE_TASK] == CAPTURE_PANE
+
+
+def test_real_create_worktree_does_not_steal_focus(tmp_path):
+    """Six unattended dispatches that each yank the user's terminal to a new
+    workspace is a tool fighting its operator."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert "--no-focus" in create
+    assert "--focus" not in create
+
+
+def test_real_remove_worktree_addresses_the_workspace_not_the_path(tmp_path):
+    """`herdr worktree remove <path>` does not exist. Run live it returns
+    `unknown option: /some/path` and exit 2; the real command takes
+    `--workspace <ID>`."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    path = herdr.create_worktree(task=CAPTURE_TASK, slug="lid-small-sample", base="integration")
+    run.calls.clear()
+    herdr.remove_worktree(task=CAPTURE_TASK)
+    remove = run.herdr_calls("herdr", "worktree", "remove")[0]
+    assert remove[remove.index("--workspace") + 1] == CAPTURE_WORKSPACE
+    assert str(path) not in remove
+
+
+def test_real_remove_worktree_forces(tmp_path):
+    """A retired agent's worktree is very often dirty -- that is what being
+    retired mid-turn means. Live, removing a dirty worktree without `--force`
+    returns `dirty_worktree_requires_force`, so without the flag REAP would
+    fail on exactly the worktrees it exists to clean up and wedge the slot."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=CAPTURE_TASK, slug="lid-small-sample", base="integration")
+    herdr.remove_worktree(task=CAPTURE_TASK)
+    assert "--force" in run.herdr_calls("herdr", "worktree", "remove")[0]
+
+
+def test_real_remove_worktree_finds_a_workspace_it_did_not_create(tmp_path):
+    """After a daemon restart the id-to-task map in memory is gone but the
+    worktree is not. The id is recovered from `herdr workspace list`, matched
+    by the checkout path -- the same path-is-identity rule the module header
+    states, and the reason a restart is cheap.
+
+    The capture this reads back is a real 11-workspace listing: most entries
+    carry no `worktree` key at all, one is the *source* repo's own workspace
+    (created as a side effect of `worktree create --cwd`) whose checkout is
+    outside the worktree root, and only one is the fleet worktree. A lookup
+    that indexed `workspace["worktree"]` unconditionally, or that matched on
+    the label, would pick the wrong one."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run, worktree_root=CAPTURE_ROOT)
+    assert herdr.workspaces == {}, "precondition: nothing learned from a create"
+    herdr.remove_worktree(task=CAPTURE_TASK)
+    remove = run.herdr_calls("herdr", "worktree", "remove")[0]
+    assert remove[remove.index("--workspace") + 1] == CAPTURE_WORKSPACE
+
+
+def test_real_remove_worktree_of_an_unknown_task_removes_nothing(tmp_path):
+    """No workspace found means nothing to remove. Guessing an id here would
+    remove some other workspace's checkout -- someone's uncommitted work."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run, worktree_root=CAPTURE_ROOT)
+    herdr.remove_worktree(task=4242)
+    assert run.herdr_calls("herdr", "worktree", "remove") == []
+
+
+def test_real_start_agent_exports_the_role_and_the_agent_id(tmp_path):
+    """The runbook is explicit that an unset FLEET_AGENT attributes packets to
+    'manual', which is indistinguishable from a human at a keyboard -- so an
+    unattended run that produced it would look exactly like correct operation."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    herdr.start_agent(task=1, role="implementer", prompt="do the thing")
+    assert "FLEET_ROLE=implementer" in run.flat
+    assert "FLEET_AGENT=fleet-1" in run.flat
+
+
+def test_real_start_agent_exports_through_the_pane_not_the_agent(tmp_path):
+    """`herdr agent send-keys` addresses a *registered agent*. Before
+    `agent start` there is no agent, and the live CLI answers
+    `{"code":"agent_not_found"}` -- so an export sent that way never reaches the
+    shell, and every packet the agent writes is attributed to 'manual'. The
+    pane family is the one that works before an agent exists."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    herdr.start_agent(task=1, role="implementer", prompt="x")
+    exports = [
+        c for c in run.calls if any("FLEET_ROLE=implementer FLEET_AGENT=fleet-1" in a for a in c)
+    ]
+    assert exports, f"no export sent: {run.calls}"
+    assert exports[0][:3] == ("herdr", "pane", "send-text")
+
+
+def test_real_start_agent_commits_the_export_with_an_enter_key(tmp_path):
+    """`pane send-text` types; it does not submit. Without the Enter the export
+    sits unexecuted on the command line and is then swallowed by the agent that
+    starts on top of it -- and FLEET_AGENT is silently unset. Verified live:
+    send-text then `send-keys Enter`, then `echo $FLEET_AGENT` in the same pane
+    printed `fleet-999`."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    herdr.start_agent(task=1, role="implementer", prompt="x")
+    text = [i for i, c in enumerate(run.calls) if c[:3] == ("herdr", "pane", "send-text")][0]
+    enters = [
+        i
+        for i, c in enumerate(run.calls)
+        if c[:3] == ("herdr", "pane", "send-keys") and c[-1] == "Enter"
+    ]
+    assert enters, f"the export was never submitted: {run.calls}"
+    assert text < enters[0]
+    starts = [i for i, c in enumerate(run.calls) if c[:3] == ("herdr", "agent", "start")][0]
+    assert enters[0] < starts
+
+
+def test_real_start_agent_resolves_the_pane_by_workspace_id(tmp_path):
+    """`herdr pane list --cwd <path>` is not a thing: run live it returns
+    `unknown option: --cwd` and exit 2. Panes are listed by workspace."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run, worktree_root=CAPTURE_ROOT)
+    herdr.start_agent(task=CAPTURE_TASK, role="implementer", prompt="x")
+    listed = run.herdr_calls("herdr", "pane", "list")[0]
+    assert listed[listed.index("--workspace") + 1] == CAPTURE_WORKSPACE
+    assert "--cwd" not in listed
+    start = run.herdr_calls("herdr", "agent", "start")[0]
+    assert start[start.index("--pane") + 1] == CAPTURE_PANE
+
+
+def test_real_start_agent_grants_permissions_up_front(tmp_path):
+    """Parent §8: an agent waiting at an interactive prompt is the most common
+    stall, and a permission prompt is a hang that costs stall_minutes and one
+    attempt."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    herdr.start_agent(task=1, role="implementer", prompt="x")
+    assert "--permission-mode" in run.flat or "--dangerously-skip-permissions" in run.flat
+
+
+def test_real_start_agent_passes_agent_args_after_a_separator(tmp_path):
+    """`herdr agent start <NAME> --kind K --pane P [-- [AGENT_ARG]...]`: without
+    the `--`, `--permission-mode` is parsed as one of herdr's own options and
+    the start fails instead of reaching claude."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    herdr.start_agent(task=1, role="implementer", prompt="x")
+    start = run.herdr_calls("herdr", "agent", "start")[0]
+    assert start[start.index("--") + 1 :] == ("--permission-mode", "acceptEdits")
+    assert start[3] == "fleet-1"
+    assert start[start.index("--kind") + 1] == "claude"
+
+
+def test_real_start_agent_sends_the_prompt_after_the_agent_is_up(tmp_path):
+    """`herdr agent start` requires a pane already at an interactive shell
+    prompt, and `agent prompt` requires an agent already detected. Reversed, the
+    prompt is typed into a shell."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    herdr.start_agent(task=1, role="implementer", prompt="do the thing")
+    kinds = [c[2] for c in run.herdr_calls("herdr", "agent")]
+    assert kinds.index("start") < kinds.index("prompt")
+    prompt = run.herdr_calls("herdr", "agent", "prompt")[0]
+    assert prompt[3:] == ("fleet-1", "do the thing")
+
+
+def test_real_stop_agent_uses_a_key_name_herdr_accepts(tmp_path):
+    """herdr's send-keys takes *named* keys, not escape sequences. Live,
+    `send-keys <pane> '\\x03'` returns `{"code":"invalid_key","message":
+    "unsupported key \\x03"}` and exit 1, and so does `ctrl-c`; `C-c` returns
+    ok and put `^C` in the pane. A literal escape string here would make
+    stop_agent a no-op that reports success -- the agent keeps burning budget
+    while REAP believes it stopped."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.stop_agent(task=1)
+    keys = run.herdr_calls("herdr", "agent", "send-keys")[0]
+    assert keys[3] == "fleet-1"
+    assert set(keys[4:]) == {"C-c"}
+    assert "\x03" not in run.flat and "\\x03" not in run.flat
+
+
+def test_real_stop_agent_sends_the_interrupt_twice(tmp_path):
+    """Measured, not assumed: one `C-c` into a live `claude` left it running
+    (still in `herdr agent list`); a second in the same call exited it and the
+    agent disappeared from the list. A single interrupt would leave a running
+    agent that REAP has already written off -- a lost slot and unbounded
+    spend."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.stop_agent(task=1)
+    keys = run.herdr_calls("herdr", "agent", "send-keys")[0]
+    assert keys[4:] == ("C-c", "C-c")
+
+
+def test_real_stop_agent_and_remove_worktree_are_separate(tmp_path):
+    """A retired agent's worktree is removed, but a released one's branch has
+    the work on it. Fusing the two would delete a task's commits on a stall."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    run.calls.clear()
+    herdr.stop_agent(task=1)
+    assert "worktree" not in run.flat
+
+
+def test_real_agents_parses_a_captured_snapshot(tmp_path):
+    """Wiring test for `agents()`: the snapshot call is `herdr api snapshot`
+    and its body goes through `parse_snapshot` with this herdr's own root."""
+    run = RecordingRun({("herdr", "api", "snapshot"): AGENT_IN_WORKTREE.read_text()})
+    herdr = _real(tmp_path, run, worktree_root=CAPTURE_ROOT)
+    states = herdr.agents()
+    assert run.calls == [("herdr", "api", "snapshot")]
+    assert [a.task for a in states] == [999]
+
+
+def test_a_real_fleet_agent_reports_its_worktree_in_cwd():
+    """Task 10's open gate item, closed by measurement.
+
+    This is a verbatim `herdr api snapshot` record for an agent started by
+    `herdr agent start fleet-999 --kind claude --pane w3Q:p1 --
+    --permission-mode acceptEdits` inside a real `herdr worktree create`
+    worktree. Task 10 could only show a *different* tool's nested worktree
+    reporting the main checkout in `cwd`, which left open the possibility that
+    a fleet agent would too -- and a cwd-only read would then have dropped
+    every live fleet agent silently. It does not: `cwd` carries the worktree.
+    Pinned here so a herdr change that moves it fails a test instead of
+    emptying `agents()`."""
+    raw = json.loads(AGENT_IN_WORKTREE.read_text())
+    (agent,) = raw["result"]["snapshot"]["agents"]
+    assert agent["cwd"] == str(CAPTURE_ROOT / "999-probe")
+    assert agent["cwd"] == agent["foreground_cwd"]
+    assert parse_snapshot(raw, CAPTURE_ROOT) == [
+        AgentState(task=999, status="dirty", change_seq=agent["state_change_seq"], cost_usd=0.0)
+    ]
+
+
+def test_a_freshly_started_agent_has_no_session_id_yet():
+    """The same capture, one field further: a just-started agent record carries
+    no `agent_session` key at all. `parse_snapshot` must read it as cost 0.0
+    rather than raising -- a KeyError on the first tick after every dispatch
+    would take down the whole tick, not one task."""
+    raw = json.loads(AGENT_IN_WORKTREE.read_text())
+    (agent,) = raw["result"]["snapshot"]["agents"]
+    assert "agent_session" not in agent
+    prices = {"m": {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}}
+    parsed = parse_snapshot(raw, CAPTURE_ROOT, projects_dir=Path("/nonexistent"), prices=prices)
+    assert parsed[0].cost_usd == 0.0
+
+
+def test_real_run_raises_herdr_error_carrying_stderr(tmp_path):
+    """CalledProcessError carries argv and an exit code but not stderr, which is
+    where herdr puts the reason -- `{"code":"dirty_worktree_requires_force"}`
+    and friends. Losing it turns every failure into 'exit 1'."""
+    from fleet.herdr import HerdrError
+
+    herdr = _real(tmp_path)
+    with pytest.raises(HerdrError) as excinfo:
+        herdr._subprocess("git", "--this-flag-does-not-exist")
+    assert "--this-flag-does-not-exist" in str(excinfo.value)
+    assert "unknown option" in str(excinfo.value)
+
+
+def test_real_run_raises_herdr_error_when_output_is_not_json(tmp_path):
+    """herdr prints its errors as JSON on stdout for some failures and plain
+    text for others (`unknown option: --cwd`, exit 2). A bare json.JSONDecodeError
+    out of the daemon tick names neither the command nor the output."""
+    from fleet.herdr import HerdrError
+
+    run = RecordingRun({("herdr",): "unknown option: --cwd"})
+    herdr = _real(tmp_path, run)
+    with pytest.raises(HerdrError) as excinfo:
+        herdr.agents()
+    assert "unknown option" in str(excinfo.value)

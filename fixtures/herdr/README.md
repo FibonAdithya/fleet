@@ -118,10 +118,93 @@ and a possible duplicate dispatch into an occupied worktree.
 
 **This evidence is from `herdr`'s handling of a *different* tool's worktrees
 (a plain `.claude/worktrees/...` checkout), not from a `fleet/<n>-` worktree
-with a fleet-dispatched agent in it.** Whether fleet's own dispatched agents
-populate `cwd` or `foreground_cwd` with the fleet worktree path is
-**UNVERIFIED**. This is a gate item, not a resolved question: Task 11 must
-confirm it with a real `herdr agent start` inside a fresh `fleet/<n>-`
-worktree (the same `herdr agent start` this capture's own Step 1 could not run
--- see above) before `RealHerdr` is trusted to read live fleet agents
-correctly.
+with a fleet-dispatched agent in it.** Task 10 therefore left it open whether
+fleet's own dispatched agents populate `cwd` or `foreground_cwd` with the
+worktree path. **Task 11 closed that gate item by measurement** -- see
+`agent-fleet-worktree.json` below.
+
+---
+
+# `agent-fleet-worktree.json`
+
+The gate item above, closed. One verbatim agent record out of `herdr api
+snapshot`, wrapped in the same `result.snapshot.agents` envelope so
+`parse_snapshot` can read it unchanged.
+
+It was produced by doing exactly what `RealHerdr` does, live on this box:
+
+```
+git -C <repo> fetch origin integration
+herdr worktree create --cwd <repo> --branch fleet/999-probe \
+    --base origin/integration --path <root>/999-probe --label fleet-999 \
+    --no-focus --json
+herdr pane send-text  w3Q:p1 'export FLEET_ROLE=implementer FLEET_AGENT=fleet-999'
+herdr pane send-keys  w3Q:p1 Enter
+herdr agent start fleet-999 --kind claude --pane w3Q:p1 -- --permission-mode acceptEdits
+herdr api snapshot
+```
+
+`echo $FLEET_AGENT` in that pane printed `fleet-999` before the agent started,
+so the send-text/Enter pair does reach the shell.
+
+**The answer: `cwd` carries the worktree.** Both fields do, and they are
+identical:
+
+```
+cwd:            <root>/999-probe
+foreground_cwd: <root>/999-probe
+```
+
+`herdr.parse_snapshot`'s `cwd`-first order is therefore correct for fleet's
+own agents, and the `foreground_cwd` fallback is belt-and-braces for the
+nested-worktree shape rather than the path fleet actually depends on.
+`test_a_real_fleet_agent_reports_its_worktree_in_cwd` pins it.
+
+Two further facts this record carries, both load-bearing:
+
+- **No `agent_session` key at all.** A just-started agent has not written a
+  transcript yet, so it has no session id and `parse_snapshot` must read it as
+  cost `0.0` rather than raising. `test_a_freshly_started_agent_has_no_session_id_yet`
+  pins that; a `KeyError` there would take down a whole daemon tick on the
+  first poll after every dispatch.
+- **`agent_status` is `blocked`.** That is claude's *trust-this-folder* prompt,
+  which every brand-new worktree gets. `STATUS` maps `blocked` to `dirty`, so
+  under `--permission-mode acceptEdits` a fresh dispatch reads as dirty
+  immediately. See the concern recorded in the Task 11 report -- the fix is an
+  `agent_args` that skips it, and it could not be verified here because the
+  sandbox classifier blocks `--dangerously-skip-permissions`.
+
+The probe worktree, its workspace, and the throwaway repo were all removed
+afterwards (`herdr worktree remove --workspace w3Q --force`).
+
+---
+
+# `worktree-created.json`, `pane-list.json`, `workspace-list.json`
+
+Verbatim output of, respectively:
+
+```
+herdr worktree create --cwd <repo> --branch fleet/12-lid-small-sample \
+    --base origin/integration --path <root>/12-lid-small-sample \
+    --label fleet-12 --no-focus --json
+herdr pane list --workspace w3R
+herdr workspace list
+```
+
+These are what `RealHerdr` parses, and they are the replies the `RecordingRun`
+double in `tests/test_herdr.py` hands back, so the parsing is tested against
+real herdr output rather than a hand-written dict.
+
+`worktree-created.json` is the only place herdr offers the **workspace id** at
+creation time (`result.workspace.workspace_id`) and the **pane id**
+(`result.root_pane.pane_id`); `worktree remove` accepts nothing but the
+workspace id, and `agent start` nothing but the pane id.
+
+`workspace-list.json` is the restart path -- how a daemon with an empty memory
+finds a worktree's workspace id again. It is deliberately a *messy* listing:
+eight of its eleven workspaces have no `worktree` key at all, one is the source
+repo's own workspace (opened as a side effect of `worktree create --cwd`, with
+a checkout outside the worktree root), one is an unrelated repo, and exactly
+one is the fleet worktree. A lookup that indexed `workspace["worktree"]`
+unconditionally would raise on the first entry, and one that matched on
+`label` would have two candidates.
