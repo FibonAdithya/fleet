@@ -77,6 +77,24 @@ def parse_snapshot(
     carries it directly, and going via `workspace_id` would silently drop an
     agent whose workspace is missing from the same snapshot.
 
+    Resolution order for the path is `cwd` first, `foreground_cwd` as a
+    fallback when `cwd` yields no task. `cwd` is preferred because it is the
+    pane's own directory and cannot be moved by an agent wandering with `cd`;
+    `foreground_cwd` alone or first would let a wandering agent be
+    misattributed to whatever fleet worktree it happened to `cd` into. The
+    fallback exists because this box's own captured snapshot
+    (fixtures/herdr/snapshot-fleet.json) shows a real case of an agent
+    working inside a nested worktree while `cwd` stayed pinned at the main
+    checkout and only `foreground_cwd` tracked the worktree -- if fleet's own
+    agents behave the same way, reading `cwd` alone would silently drop a
+    genuinely running fleet agent with no exception, which is worse than a
+    crash (a stale slot, and a possible duplicate dispatch into an occupied
+    worktree). That evidence is from a *different* tool's worktree handling,
+    not fleet's; whether fleet's own dispatched agents populate `cwd` or
+    `foreground_cwd` with the worktree path is UNVERIFIED and is a gate item
+    for Task 11 to confirm with a real `herdr agent start` inside a fresh
+    fleet worktree before `RealHerdr` is trusted.
+
     Pricing an unpriced model is not swallowed here: `price_transcript` raises
     `UnpricedModel` on purpose (a zero price would switch the budget ceiling off
     silently), and it is left to propagate out of this call rather than caught
@@ -87,6 +105,8 @@ def parse_snapshot(
     out: list[AgentState] = []
     for agent in agents:
         task = task_of(agent.get("cwd") or "", worktree_root)
+        if task is None:
+            task = task_of(agent.get("foreground_cwd") or "", worktree_root)
         if task is None:
             continue
         status = STATUS.get(agent.get("agent_status"), "working")

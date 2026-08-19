@@ -76,3 +76,35 @@ doing the re-capture (`herdr agent start <name> --kind claude --pane
 <pane_id>`, then `herdr agent prompt <target> "..." --wait`), do that before
 taking the snapshot -- it makes the capture strictly more faithful than this
 one, which could not.
+
+## Gate item for Task 11 -- which field a fleet worktree agent actually populates is UNVERIFIED
+
+Two real agents in *this same capture* are a counter-example to reading `cwd`
+alone. Both are herdr sessions in `project-b` working inside a nested
+worktree, and in both, `cwd` stays pinned at the main checkout while
+`foreground_cwd` tracks the worktree the agent is actually in:
+
+```
+cwd: /home/u/project-b
+foreground_cwd: /home/u/project-b/.claude/worktrees/branch-1
+```
+
+(and the same pattern for the `branch-2` worktree agent, also
+in this capture). `herdr.parse_snapshot` therefore resolves the task from
+`cwd` first and falls back to `foreground_cwd` only when `cwd` yields no task
+-- `cwd` is preferred because it is the pane's own directory and cannot be
+moved by an agent wandering with `cd`; the fallback exists because, per the
+evidence above, reading `cwd` alone would silently drop a genuinely running
+agent with no exception -- worse than a crash, because it reads as an empty
+`agents()` list rather than a failure, and downstream that means a stale slot
+and a possible duplicate dispatch into an occupied worktree.
+
+**This evidence is from `herdr`'s handling of a *different* tool's worktrees
+(a plain `.claude/worktrees/...` checkout), not from a `fleet/<n>-` worktree
+with a fleet-dispatched agent in it.** Whether fleet's own dispatched agents
+populate `cwd` or `foreground_cwd` with the fleet worktree path is
+**UNVERIFIED**. This is a gate item, not a resolved question: Task 11 must
+confirm it with a real `herdr agent start` inside a fresh `fleet/<n>-`
+worktree (the same `herdr agent start` this capture's own Step 1 could not run
+-- see above) before `RealHerdr` is trusted to read live fleet agents
+correctly.
