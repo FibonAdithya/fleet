@@ -115,3 +115,39 @@ def test_a_non_positive_per_task_budget_is_refused(tmp_path):
     (tmp_path / "fleet.toml").write_text(BUDGET_TOML.format("-1.0", "25.0"))
     with pytest.raises(ConfigError, match="per_task_usd"):
         load_config(tmp_path)
+
+
+def test_prices_are_parsed_per_model(tmp_path):
+    (tmp_path / "fleet.toml").write_text(
+        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
+        'roles = "r"\nschemas = "s"\n'
+        '[prices."claude-opus-4"]\n'
+        "input = 15.0\noutput = 75.0\ncache_read = 1.5\ncache_write = 18.75\n"
+    )
+    prices = load_config(tmp_path).prices
+    assert prices["claude-opus-4"]["cache_write"] == 18.75
+
+
+def test_a_price_table_missing_a_counter_is_refused(tmp_path):
+    """Three of four rates present prices the fourth at nothing, which is the
+    same silent hole as an unpriced model -- and cache reads are most of the
+    tokens an agent spends."""
+    (tmp_path / "fleet.toml").write_text(
+        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
+        'roles = "r"\nschemas = "s"\n'
+        '[prices."claude-opus-4"]\ninput = 15.0\noutput = 75.0\ncache_read = 1.5\n'
+    )
+    with pytest.raises(ConfigError) as caught:
+        load_config(tmp_path)
+    assert "cache_write" in str(caught.value)
+
+
+def test_no_prices_table_is_an_empty_mapping_not_a_crash(tmp_path):
+    """`fleet plan --dry-run` starts no agents and needs no prices. Requiring
+    the table would break every existing fleet.toml on a key only the daemon
+    reads."""
+    (tmp_path / "fleet.toml").write_text(
+        '[repo]\nslug = "o/r"\n[policy]\nownership = "o.md"\ntask_classes = "t.md"\n'
+        'roles = "r"\nschemas = "s"\n'
+    )
+    assert load_config(tmp_path).prices == {}

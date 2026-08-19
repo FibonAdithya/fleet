@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from fleet.cost import PRICE_KEYS
 from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES, DEFAULT_MAX_REBASES
 
 try:
@@ -59,6 +60,31 @@ class FleetConfig:
     max_rebases: int
     per_task_usd: float
     fleet_usd: float
+    prices: dict[str, dict[str, float]]
+
+
+def _prices(raw: dict) -> dict[str, dict[str, float]]:
+    """Dollars per million tokens, by model.
+
+    Every table must carry all four counters. Three of four is the same silent
+    hole as an unpriced model: the missing rate prices those tokens at nothing,
+    and cache reads are most of what an agent spends.
+
+    An absent [prices] table is an empty mapping, not an error. `fleet plan
+    --dry-run` starts no agents and needs no prices; only the daemon does, and
+    it fails loudly at the first agent it cannot price.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for model, table in raw.items():
+        missing = [key for key in PRICE_KEYS if key not in table]
+        if missing:
+            raise ConfigError(
+                f"[prices.{model!r}] is missing {', '.join(missing)}. "
+                "A rate left out prices those tokens at zero, which is the hole "
+                "the ceiling exists to close."
+            )
+        out[model] = {key: float(table[key]) for key in PRICE_KEYS}
+    return out
 
 
 def _find_root(start: Path) -> Path:
@@ -90,4 +116,5 @@ def load_config(start: Path | None = None) -> FleetConfig:
             float(budget.get("per_task_usd", DEFAULT_PER_TASK_USD)), "per_task_usd"
         ),
         fleet_usd=_positive(float(budget.get("fleet_usd", DEFAULT_FLEET_USD)), "fleet_usd"),
+        prices=_prices(data.get("prices", {})),
     )
