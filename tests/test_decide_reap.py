@@ -968,3 +968,46 @@ def test_an_agent_observed_running_two_models_is_escalated():
     from fleet.model import MULTIPLE_MODELS
 
     assert Escalate(task=1, reason="model_mismatch") in _mismatch_case(MULTIPLE_MODELS)
+
+
+def test_a_reviewer_running_a_model_nobody_declared_is_escalated():
+    """The CLAIMED path is not the only live state: a reviewer runs long
+    enough to burn real money at a rate nobody chose, and it is continued
+    rather than dispatched, so it never passes through the CLAIMED branch at
+    all. Catches the REVIEW/INTEGRATING branch having no model-mismatch check
+    of its own -- the gap the CLAIMED-only version of this feature left open."""
+    task = claimed(number=5, state="review")
+    agents = [
+        AgentState(task=5, status="working", change_seq=4, cost_usd=0.1, model="claude-opus-4-8")
+    ]
+    policy = dataclasses.replace(POLICY, agents=(("reviewer", "claude", "claude-opus-5"),))
+    intents, _ = decide(FleetState(), [task], policy, agents, T0)
+    assert Escalate(task=5, reason="model_mismatch") in intents
+
+
+def test_a_reviewer_running_the_declared_model_is_left_alone():
+    """Catches a comparison that fires on every reviewer regardless of match --
+    which would escalate every healthy review in progress, the same failure
+    the CLAIMED-path sibling test guards against."""
+    task = claimed(number=5, state="review")
+    agents = [
+        AgentState(task=5, status="working", change_seq=4, cost_usd=0.1, model="claude-opus-5")
+    ]
+    policy = dataclasses.replace(POLICY, agents=(("reviewer", "claude", "claude-opus-5"),))
+    intents, _ = decide(FleetState(), [task], policy, agents, T0)
+    assert intents == []
+
+
+def test_a_claimed_task_with_no_route_is_now_visible_to_unroutable():
+    """`_STAGE` gained a `"claimed": 0` row so `_model_mismatch` could resolve
+    a CLAIMED task's role, but `_STAGE` also gates `_unroutable`
+    (`if task.state not in _STAGE or not task.auto_ok: continue`), so the same
+    row widens what that phase inspects: a CLAIMED, auto-ok task whose class
+    has no route is now a policy error `_unroutable` can name, where it was
+    previously invisible to it. Catches removing `"claimed"` from `_STAGE` --
+    which would silence this AND break every `_model_mismatch` test above."""
+    task = Task(
+        number=9, title="t", state="claimed", area="eval", klass=None, auto_ok=True, attempts=1
+    )
+    intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert Escalate(task=9, reason="unroutable") in intents

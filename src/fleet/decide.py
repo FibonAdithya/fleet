@@ -394,6 +394,15 @@ def _reap(
                 # Not _fail: Release relabels to READY, restarting the task from
                 # its implementer and discarding a review that already happened.
                 intents.append(Escalate(task=task.number, reason="stalled"))
+            elif _model_mismatch(task, agent, policy):
+                # Ahead of over_budget below, same reason as the CLAIMED path:
+                # a reviewer or integrator on an undeclared model has its
+                # `cost_usd` measured against the wrong rate, so an
+                # over_budget verdict computed from it is not a fact worth
+                # acting on. This is the role the docstring hazard names most
+                # directly -- a reviewer judges the implementer's work and
+                # runs long enough to burn real money at a rate nobody chose.
+                intents.append(Escalate(task=task.number, reason="model_mismatch"))
             elif agent.cost_usd > policy.per_task_usd:
                 # Task 3 left this branch with no cost check at all, so a
                 # reviewer that was healthy, moving and far over its ceiling got
