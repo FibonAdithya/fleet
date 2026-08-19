@@ -149,32 +149,30 @@ the repo root would show up as untracked in `git status`).
     uv run pytest tests/test_scenarios.py -v
 
 `fixtures/scenarios/` holds one file per claim, and each names its claim in its
-`proves` field. Five of the eight seed from the captured ledger
+`proves` field. Five of the nine seed from the captured ledger
 (`fixtures/ledger/issues.json`), so they are exercised against real gh output
-rather than invented rows; the three that do not say in their own `proves` why
+rather than invented rows; the four that do not say in their own `proves` why
 the capture cannot express their case. Every tick lists **every** intent that
 tick emits — the comparison is exhaustive, which is what lets a scenario assert
 an absence without writing `expect: []`.
 
 `docs/m2-inputs.md` §7 named three rows of the design's failure table as covered
-by no scenario at all. Conflict storm is now covered: `rebase-storm.yaml`
+by no scenario at all. Two are now covered. Conflict storm: `rebase-storm.yaml`
 proves `max_rebases` bounds it, and the row needed a rule, not the executor
-signal §7 guessed at. Two remain uncovered:
+signal §7 guessed at. Orphaned worktree: `orphaned-worktree.yaml`, seeded via
+`seed.agents` — an agent `FakeExecutor` never started with a `Dispatch` or
+`Continue` of its own, standing in for a worktree from outside this run's own
+history (a daemon restart, a human relabelling a row while its agent keeps
+running). `_reap`'s orphan pass (Task 4) already has unit coverage for the rule
+itself; the scenario's marginal value is the path unit tests do not chain — a
+seeded orphan retired in tick 1 through a real `expand()`/`FakeExecutor` round
+trip, with tick 2 proving the freed slot is actually dispatchable again, not
+merely that the right intent was returned in isolation.
 
-- **Duplicate discoveries** is not an allocator rule at all — `fleet discover`
-  searches existing issues first, and `tests/test_discover.py` covers it.
-  `decide()` never sees the case, so no scenario ever will either.
-- **Orphaned worktree** has a rule now (`_reap`'s orphan pass, Task 4) but no
-  scenario: `FakeExecutor` only ever puts an agent in its live set via a
-  `StartAgent` effect, which only `Dispatch`/`Continue` produce, and `expand()`
-  pairs every other intent with a `StopAgent` for the same task. So no sequence
-  of `decide()`'s own intents can leave an agent alive on a row it has moved off
-  of — the only way to get one is to seed it directly, and nothing in
-  `simulate.py`'s scenario schema does that. Confirmed by asking `FakeExecutor`
-  directly: scripting an outcome for a task that was never dispatched leaves
-  its live set empty. Covering this row needs a scenario-seeding capability
-  that does not exist yet, which is a harness change and out of scope for a
-  scenario file to make unilaterally.
+**Duplicate discoveries** remains the one row genuinely out of scope for a
+scenario: not an allocator rule at all — `fleet discover` searches existing
+issues first, and `tests/test_discover.py` covers it. `decide()` never sees
+the case, so no scenario ever will either.
 
 ## Known warts
 

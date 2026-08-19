@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from fleet.executor import FakeExecutor
-from fleet.model import Assign, CloseIssue, SetLabels, StartAgent, StopAgent
+from fleet.model import AgentState, Assign, CloseIssue, SetLabels, StartAgent, StopAgent
 from test_decide_reap import POLICY
 
 PACKET = {"to": "review", "head_sha": "a91c204"}
@@ -195,3 +195,36 @@ def test_an_unknown_outcome_is_refused():
     and the scenario would pass while proving nothing."""
     with pytest.raises(ValueError, match="unknown outcome"):
         executor().script(1, "explodes")
+
+
+def test_seed_makes_an_agent_visible_with_no_start_agent_at_all():
+    """The whole point of `seed`: an agent decide() sees before this run has
+    ever issued a Dispatch or Continue of its own -- `apply()` never called,
+    `self.applied` stays empty, and `agents()` still reports it."""
+    ex = executor()
+    ex.seed([AgentState(task=42, status="working", change_seq=7, cost_usd=0.3)])
+    assert ex.agents() == [AgentState(task=42, status="working", change_seq=7, cost_usd=0.3)]
+    assert ex.applied == []
+
+
+def test_seeding_no_agents_leaves_the_live_set_exactly_as_before():
+    """The other half: a caller that seeds nothing must see nothing seeded.
+    `simulate.run` calls `seed()` unconditionally with whatever
+    `seed.agents` yields, and an absent key yields an empty iterable -- this
+    pins that the empty case is a true no-op, not merely an untested one."""
+    ex = executor()
+    ex.seed([])
+    assert ex.agents() == []
+
+
+def test_a_seeded_agents_sequence_never_moves_backward_on_the_next_tick():
+    """`tick()` hands a task with no script the default `healthy` outcome and
+    stamps `change_seq` from the executor's own internal counter. Seeded at
+    7 with a fresh executor (`_seq` starting at 0), an unguarded `tick()`
+    would stamp 1 -- lower than the agent already reported, breaking the
+    monotonic guarantee stall detection and every other caller of
+    `change_seq` relies on."""
+    ex = executor()
+    ex.seed([AgentState(task=1, status="working", change_seq=7, cost_usd=0.0)])
+    ex.tick()
+    assert ex.agents()[0].change_seq > 7

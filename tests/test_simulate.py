@@ -39,6 +39,71 @@ def test_an_inline_scenario_dispatches():
     assert Dispatch(task=1, role="implementer", base="integration", attempt=1) in ticks[0]
 
 
+def test_a_seeded_agent_is_visible_to_the_very_first_decide_call():
+    """`seed.agents` exists to give decide() an agent it never started itself
+    -- proof that seeding actually reaches the first tick, not merely that
+    the schema accepts the key. #1 is READY and its seeded agent is
+    "working": decide() cannot see it as a healthy continuation of anything
+    (READY is not a live state), so the only way it is accounted for at all
+    is Task 4's orphan pass -- and `_dispatch` also treats the task as busy,
+    so no Dispatch competes with the Retire. `cost_usd` is left out of the
+    seed on purpose: `AgentState.cost_usd` already defaults to 0.0, so this
+    also proves the harness does not need every field to seed successfully."""
+    scenario = {
+        **INLINE,
+        "seed": {**INLINE["seed"], "agents": {1: {"status": "working", "change_seq": 1}}},
+        "ticks": [{"outcomes": {}, "expect": ["Retire(1)"]}],
+    }
+    assert run(scenario, ROOT)[0] == [Retire(task=1)]
+
+
+def test_omitting_the_agents_seed_key_is_identical_to_an_explicit_empty_one():
+    """Protects the other seven scenarios, none of which name `agents:` at
+    all. `_numbered(None)` and `_numbered({})` both yield `{}`, and
+    `FakeExecutor.seed` on an empty iterable is a no-op -- so the two must
+    produce the exact same intents, not merely "similar" ones."""
+    omitted = run(INLINE, ROOT)
+    explicit = run({**INLINE, "seed": {**INLINE["seed"], "agents": {}}}, ROOT)
+    want = [[Dispatch(task=1, role="implementer", base="integration", attempt=1)]]
+    assert omitted == explicit == want
+
+
+def test_a_seeded_agent_with_an_unknown_key_is_refused():
+    """As strict as every other seed shape in this module: an unknown field
+    on a seeded agent is a typo nobody would otherwise notice."""
+    bad = {
+        **INLINE,
+        "seed": {
+            **INLINE["seed"],
+            "agents": {1: {"status": "working", "change_seq": 1, "role": "implementer"}},
+        },
+    }
+    with pytest.raises(ScenarioError, match="unknown key"):
+        run(bad, ROOT)
+
+
+def test_a_seeded_agent_missing_change_seq_is_refused():
+    """`AgentState.change_seq` has no default -- a scenario that omits it is
+    asking the harness to invent a fact about a herdr snapshot, which is
+    exactly the "quiet stub" the schema exists to refuse."""
+    bad = {**INLINE, "seed": {**INLINE["seed"], "agents": {1: {"status": "working"}}}}
+    with pytest.raises(ScenarioError, match="missing"):
+        run(bad, ROOT)
+
+
+def test_a_seeded_agent_with_an_unknown_status_is_refused():
+    """`AgentState.status` is `"working" | "done" | "dirty"` by comment only
+    (model.py) -- a fourth value here is a status no real herdr snapshot can
+    report, and a scenario asserting on it would be asserting on a fake more
+    permissive than the real client, which the global constraints forbid."""
+    bad = {
+        **INLINE,
+        "seed": {**INLINE["seed"], "agents": {1: {"status": "sleeping", "change_seq": 1}}},
+    }
+    with pytest.raises(ScenarioError, match="unknown status"):
+        run(bad, ROOT)
+
+
 def test_expectations_are_checked_not_merely_recorded():
     """A harness that records without asserting is a harness that always passes."""
     wrong = {**INLINE, "ticks": [{"outcomes": {}, "expect": ["Dispatch(99, implementer, 1)"]}]}

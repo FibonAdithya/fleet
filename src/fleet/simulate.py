@@ -25,6 +25,7 @@ from fleet.executor import FakeExecutor
 from fleet.expand import expand
 from fleet.model import (
     Advance,
+    AgentState,
     CloseIssue,
     Continue,
     Dispatch,
@@ -44,8 +45,15 @@ from fleet.runlog import RunLog
 START = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
 
 _KEYS = {"name", "proves", "seed", "ticks"}
-_SEED_KEYS = {"issues", "ledger", "packets", "policy"}
+_SEED_KEYS = {"agents", "issues", "ledger", "packets", "policy"}
 _TICK_KEYS = {"expect", "outcomes", "packets"}
+_AGENT_KEYS = {"status", "change_seq", "cost_usd"}
+_AGENT_REQUIRED = {"status", "change_seq"}
+# `AgentState.status` is a bare `str` typed by comment only ("working" | "done"
+# | "dirty" -- model.py). A scenario that seeds an agent is standing in for a
+# real herdr snapshot, so the same three values are the only honest ones; a
+# fourth here would be a state no real agent can report.
+_AGENT_STATUSES = ("working", "done", "dirty")
 
 # Parsed structurally, not string-compared: pyyaml splits an unquoted
 # `[Dispatch(1, implementer, 1)]` into three scalars, and a string comparison
@@ -116,6 +124,25 @@ def _check(scenario: dict) -> None:
         # One of the two would win silently, so half the file would be a
         # description of a ledger the run never read.
         raise ScenarioError("seed names both a ledger and inline issues; pick one")
+
+    for task, spec in _numbered(seed.get("agents")).items():
+        # As strict as every other seed shape here: an unknown key is a typo
+        # nobody would notice, and a missing one is the harness quietly
+        # inventing a fact about a herdr snapshot the scenario never stated.
+        # `cost_usd` alone is exempt -- `AgentState.cost_usd` itself defaults
+        # to 0.0, so leaving it out asks the pure model for the same default
+        # it would give any other caller, not a value this harness made up.
+        unknown = set(spec) - _AGENT_KEYS
+        if unknown:
+            raise ScenarioError(f"unknown key(s) in seeded agent {task}: {sorted(unknown)}")
+        missing = _AGENT_REQUIRED - set(spec)
+        if missing:
+            raise ScenarioError(f"seeded agent {task} is missing {sorted(missing)}")
+        if spec["status"] not in _AGENT_STATUSES:
+            raise ScenarioError(
+                f"seeded agent {task} has unknown status {spec['status']!r}; "
+                f"expected one of {_AGENT_STATUSES}"
+            )
 
     for index, tick in enumerate(scenario["ticks"], start=1):
         unknown_tick = set(tick) - _TICK_KEYS
@@ -194,6 +221,20 @@ def run(scenario: dict, root: Path, runlog: RunLog | None = None) -> list[list[I
     seed_packets = _numbered(seed.get("packets"))
 
     executor = FakeExecutor(per_task_usd=policy.per_task_usd)
+    # `seed.agents` puts an agent in front of the very first `decide()` call,
+    # before this run has ever issued a Dispatch or Continue of its own --
+    # the one way to give decide() a worktree it did not start. No scenario
+    # names this key today; `_numbered(None)` is `{}` and `seed()` on an empty
+    # list is a no-op, so a file without it is unaffected byte for byte.
+    executor.seed(
+        AgentState(
+            task=task,
+            status=spec["status"],
+            change_seq=spec["change_seq"],
+            cost_usd=spec.get("cost_usd", 0.0),
+        )
+        for task, spec in _numbered(seed.get("agents")).items()
+    )
     state = FleetState()
     now = START
     history: list[list[Intent]] = []

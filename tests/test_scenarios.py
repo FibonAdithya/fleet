@@ -14,6 +14,7 @@ EXPECTED_STEMS = {
     "budget-drains",
     "integration-lock",
     "ledger-drift",
+    "orphaned-worktree",
     "poison-task",
     "rebase-storm",
     "stall-releases",
