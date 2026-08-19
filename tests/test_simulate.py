@@ -443,3 +443,61 @@ def test_load_scenario_reads_yaml(tmp_path):
     path = tmp_path / "s.yaml"
     path.write_text(yaml.safe_dump(INLINE))
     assert load_scenario(path)["name"] == "one-dispatch"
+
+
+# --------------------------------------------------- the agent moves the label
+
+
+def test_a_tick_can_relabel_a_row_the_way_an_agent_does():
+    """The shell's ordinary path, and until now inexpressible here.
+
+    An agent ends a stage by running `fleet handoff --to <state>`, and
+    `commands._post` moves the label itself -- so the allocator's next tick
+    reads a row that has already moved. `_apply_to_rows` folds only the
+    allocator's OWN effects, so a scenario could previously describe a label
+    move only by having decide() make it, which is the shape the real shell
+    rarely takes. #1 starts READY and is dispatched; its agent then moves the
+    label to REVIEW itself and goes, so tick 2 reads a REVIEW row with no agent
+    and continues it to the reviewer. Without the relabel the row is still
+    CLAIMED and tick 2 releases it as ledger drift instead.
+    """
+    scenario = {
+        **INLINE,
+        "ticks": [
+            {"outcomes": {}, "expect": ["Dispatch(1, implementer, 1)"]},
+            {
+                "relabel": {1: "review"},
+                "outcomes": {1: "vanished"},
+                "expect": ["Continue(1, reviewer)"],
+            },
+        ],
+    }
+    assert run(scenario, ROOT)[1] == [Continue(task=1, role="reviewer", base="integration")]
+
+
+def test_a_relabel_replaces_the_old_state_label_rather_than_adding_to_it():
+    """Two state labels on one row is a ledger `ledger.read_one` cannot read
+    honestly, and it is what a relabel that only appends would produce. Written
+    exactly as `expand._to_state` writes one: every other state label off."""
+    scenario = {
+        **INLINE,
+        "ticks": [
+            {"outcomes": {}, "expect": ["Dispatch(1, implementer, 1)"]},
+            # If `fleet:ready` survived the move, #1 would still look
+            # dispatchable and tick 2 would try to start a second agent on it.
+            {"relabel": {1: "human"}, "outcomes": {}, "expect": ["Retire(1)"]},
+        ],
+    }
+    assert run(scenario, ROOT)[1] == [Retire(task=1)]
+
+
+def test_a_relabel_to_a_state_with_no_label_is_refused():
+    """As strict as every other shape in this schema. A typo would move a row
+    to a state nothing reads, and the tick would then assert an absence it
+    produced by accident rather than by policy."""
+    bad = {
+        **INLINE,
+        "ticks": [{"relabel": {1: "finished"}, "outcomes": {}, "expect": []}],
+    }
+    with pytest.raises(ScenarioError, match="unknown state"):
+        run(bad, ROOT)

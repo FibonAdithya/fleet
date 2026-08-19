@@ -268,11 +268,46 @@ class Retire:
 
 
 @dataclass(frozen=True)
+class Close:
+    """The work is over and the row still says OPEN. End it.
+
+    Spec §6 makes reaching DONE close the issue, and `expand(Advance(to="done"))`
+    does exactly that -- but nothing in the real shell emits that Advance. An
+    integrator reaches DONE by running `fleet handoff --to done`, and
+    `commands._post` moves the label itself, so the allocator's next tick reads
+    a row already at `fleet:done`. That state is not in `decide._LIVE`, so the
+    row loop skipped it entirely; the orphan pass then emitted `Retire`, which
+    deliberately expresses no state change and carries no close. The row stayed
+    OPEN for the rest of the night.
+
+    Distinct from `Retire` rather than a field on it, because `Retire`'s value
+    is precisely that it CANNOT express a state change -- an agent that wrote
+    its own transition must not have it rewritten. Bolting a close on would
+    take that property away from every use of it.
+
+    Distinct from `Advance(to="done")` too, and for the opposite reason: there
+    is no relabel to make. The label is already `fleet:done` and the agent is
+    the one that put it there.
+
+    No state field, for the same reason `Retire` has none: this intent closes a
+    row that has already chosen its terminal label, and closing is the only
+    thing it may do. Emitted for as long as the row reads OPEN at `fleet:done`,
+    so a close that does not land is retried on the next tick and one that does
+    is never repeated -- a closed row falls to the closed-row rule above it,
+    which produces nothing at all once its agent is gone.
+    """
+
+    task: int
+
+
+@dataclass(frozen=True)
 class Drain:
     reason: str
 
 
-Intent = Dispatch | Continue | Release | Rebase | Escalate | Unblock | Advance | Retire | Drain
+Intent = (
+    Dispatch | Continue | Release | Rebase | Escalate | Unblock | Advance | Retire | Close | Drain
+)
 
 
 # ---------------------------------------------------------------- effects

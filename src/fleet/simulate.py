@@ -17,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from fleet import labels as labels_module
 from fleet import ledger as ledger_module
 from fleet import policy as policy_module
 from fleet.config import load_config
@@ -26,6 +27,7 @@ from fleet.expand import expand
 from fleet.model import (
     Advance,
     AgentState,
+    Close,
     CloseIssue,
     Continue,
     Dispatch,
@@ -46,7 +48,7 @@ START = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
 
 _KEYS = {"name", "proves", "seed", "ticks"}
 _SEED_KEYS = {"agents", "issues", "ledger", "packets", "policy"}
-_TICK_KEYS = {"expect", "outcomes", "packets"}
+_TICK_KEYS = {"expect", "outcomes", "packets", "relabel"}
 _AGENT_KEYS = {"status", "change_seq", "cost_usd"}
 _AGENT_REQUIRED = {"status", "change_seq"}
 # `AgentState.status` is a bare `str` typed by comment only ("working" | "done"
@@ -59,7 +61,7 @@ _AGENT_STATUSES = ("working", "done", "dirty")
 # `[Dispatch(1, implementer, 1)]` into three scalars, and a string comparison
 # turns that into a silent mismatch instead of a complaint about the file.
 _CALL = re.compile(r"^(\w+)\((.*)\)$")
-_INTENTS = (Advance, Continue, Dispatch, Drain, Escalate, Rebase, Release, Retire, Unblock)
+_INTENTS = (Advance, Close, Continue, Dispatch, Drain, Escalate, Rebase, Release, Retire, Unblock)
 _INTENT_NAMES = frozenset(cls.__name__ for cls in _INTENTS)
 
 
@@ -148,6 +150,15 @@ def _check(scenario: dict) -> None:
         unknown_tick = set(tick) - _TICK_KEYS
         if unknown_tick:
             raise ScenarioError(f"unknown key(s) in tick {index}: {sorted(unknown_tick)}")
+        for task, state in _numbered(tick.get("relabel")).items():
+            # Checked against the label vocabulary for the same reason a seeded
+            # agent's status is: a typo would relabel a row to a state nothing
+            # reads and the tick would assert an absence it produced by accident.
+            if state not in labels_module.STATES:
+                raise ScenarioError(
+                    f"tick {index} relabels task {task} to unknown state {state!r}; "
+                    f"expected one of {labels_module.STATES}"
+                )
         if tick.get("expect") is None:
             # Absent meant "do not check", so one mistyped key produced a green
             # scenario proving nothing. `expect: []` is the way to assert an
@@ -176,6 +187,32 @@ def _rows(seed: dict, root: Path) -> list[dict]:
     else:
         raw = list(seed.get("issues", []))
     return [dict(row, labels=_label_names(row.get("labels", []))) for row in raw]
+
+
+def _relabel(rows: list[dict], task: int, state: str) -> list[dict]:
+    """The agent writes its own state transition, before the allocator sees it.
+
+    This is the shell's ordinary path, not an exotic one: an agent ends a stage
+    by running `fleet handoff --to <state>`, and `commands._post` moves the
+    label itself. The allocator's next tick therefore reads a row that has
+    already moved, and every rule that keys on the state a row arrives in
+    depends on that being expressible here. Nothing else in this harness can
+    produce it -- `_apply_to_rows` folds only the allocator's OWN effects, so a
+    scenario could previously describe a label move only by having decide()
+    make it, which is precisely the shape the real shell rarely takes.
+
+    Written exactly as `expand._to_state` writes one: every other state label
+    off, this one on, everything else untouched.
+    """
+    label = labels_module.state_label(state)
+    updated = []
+    for row in rows:
+        if row["number"] != task:
+            updated.append(row)
+            continue
+        kept = [name for name in row["labels"] if name not in labels_module.all_state_labels()]
+        updated.append(dict(row, labels=[*kept, label]))
+    return updated
 
 
 def _numbered(mapping: dict | None) -> dict[int, dict]:
@@ -240,6 +277,13 @@ def run(scenario: dict, root: Path, runlog: RunLog | None = None) -> list[list[I
     history: list[list[Intent]] = []
 
     for index, tick in enumerate(scenario["ticks"], start=1):
+        # Before anything else this tick: the agent moved the label at some
+        # point during the interval that just elapsed, so the allocator reads
+        # the moved row, exactly as it would in the shell.
+        # `moved_to`, not `state`: `state` is this loop's carried FleetState,
+        # and shadowing it here handed decide() a string on the next tick.
+        for task, moved_to in _numbered(tick.get("relabel")).items():
+            rows = _relabel(rows, task, moved_to)
         handovers = _numbered(tick.get("packets"))
         for task, outcome in _numbered(tick.get("outcomes")).items():
             try:

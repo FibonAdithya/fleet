@@ -658,3 +658,41 @@ def test_a_drain_that_lifts_dispatches_again(cfg, tmp_path):
     assert second.draining is False
     assert number in herdr.worktrees
     assert _kinds(tmp_path) == ["Drain", "Dispatch"]
+
+
+def test_a_done_row_is_actually_closed_on_github(cfg, tmp_path):
+    """Spec §6 all the way to the client, not just to the intent.
+
+    `Close` is only worth anything if `CloseIssue` reaches `gh.close_issue`, and
+    that hop crosses expand, the executor and the fake gh -- none of which the
+    scenario harness exercises. The integrator has already moved the label to
+    `fleet:done` itself, which is the shape that reached a final review with no
+    issue ever being closed.
+    """
+    daemon, gh, herdr = _daemon(cfg, tmp_path)
+    number = gh.create_issue(
+        "Integrate the epic",
+        "b",
+        ["fleet:done", "fleet:attempt-1", "area:eval", "class:patch", "fleet:auto-ok"],
+    )
+    herdr.add_agent(task=number, status="done", change_seq=4, cost_usd=1.5)
+    daemon.tick(T0)
+    assert gh.get_issue(number)["state"] == "CLOSED"
+    assert number in herdr.stopped
+    assert _kinds(tmp_path) == ["Close"]
+
+
+def test_a_closed_row_produces_no_further_intents(cfg, tmp_path):
+    """The bound. Once the close lands the row is CLOSED with no agent, and it
+    must draw nothing at all -- an intent per closed row per tick is a gh call
+    per closed row per tick, all night, and a run log the grader cannot read."""
+    daemon, gh, herdr = _daemon(cfg, tmp_path)
+    number = gh.create_issue(
+        "Integrate the epic",
+        "b",
+        ["fleet:done", "fleet:attempt-1", "area:eval", "class:patch", "fleet:auto-ok"],
+    )
+    herdr.add_agent(task=number, status="done", change_seq=4, cost_usd=1.5)
+    for index in range(4):
+        daemon.tick(T0 + timedelta(minutes=index))
+    assert _kinds(tmp_path) == ["Close"]

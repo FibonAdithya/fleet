@@ -7,6 +7,7 @@ from fleet.decide import decide
 from fleet.model import (
     Advance,
     AgentState,
+    Close,
     Dispatch,
     Escalate,
     FleetState,
@@ -686,3 +687,102 @@ def test_a_packet_with_no_attempt_field_does_not_advance():
     agents = [AgentState(task=5, status="done", change_seq=4)]
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
     assert not any(isinstance(i, Advance) for i in intents)
+
+
+# ---------------------------------------------------- an OPEN row at DONE
+
+
+def test_an_open_row_at_done_is_closed():
+    """Spec §6: reaching DONE closes the issue. Nothing in the real shell did.
+
+    `expand(Advance(to="done"))` appends CloseIssue, but an integrator reaches
+    DONE by running `fleet handoff --to done`, and `commands._post` moves the
+    label itself. The next tick therefore reads `fleet:done`, which is not in
+    `_LIVE`, so the row loop skipped it before `_advance` was reachable at all
+    -- and the orphan pass emitted `Retire`, whose expansion deliberately
+    carries no relabel and no close. The row stayed OPEN forever, spec §6 was
+    unmet, and `_unblock`'s closed-dependency rule had nothing to read.
+    """
+    done = Task(
+        number=5, title="t", state="done", area="eval", klass="patch", auto_ok=True, is_open=True
+    )
+    agents = [AgentState(task=5, status="done", change_seq=3)]
+    intents, _ = decide(FleetState(), [done], POLICY, agents, T0)
+    assert intents == [Close(task=5)]
+
+
+def test_an_open_row_at_done_with_no_agent_is_left_alone():
+    """The gate, and it is the rule rather than an optimisation.
+
+    An OPEN row at `fleet:done` with no agent is not the fleet's work
+    finishing -- it is a row somebody else labelled. blocked-self-resolves.yaml
+    is the standing case: issue 11 is a dependency recorded as complete by hand,
+    OPEN and `fleet:done`, and the allocator has never run it. Closing on the
+    strength of a label a human wrote would have the allocator closing issues it
+    never touched, and `_unblock` already reads `state == "done"` as satisfied
+    without needing the row closed.
+    """
+    done = Task(
+        number=5, title="t", state="done", area="eval", klass="patch", auto_ok=True, is_open=True
+    )
+    assert decide(FleetState(), [done], POLICY, [], T0)[0] == []
+
+
+def test_a_close_that_does_not_land_is_retried_on_the_next_tick():
+    """Idempotence, by order rather than by memory.
+
+    `expand(Close)` closes before it stops, so a gh outage that fails the close
+    leaves both of this branch's conditions true -- the row still OPEN, the
+    agent still live -- and the next tick arrives here and tries again. Stopping
+    first would spend the one piece of evidence that re-arms the retry, and the
+    row would sit OPEN at `fleet:done` for the rest of the night.
+    """
+    done = Task(
+        number=5, title="t", state="done", area="eval", klass="patch", auto_ok=True, is_open=True
+    )
+    agents = [AgentState(task=5, status="done", change_seq=3)]
+    state = FleetState()
+    for minute in range(3):
+        intents, state = decide(state, [done], POLICY, agents, T0 + timedelta(minutes=minute))
+        assert intents == [Close(task=5)]
+
+
+def test_a_row_at_done_draws_exactly_one_intent():
+    """The orphan pass's `handled` guard, restated for this row. A task at DONE
+    with an agent is also, verbatim, the orphan condition -- an agent on a row
+    that is not live -- so without the guard it draws Close AND Retire, two
+    intents for one task in one tick, two StopAgents, and two run-log lines for
+    one event."""
+    done = Task(
+        number=5, title="t", state="done", area="eval", klass="patch", auto_ok=True, is_open=True
+    )
+    agents = [AgentState(task=5, status="working", change_seq=3)]
+    intents, _ = decide(FleetState(), [done], POLICY, agents, T0)
+    assert len(intents) == 1
+    assert only(intents, Retire) == []
+
+
+def test_a_closed_row_at_done_produces_nothing_however_many_ticks_pass():
+    """The bound on the rule above. Once the close lands the row is CLOSED with
+    no agent, and it must produce nothing at all, forever -- an intent per
+    closed row per tick floods the run log with a fleet's worth of no-ops, and
+    every one of them is a gh call."""
+    closed = Task(
+        number=5, title="t", state="done", area="eval", klass="patch", auto_ok=True, is_open=False
+    )
+    state = FleetState()
+    for minute in range(5):
+        intents, state = decide(state, [closed], POLICY, [], T0 + timedelta(minutes=minute))
+        assert intents == []
+
+
+def test_closing_a_done_row_charges_its_agent_once():
+    """`Close` stops the agent, so that agent's cost is final on the tick it
+    fires -- it belongs in REAPING for the same reason Retire does. Left out,
+    the integrator's whole spend is never counted against the ceiling."""
+    done = Task(
+        number=5, title="t", state="done", area="eval", klass="patch", auto_ok=True, is_open=True
+    )
+    agents = [AgentState(task=5, status="done", change_seq=3, cost_usd=1.75)]
+    _, state = decide(FleetState(), [done], POLICY, agents, T0)
+    assert state.spent_usd == 1.75

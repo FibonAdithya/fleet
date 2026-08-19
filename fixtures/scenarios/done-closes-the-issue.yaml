@@ -1,0 +1,42 @@
+name: done-closes-the-issue
+proves: >-
+  parent §11 "integrator merges and the task reaches DONE", taken by the shape
+  the real shell actually produces. The integrator ends its stage by running
+  `fleet handoff --to done`, and commands._post moves the label itself -- so
+  the allocator never sees a CLAIMED row to advance and never emits
+  Advance(to=done), which is the only intent whose expansion carried a
+  CloseIssue. The row then read fleet:done, a state that is not in _LIVE, so
+  the per-row loop skipped it and the orphan pass emitted Retire, which
+  deliberately expresses no state change and no close. No issue was ever
+  closed. Deliberately NOT modelled on integration-lock.yaml's
+  "Advance(20, done)": that shape requires the allocator to move the label,
+  which happens only in the one-tick race where the packet is visible before
+  the label has caught up.
+seed:
+  policy: fixtures/policy/fleet-fixture
+  issues:
+    - {number: 20, title: "integrate the reporting epic", state: OPEN, assignees: [],
+       labels: ["fleet:integrating", "fleet:attempt-1", "fleet:auto-ok", "area:eval",
+                "class:patch"]}
+ticks:
+  # INTEGRATING is a continuation: #20 already holds its slot and its area, so
+  # the integrator is started without relabelling anything.
+  - outcomes: {}
+    expect:
+      - "Continue(20, integrator)"
+  # The integrator merges, runs `fleet handoff --to done` -- which moves the
+  # label under the allocator, exactly as commands._post does -- and exits.
+  # The allocator arrives to a row already at fleet:done with a finished agent,
+  # and closes it. Retire would leave it OPEN forever.
+  - relabel: {20: done}
+    outcomes: {20: clean_exit}
+    packets: {20: {to: done, attempt: 1}}
+    expect:
+      - "Close(20)"
+  # The consequence, and the bound on it. The row is CLOSED with no agent, so
+  # it produces nothing at all -- not one intent per tick for the rest of the
+  # night, which is what an ungated close would write into the run log.
+  - outcomes: {}
+    expect: []
+  - outcomes: {}
+    expect: []

@@ -7,6 +7,7 @@ from fleet.labels import static_vocabulary
 from fleet.model import (
     Advance,
     Assign,
+    Close,
     CloseIssue,
     Continue,
     Dispatch,
@@ -211,3 +212,32 @@ def test_every_label_written_is_within_the_static_vocabulary():
         for effect in labels_of(expand(intent, POLICY)):
             assert set(effect.add) <= vocabulary
             assert set(effect.remove) <= vocabulary
+
+
+def test_close_closes_the_issue_and_stops_the_agent():
+    """Spec §6's close, on the path the real shell actually takes: the agent
+    moved the label to `fleet:done` itself, so there is nothing to relabel and
+    only the close is left. StopAgent for the same reason Advance carries one --
+    an agent left in the executor's live set keeps reporting cost every tick."""
+    assert expand(Close(task=5), POLICY) == [CloseIssue(task=5), StopAgent(task=5)]
+
+
+def test_close_writes_no_labels_at_all():
+    """The label is the one thing the agent got right, and this intent must not
+    be able to express a relabel -- the same property `Retire` has. A SetLabels
+    here would let a close rewrite a terminal state an agent chose."""
+    assert not [e for e in expand(Close(task=5), POLICY) if isinstance(e, SetLabels)]
+
+
+def test_close_closes_before_it_stops_so_a_failed_close_can_be_retried():
+    """Order, not just membership, and the opposite order from Advance-to-done.
+
+    `decide` emits Close only while the row is OPEN and its agent is live, so
+    those two facts ARE the retry condition. Stopping first spends the agent on
+    an attempt that then fails its close, and the row sits OPEN at `fleet:done`
+    for the rest of the night with nothing left to re-arm it. The reverse
+    failure -- close lands, stop fails -- is already covered: that is a CLOSED
+    row with an agent, which `_reap`'s closed-row rule retires.
+    """
+    effects = expand(Close(task=5), POLICY)
+    assert effects.index(CloseIssue(task=5)) < effects.index(StopAgent(task=5))

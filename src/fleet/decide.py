@@ -18,6 +18,7 @@ from fleet import labels as labels_module
 from fleet.model import (
     Advance,
     AgentState,
+    Close,
     Continue,
     Dispatch,
     Drain,
@@ -40,7 +41,7 @@ from fleet.model import (
 # that lets the two definitions drift -- at which point the run log and
 # FleetState.spent_usd disagree, and a restart resumes on a different budget
 # from the one it stopped with.
-REAPING = (Advance, Release, Rebase, Escalate, Retire)
+REAPING = (Advance, Release, Rebase, Escalate, Retire, Close)
 
 _DRAIN_FRACTION = 0.8
 
@@ -228,6 +229,50 @@ def _reap(
             # itself as available work that nothing will ever pick up.
             if task.number in by_task:
                 intents.append(Retire(task=task.number))
+            continue
+        if task.state == "done":
+            # OPEN, labelled done, and an agent that put it there. Spec §6 makes
+            # reaching DONE close the issue and `expand(Advance(to="done"))`
+            # does -- but nothing in the real shell emits that Advance. An
+            # integrator reaches DONE by running `fleet handoff --to done`, and
+            # `commands._post` moves the label itself, so this tick reads a row
+            # already at `fleet:done`. That state is not in `_LIVE`, so the
+            # branch below skipped it before `_advance` was ever reachable, and
+            # the orphan pass emitted `Retire` -- which deliberately carries no
+            # relabel and no close. The row stayed OPEN for the rest of the
+            # night: spec §6 unmet, and `_unblock`'s closed-dependency rule with
+            # nothing to read.
+            #
+            # Gated on an agent, and that gate is the rule, not an optimisation.
+            # An OPEN row at `fleet:done` with no agent is not the fleet's work
+            # finishing; it is a row somebody else labelled -- a dependency
+            # recorded as complete by hand, which is exactly
+            # blocked-self-resolves.yaml's issue 11. Closing those would make
+            # the allocator close issues it never ran, on the strength of a
+            # label a human wrote. The residual cost is stated rather than
+            # hidden: if the daemon is down across the one tick between the
+            # label move and the close AND herdr loses the agent in the same
+            # window, that row stays OPEN and a human closes it. One narrow
+            # window, against closing every hand-labelled row on the ledger.
+            #
+            # Idempotent by ORDER rather than by repetition, which is why
+            # `expand(Close)` closes before it stops. A close that does not land
+            # leaves the row OPEN with its agent still live, so the next tick
+            # arrives here again and retries. A close that lands but whose stop
+            # fails leaves a CLOSED row with an agent, which the closed-row rule
+            # directly above already retires. Neither failure is terminal and
+            # neither needs memory.
+            #
+            # Ahead of the `_LIVE` check and below the closed-row rule, which is
+            # what bounds it: once the close lands, `is_open` goes False and the
+            # row falls to that rule -- which, with its agent gone, produces
+            # nothing at all, every tick, forever.
+            #
+            # One intent, not two: this task is also, verbatim, the orphan
+            # condition -- an agent on a row that is not live -- and the orphan
+            # pass's `handled` set is what keeps it from drawing a Retire too.
+            if task.number in by_task:
+                intents.append(Close(task=task.number))
             continue
         if task.state not in _LIVE:
             continue

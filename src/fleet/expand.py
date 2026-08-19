@@ -13,6 +13,7 @@ from fleet import labels as labels_module
 from fleet.model import (
     Advance,
     Assign,
+    Close,
     CloseIssue,
     Continue,
     Dispatch,
@@ -115,6 +116,30 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         # drain is computed from live agents. Assign(None) because the allocator
         # is the sole writer of ownership and this task no longer has an owner.
         return [StopAgent(task=intent.task), Assign(task=intent.task, owner=None)]
+
+    if isinstance(intent, Close):
+        # No SetLabels, on purpose. The row is already at `fleet:done` because
+        # the agent's own `fleet handoff --to done` put it there, and this
+        # intent must not be able to rewrite a terminal label an agent chose --
+        # the same property Retire has, kept by having no state to write.
+        #
+        # Close FIRST, stop second -- the opposite of Advance-to-done, and for a
+        # reason that only holds here. Advance writes a label, so its close goes
+        # last: an edit failing after the close would leave a closed issue with
+        # no terminal state. This intent writes no label, and what it needs
+        # instead is to be retryable.
+        #
+        # `decide` emits this only while the row is OPEN and its agent is live,
+        # so a close that fails leaves both facts true and the next tick tries
+        # again. Stopping first would spend the agent -- the only evidence the
+        # fleet ran this task -- on an attempt that then failed, and the row
+        # would sit OPEN at `fleet:done` for the rest of the night with nothing
+        # left to re-arm the retry.
+        #
+        # The reverse failure is already handled: a close that lands over a stop
+        # that fails leaves a CLOSED row with an agent, which is `_reap`'s
+        # closed-row rule, which retires it.
+        return [CloseIssue(task=intent.task), StopAgent(task=intent.task)]
 
     if isinstance(intent, Advance):
         if intent.to not in labels_module.STATES:

@@ -12,6 +12,7 @@ EXPECTED_STEMS = {
     "area-exclusion",
     "blocked-self-resolves",
     "budget-drains",
+    "done-closes-the-issue",
     "integration-lock",
     "ledger-drift",
     "orphaned-worktree",
