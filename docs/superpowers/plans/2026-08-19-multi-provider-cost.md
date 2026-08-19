@@ -240,6 +240,7 @@ Create `tests/test_codex_cost.py`:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -249,7 +250,7 @@ PRICES = {
     "gpt-test": {"input": 10.0, "output": 100.0, "cache_read": 1.0, "cache_write": 20.0},
 }
 
-PROVIDER = CodexProvider(sessions_dir="/nonexistent")
+PROVIDER = CodexProvider(sessions_dir=Path("/nonexistent"))
 
 
 def _model(name="gpt-test"):
@@ -501,10 +502,23 @@ Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Mutation-check the fold**
 
-In `src/fleet/cost.py`, temporarily change `_codex_last_total` to accumulate
-instead of replace (`last = {**(last or {}), **total}` → or simply sum
-`input_tokens`), run `uv run pytest tests/test_codex_cost.py -v`, and confirm
-`test_cumulative_totals_are_folded_by_last_not_sum` FAILS. Restore the file.
+The mutation must actually **sum**. A merge such as
+`last = {**(last or {}), **total}` replaces keys rather than adding them and
+leaves every test passing, which would prove nothing. Use this in
+`_codex_last_total`:
+
+```python
+        if isinstance(total, dict):
+            if last is None:
+                last = dict(total)
+            else:
+                last = {k: (last.get(k) or 0) + (v or 0) for k, v in total.items()}
+```
+
+Run `uv run pytest tests/test_codex_cost.py -v` and confirm
+`test_cumulative_totals_are_folded_by_last_not_sum` FAILS with 60.0 against an
+expected 30.0. Restore the file with `git checkout -- src/fleet/cost.py` and
+re-run to confirm green.
 
 - [ ] **Step 6: Commit**
 
@@ -867,8 +881,18 @@ Add to `Policy` in `src/fleet/model.py`, after `routes`:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_policy.py -v`
-Expected: FAIL — every existing `Policy(...)` construction now needs `agents=`. Fix each by adding `agents=()` to test constructions that do not exercise it, then re-run until PASS.
+Run: `uv run pytest -v`
+Expected: FAIL — `agents` is a required field with no default, so every existing
+`Policy(...)` construction breaks. There are exactly three outside `policy.py`;
+add `agents=()` to each, since none of them exercises routing:
+
+- `tests/test_model.py:36` — `Policy(**{**fields, **kw})`; add `agents: ()` to the `fields` dict
+- `tests/test_decide_reap.py:24` — the module-level `POLICY` constant
+- any `Policy(` added by earlier tasks in this plan
+
+Run the **whole** suite, not just `test_policy.py` — the other two live in files
+this task does not otherwise touch, and a task-scoped run would report green
+while the suite is red.
 
 - [ ] **Step 5: Commit**
 
@@ -931,10 +955,20 @@ def _config_with_agent_table(tmp_path, agent: str, model: str):
         classes.read_text()
         + f"\n\n| Role | Agent | Model |\n|---|---|---|\n| `implementer` | `{agent}` | `{model}` |\n"
     )
+    # A fresh fleet.toml, NOT an append. Task 10 adds [prices."claude-opus-5"]
+    # to the fixture, and tomllib rejects a duplicate table outright
+    # (`Cannot declare ('prices', 'm') twice`), so appending here would make
+    # this helper start raising TOMLDecodeError the moment Task 10 lands.
     (root / "fleet.toml").write_text(
-        (root / "fleet.toml").read_text()
-        + '\n[prices."claude-opus-5"]\ninput = 5.0\noutput = 25.0\n'
-        + "cache_read = 0.5\ncache_write = 10.0\n"
+        '[repo]\nslug = "FibonAdithya/fleet-fixture"\n'
+        'integration_branch = "integration"\n\n'
+        "[policy]\n"
+        'ownership = "docs/agent/ownership.md"\n'
+        'task_classes = "docs/agent/task-classes.md"\n'
+        'roles = ".agents/roles"\nschemas = ".agents/schemas"\n\n'
+        '[agents.claude]\nmodel_flag = "--model"\nargs = []\n\n'
+        '[prices."claude-opus-5"]\n'
+        "input = 5.0\noutput = 25.0\ncache_read = 0.5\ncache_write = 10.0\n"
     )
     return load_config(root)
 ```
@@ -949,7 +983,19 @@ Expected: FAIL — `load` currently raises nothing.
 In `src/fleet/policy.py`, add the import and extend `load`:
 
 ```python
-from fleet.cost import build_providers
+from fleet.cost import PROVIDER_KINDS
+```
+
+`PROVIDER_KINDS` rather than `set(build_providers(Path.home()))`: validation
+needs only the key set, and reaching for the real home directory makes a pure
+check depend on the environment it happens to run in. Add it to `cost.py` beside
+`build_providers`, and make `build_providers` return exactly these keys:
+
+```python
+#: The agent kinds that have a transcript reader. `build_providers` returns
+#: exactly these keys; validation compares against the names alone so it needs
+#: no filesystem and no home directory.
+PROVIDER_KINDS = frozenset({"claude", "codex"})
 ```
 
 ```python
@@ -963,7 +1009,7 @@ def _validate_agents(
     mid-run, after spending, which is docs/m3-inputs.md §1.2's failure exactly.
     Declaring it moves that to a startup error, before anything is dispatched.
     """
-    known = set(build_providers(Path.home()))
+    known = set(PROVIDER_KINDS)
     for role, kind, model in agents:
         if kind not in known:
             raise PolicyError(
@@ -991,11 +1037,20 @@ def load(cfg: FleetConfig) -> Policy:
         areas=parse_ownership(cfg.ownership.read_text()),
         routes=parse_routes(classes_text, roles),
         agents=agents,
-        ...
+        slots=cfg.slots,
+        stall_minutes=cfg.stall_minutes,
+        max_attempts=cfg.max_attempts,
+        max_fix_passes=cfg.max_fix_passes,
+        max_rebases=cfg.max_rebases,
+        per_task_usd=cfg.per_task_usd,
+        fleet_usd=cfg.fleet_usd,
+        integration_branch=cfg.integration_branch,
     )
 ```
 
-Keep the remaining `Policy(...)` fields exactly as they are today.
+Note `cfg.task_classes.read_text()` is now called **once** and reused by both
+`parse_agents` and `parse_routes`; today `load` reads it inline. Reading it
+twice would work but doubles the I/O on every daemon start for no reason.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1018,7 +1073,7 @@ that to a startup error, before anything is dispatched."
 ### Task 7: Launch each role on its declared agent and model
 
 **Files:**
-- Modify: `src/fleet/herdr.py:370-395` (`RealHerdr.__init__`), `src/fleet/herdr.py:703-723` (`_start`)
+- Modify: `src/fleet/herdr.py:370-395` (`RealHerdr.__init__`), `src/fleet/herdr.py:684-723` (`RealHerdr.start_agent`)
 - Modify: `src/fleet/herdr_executor.py`
 - Test: `tests/test_herdr.py`
 
@@ -1076,7 +1131,10 @@ Replace the `agent_kind` / `agent_args` parameters in `RealHerdr.__init__`:
         self.routing = dict(routing or {})
 ```
 
-In `_start`, replace the `start = [...]` block:
+There is **no `_start` method** — the launch code lives inside
+`RealHerdr.start_agent` (`herdr.py:684`), which already takes `role` as its
+second parameter. Nothing needs threading through. Replace the `start = [...]`
+block inside `start_agent`:
 
 ```python
         spec_for_role = self.routing.get(role)
@@ -1097,9 +1155,6 @@ In `_start`, replace the `start = [...]` block:
         start += ["--", *extra]
         self._run(*start)
 ```
-
-`_start` must now receive `role`. It is already passed to `start_agent`
-(`herdr_executor.py:177`); thread it through to `_start`.
 
 In `src/fleet/cli.py`, build both mappings when constructing `RealHerdr`:
 
@@ -1287,9 +1342,26 @@ parameter and replace the pricing block:
                         cost = reading.cost_usd
                         if len(reading.models) == 1:
                             model = next(iter(reading.models))
+                        elif len(reading.models) > 1:
+                            # NOT None. None means "not known yet" and is
+                            # deliberately ignored by the mismatch check, so
+                            # collapsing this case into it would make a fallback
+                            # substitution mid-session -- the very thing §4
+                            # exists to catch -- pass vacuously.
+                            model = MULTIPLE_MODELS
 ```
 
 Pass `model=model` into the `AgentState(...)` construction.
+
+Add the sentinel to `src/fleet/model.py`, beside `AgentState`:
+
+```python
+#: `AgentState.model` when a transcript named more than one model carrying
+#: tokens. Distinct from None, which means "no transcript yet". A declared
+#: model can never equal this string, so the mismatch check escalates it
+#: without needing a special case.
+MULTIPLE_MODELS = "<multiple>"
+```
 
 Update `RealHerdr.agents` to pass `self.providers`, and `RealHerdr.__init__` to
 accept `providers: dict[str, Provider] | None = None`, defaulting to
@@ -1327,39 +1399,68 @@ than read as free."
 
 Append to `tests/test_decide_reap.py`:
 
+`decide`'s real signature is `decide(prev, ledger, policy, agents, now)` — all
+five required. This file already has everything needed: `POLICY` at line 24,
+the `claimed(number, attempts, state, **kw)` task helper at line 38, the
+`only(intents, kind)` filter at line 51, and `dataclasses` /
+`datetime` / `timezone` already imported. `FleetState()` is
+default-constructible. Do **not** invent a `_task` helper — it does not exist.
+
 ```python
+from fleet.model import FleetState
+
+NOW = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+DECLARED = (("implementer", "claude", "claude-opus-5"),)
+
+
+def _mismatch_case(observed_model: str | None):
+    """One CLAIMED patch task with a live agent reporting `observed_model`."""
+    task = claimed(1, klass="patch")
+    agent = AgentState(
+        task=1, status="working", change_seq=5, cost_usd=0.1, model=observed_model
+    )
+    policy = dataclasses.replace(POLICY, agents=DECLARED)
+    intents, _ = decide(
+        prev=FleetState(), ledger=[task], policy=policy, agents=[agent], now=NOW
+    )
+    return intents
+
+
 def test_an_agent_running_a_model_nobody_declared_is_escalated():
     """UnpricedModel cannot see this: a silent substitution between two PRICED
     models fires no exception and bills the night at a rate nobody chose.
     Catches trusting the transcript as the only source of truth."""
-    task = _task(1, state="claimed", klass="patch")
-    agent = AgentState(task=1, status="working", change_seq=5, cost_usd=0.1,
-                       model="claude-opus-4-8")
-    policy = _policy(agents=(("implementer", "claude", "claude-opus-5"),))
-    intents = decide(ledger=[task], agents=[agent], policy=policy, ...)
-    assert Escalate(task=1, reason="model_mismatch") in intents
+    assert Escalate(task=1, reason="model_mismatch") in _mismatch_case("claude-opus-4-8")
 
 
 def test_an_agent_running_the_declared_model_is_left_alone():
     """Catches a comparison that fires on every agent -- which would escalate
     the whole backlog on the first tick."""
-    task = _task(1, state="claimed", klass="patch")
-    agent = AgentState(task=1, status="working", change_seq=5, cost_usd=0.1,
-                       model="claude-opus-5")
-    policy = _policy(agents=(("implementer", "claude", "claude-opus-5"),))
-    intents = decide(ledger=[task], agents=[agent], policy=policy, ...)
-    assert not [i for i in intents if isinstance(i, Escalate)]
+    assert not [i for i in _mismatch_case("claude-opus-5") if isinstance(i, Escalate)]
 
 
 def test_an_agent_whose_model_is_not_yet_known_is_left_alone():
     """A transcript not yet written reports model=None. Catches escalating
-    every agent in the seconds after dispatch."""
-    task = _task(1, state="claimed", klass="patch")
-    agent = AgentState(task=1, status="working", change_seq=5, cost_usd=0.0, model=None)
-    policy = _policy(agents=(("implementer", "claude", "claude-opus-5"),))
-    intents = decide(ledger=[task], agents=[agent], policy=policy, ...)
-    assert not [i for i in intents if isinstance(i, Escalate)]
+    every agent in the seconds after dispatch, when nothing is yet known."""
+    assert not [i for i in _mismatch_case(None) if isinstance(i, Escalate)]
+
+
+def test_an_agent_observed_running_two_models_is_escalated():
+    """parse_snapshot records the sentinel MULTIPLE_MODELS when a transcript
+    names more than one model carrying tokens -- a fallback substitution mid
+    session. Catches collapsing that to None, which would make the very case
+    §4 exists to catch pass vacuously."""
+    from fleet.model import MULTIPLE_MODELS
+
+    assert Escalate(task=1, reason="model_mismatch") in _mismatch_case(MULTIPLE_MODELS)
 ```
+
+`claimed(1, klass="patch")` must produce a task whose `_role_for` resolves to
+`implementer` — that is, `state="claimed"` on a `patch` route. `claimed`
+defaults to `state="claimed"`, so only `klass` needs passing. If the assertion
+fails because the role resolves to something else, print `_role_for(task,
+policy)` before changing the production code: the branch is correct and the
+fixture is what is wrong.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1489,7 +1590,7 @@ def test_a_real_captured_codex_session_prices():
     models = _codex_models(lines)
     prices = {m: {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}
               for m in models}
-    assert CodexProvider(sessions_dir="/nonexistent").read(lines, prices).cost_usd > 0
+    assert CodexProvider(sessions_dir=Path("/nonexistent")).read(lines, prices).cost_usd > 0
 
 
 def test_a_real_captured_total_only_session_refuses():
@@ -1500,7 +1601,7 @@ def test_a_real_captured_total_only_session_refuses():
     prices = {m: {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}
               for m in models}
     with pytest.raises(UnpricedTranscript):
-        CodexProvider(sessions_dir="/nonexistent").read(lines, prices)
+        CodexProvider(sessions_dir=Path("/nonexistent")).read(lines, prices)
 ```
 
 - [ ] **Step 3: Run to verify, then update the fixture policy repo**
