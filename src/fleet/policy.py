@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fleet import labels as labels_module
 from fleet.config import FleetConfig
+from fleet.cost import PROVIDER_KINDS
 from fleet.model import Policy
 
 _CELL = re.compile(r"^\s*\|(.+)\|\s*$")
@@ -163,11 +164,41 @@ def parse_routes(text: str, roles: frozenset[str]) -> tuple[tuple[str, tuple[str
     return tuple(routes)
 
 
+def _validate_agents(
+    agents: tuple[tuple[str, str, str], ...], prices: dict[str, dict[str, float]]
+) -> None:
+    """Every declared agent has a reader; every declared model has a rate.
+
+    The price check is the one that earns its place. Without a declared model an
+    unpriced model is found only when a dispatched agent's transcript is read --
+    mid-run, after spending, which is docs/m3-inputs.md §1.2's failure exactly.
+    Declaring it moves that to a startup error, before anything is dispatched.
+    """
+    known = set(PROVIDER_KINDS)
+    for role, kind, model in agents:
+        if kind not in known:
+            raise PolicyError(
+                f"role {role!r} is routed to agent {kind!r}, which has no transcript "
+                f"reader. Known: {sorted(known)}. Its agents could not be priced and "
+                "the fleet would drain on the first tick."
+            )
+        if model not in prices:
+            raise PolicyError(
+                f"role {role!r} declares model {model!r}, which has no [prices] row "
+                "in fleet.toml. Dispatching it would drain the run mid-night rather "
+                "than failing here, before anything is spent."
+            )
+
+
 def load(cfg: FleetConfig) -> Policy:
+    roles = known_roles(cfg.roles_dir)
+    classes_text = cfg.task_classes.read_text()
+    agents = parse_agents(classes_text, roles)
+    _validate_agents(agents, cfg.prices)
     return Policy(
         areas=parse_ownership(cfg.ownership.read_text()),
-        routes=parse_routes(cfg.task_classes.read_text(), known_roles(cfg.roles_dir)),
-        agents=(),  # wired to the Role|Agent|Model table in a later task
+        routes=parse_routes(classes_text, roles),
+        agents=agents,
         slots=cfg.slots,
         stall_minutes=cfg.stall_minutes,
         max_attempts=cfg.max_attempts,

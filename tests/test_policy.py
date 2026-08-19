@@ -153,11 +153,17 @@ def test_policy_carries_max_rebases_from_config(cfg, tmp_path):
     (tmp_path / "o.md").write_text("| Glob | Area |\n|---|---|\n| `src/eval/**` | `eval` |\n")
     (tmp_path / "t.md").write_text(
         "| Class | Route | Output | Unattended? |\n|---|---|---|---|\n"
-        "| `patch` | implementer → reviewer → integrator | c | yes |\n"
+        "| `patch` | implementer → reviewer → integrator | c | yes |\n\n"
+        "| Role | Agent | Model |\n|---|---|---|\n"
+        "| `implementer` | `claude` | `m` |\n"
+        "| `reviewer` | `claude` | `m` |\n"
+        "| `integrator` | `claude` | `m` |\n"
     )
     (tmp_path / ".agents" / "roles").mkdir(parents=True)
     for role in ("implementer", "reviewer", "integrator"):
         (tmp_path / ".agents" / "roles" / f"{role}.md").write_text("x")
+    with (tmp_path / "fleet.toml").open("a") as f:
+        f.write('\n[prices."m"]\ninput = 1.0\noutput = 1.0\ncache_read = 1.0\ncache_write = 1.0\n')
     loaded = policy_module.load(load_config(tmp_path))
     assert loaded.max_rebases == 1
 
@@ -228,3 +234,47 @@ def test_a_role_listed_twice_raises():
     )
     with pytest.raises(PolicyError, match="reviewer"):
         parse_agents(text, AGENT_ROLES)
+
+
+def _config_with_agent_table(tmp_path, agent: str, model: str):
+    """A FleetConfig whose fixture policy declares one role on `agent`/`model`."""
+    import shutil
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE_POLICY, root)
+    classes = root / "docs/agent/task-classes.md"
+    row = f"| `implementer` | `{agent}` | `{model}` |\n"
+    classes.write_text(classes.read_text() + f"\n\n| Role | Agent | Model |\n|---|---|---|\n{row}")
+    # A fresh fleet.toml, NOT an append. The fixture's fleet.toml already
+    # declares [prices."claude-opus-5"], and tomllib rejects a duplicate table
+    # outright (`Cannot declare ('prices', 'm') twice`), so appending here
+    # would raise TOMLDecodeError.
+    (root / "fleet.toml").write_text(
+        '[repo]\nslug = "FibonAdithya/fleet-fixture"\n'
+        'integration_branch = "integration"\n\n'
+        "[policy]\n"
+        'ownership = "docs/agent/ownership.md"\n'
+        'task_classes = "docs/agent/task-classes.md"\n'
+        'roles = ".agents/roles"\nschemas = ".agents/schemas"\n\n'
+        '[agents.claude]\nmodel_flag = "--model"\nargs = []\n\n'
+        '[prices."claude-opus-5"]\n'
+        "input = 5.0\noutput = 25.0\ncache_read = 0.5\ncache_write = 10.0\n"
+    )
+    return load_config(root)
+
+
+def test_a_declared_model_with_no_price_is_refused_at_load(tmp_path):
+    """docs/m3-inputs.md §1.2: an unpriced model is currently discovered only
+    when a dispatched agent's transcript is read, mid-run, after spending.
+    Catches deferring that to runtime now that the model is declared."""
+    cfg = _config_with_agent_table(tmp_path, agent="claude", model="unpriced-model")
+    with pytest.raises(PolicyError, match="unpriced-model"):
+        policy_module.load(cfg)
+
+
+def test_a_declared_agent_with_no_provider_is_refused_at_load(tmp_path):
+    """Catches routing a role to a CLI whose transcripts nothing can read,
+    which would drain on the first tick instead of failing at startup."""
+    cfg = _config_with_agent_table(tmp_path, agent="nosuchcli", model="claude-opus-5")
+    with pytest.raises(PolicyError, match="nosuchcli"):
+        policy_module.load(cfg)
