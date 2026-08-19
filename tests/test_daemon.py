@@ -477,6 +477,49 @@ def test_a_keyboard_interrupt_is_not_swallowed(cfg, tmp_path):
         daemon.run(poll_seconds=0, stop=stop, clock=lambda: T0)
 
 
+def test_a_publisher_that_raises_costs_one_tick_and_not_the_run(cfg, tmp_path):
+    """The publisher is Task 16's socket writer, and its canonical failure is a
+    broken pipe to a client that vanished mid-write. Left outside the guard,
+    that one dead `fleet status` ends the night -- and the tick it kills had
+    already succeeded, so nothing about the fleet was wrong."""
+    daemon, gh, herdr = _daemon(cfg, tmp_path)
+    number = gh.create_issue("Fix LID", "b", CLAIMED)
+    herdr.add_agent(task=number, status="working", change_seq=1, cost_usd=0.5)
+    stop = threading.Event()
+    published = []
+
+    def _broken(snapshot):
+        published.append(snapshot)
+        if len(published) >= 2:
+            stop.set()
+        raise BrokenPipeError("client went away mid-write")
+
+    daemon.run(poll_seconds=0, stop=stop, publish=_broken, clock=lambda: T0)
+    # The loop ran a second tick, so the first publisher failure cost one tick.
+    assert [s.tick for s in published] == [1, 2]
+    # And the snapshot the failed publisher could not deliver is still the one
+    # the daemon holds: the tick succeeded, only the delivery did not.
+    assert daemon.snapshot is published[-1]
+    assert len(daemon.failures) == 2
+    assert all("publish" in line for line in daemon.failures)
+    assert "client went away" in daemon.failures[-1]
+
+
+def test_a_keyboard_interrupt_from_the_publisher_is_not_swallowed_either(cfg, tmp_path):
+    """The guard around the publisher is the same guard, so it has the same
+    floor. Ctrl-C during a write is still Ctrl-C."""
+    daemon, gh, _ = _daemon(cfg, tmp_path)
+    gh.create_issue("Fix LID", "b", READY)
+    stop = threading.Event()
+
+    def _interrupt(snapshot):
+        stop.set()  # so a swallowing loop exits and fails, rather than hanging
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        daemon.run(poll_seconds=0, stop=stop, publish=_interrupt, clock=lambda: T0)
+
+
 def test_the_failure_record_is_bounded(cfg, tmp_path):
     """Anything that accumulates per tick has to have a bound. A herdr or a gh
     that fails every tick appends once a tick, all night, into a list nothing

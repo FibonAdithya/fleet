@@ -315,6 +315,14 @@ class Daemon:
         that swallowed one would make the daemon unkillable from the terminal
         that started it.
 
+        The publisher is guarded too, and by the same rule. It is supplied from
+        outside -- Task 16's socket writer -- and its canonical failure is a
+        broken pipe to a `fleet status` client that vanished mid-write. That is
+        a fact about one reader, not about the fleet: the tick it would end had
+        already succeeded, its effects had already landed, and the snapshot it
+        could not deliver is still the one this daemon holds for the next
+        reader. Outside the guard, one dead client ends the night.
+
         The failing tick still waits out the poll interval before the next one,
         so a permanently broken collaborator costs one call per interval rather
         than a hot loop against a service that is already unwell.
@@ -324,9 +332,19 @@ class Daemon:
             try:
                 snapshot = self.tick(clock())
             except Exception as exc:  # noqa: BLE001 -- see the docstring
-                _LOG.exception("tick %s failed", self.tick_number)
-                self.failures.append(f"tick {self.tick_number} failed: {exc}")
+                self._failed("failed", exc)
             else:
                 if publish is not None:
-                    publish(snapshot)
+                    try:
+                        publish(snapshot)
+                    except Exception as exc:  # noqa: BLE001 -- see the docstring
+                        # Recorded separately from a tick failure: they need
+                        # different fixes, and an operator reading "tick 12
+                        # failed" when the allocator worked perfectly and only
+                        # the socket broke goes looking in the wrong place.
+                        self._failed("publish failed", exc)
             stop.wait(poll_seconds)
+
+    def _failed(self, what: str, exc: Exception) -> None:
+        _LOG.exception("tick %s %s", self.tick_number, what)
+        self.failures.append(f"tick {self.tick_number} {what}: {exc}")
