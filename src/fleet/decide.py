@@ -217,7 +217,7 @@ def _reap(
         if task.state not in _LIVE:
             continue
         agent = by_task.get(task.number)
-        if _is_rebase_handback(task):
+        if (agent is None or agent.status == "done") and _is_rebase_handback(task):
             # An integrator handing this task back for a rebase, checked ahead
             # of every other branch in this loop -- Ruling B3.
             #
@@ -237,6 +237,23 @@ def _reap(
             #
             # Neither shape is a failure and neither is ledger drift, so this
             # precedes both the Retire branch and `_advance`.
+            #
+            # Gated on `agent is None or agent.status == "done"` and NOT on
+            # the packet alone: `packet.parse_latest` returns the newest
+            # handoff comment across the whole issue's history with no
+            # per-attempt scoping (spec §5.5; Task 7 binds a packet to its
+            # attempt, not this task). After a legitimate rebase and
+            # re-dispatch, the integrator's original handback stays "latest"
+            # until the new implementer posts its own -- which can be many
+            # ticks. An unconditional check reads that stale packet out from
+            # under a genuinely working (or dirty) agent and re-fires the
+            # rebase/escalate decision on every one of those ticks, which at
+            # `max_rebases=1` auto-escalates a task to NEEDS_HUMAN one tick
+            # after a rebase that just succeeded -- the exact loop this
+            # branch exists to bound, inverted. NEVER widen this to consult a
+            # packet while an agent is actively working: a stale packet is a
+            # fact about issue-comment history, not about what the current
+            # agent is doing right now.
             if task.rebases + 1 > policy.max_rebases:
                 intents.append(Escalate(task=task.number, reason="rebases_exhausted"))
             else:

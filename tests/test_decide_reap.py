@@ -620,6 +620,33 @@ def test_a_handback_visible_before_the_label_catches_up_still_wins_over_retire()
     assert intents == [Rebase(task=4, rebase=1)]
 
 
+def test_a_working_agent_with_a_stale_handback_packet_is_left_alone():
+    """`packet.parse_latest` returns the newest handoff comment across the
+    whole issue's history with no per-attempt scoping (spec §5.5) -- Task 7,
+    not this one, binds a packet to its attempt. After a legitimate rebase and
+    re-dispatch, the integrator's original handback stays "latest" until the
+    new implementer posts its own, which can be many ticks: a task at
+    rebases=1, re-dispatched to CLAIMED, its new implementer healthy and
+    working, still carries the stale handback packet from the rebase that
+    already happened. Reading it unconditionally would escalate a healthy task
+    to NEEDS_HUMAN one tick after the rebase that just succeeded -- the exact
+    loop this branch exists to bound, inverted."""
+    task = claimed(number=4, state="claimed", attempts=1, rebases=1, packet=HANDBACK)
+    agents = [AgentState(task=4, status="working", change_seq=3, cost_usd=0.1)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == []
+
+
+def test_a_dirty_agent_with_a_stale_handback_packet_still_fails_normally():
+    """The sibling case: a dirty exit must take its existing `_fail` branch
+    rather than being read as a rebase handback because a stale packet happens
+    to be sitting on the issue history."""
+    task = claimed(number=4, state="claimed", attempts=1, rebases=1, packet=HANDBACK)
+    agents = [AgentState(task=4, status="dirty", change_seq=3)]
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert intents == [Release(task=4, reason="dirty_exit", attempt=2)]
+
+
 def test_a_finished_continuation_agent_over_budget_is_not_charged_for_it():
     """Status first, cost second, here as in the CLAIMED branch. The stage
     finished; its work is already paid for, and escalating instead of retiring
