@@ -17,3 +17,19 @@ slots = 6
 stall_minutes = 10
 max_attempts = 2
 max_fix_passes = 1
+
+[agents.claude]
+model_flag = "--model"
+args = ["--permission-mode", "acceptEdits"]
+
+[prices."claude-opus-5"]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 10.0
+
+[prices."<synthetic>"]
+input = 0.0
+output = 0.0
+cache_read = 0.0
+cache_write = 0.0
