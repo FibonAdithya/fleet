@@ -257,6 +257,102 @@ def test_stopping_an_agent_that_has_already_gone_does_not_kill_the_tick(cfg):
     assert any(str(number) in message for message in ex.failures)
 
 
+class _UnstoppableHerdr(FakeHerdr):
+    """A stop that fails for a reason that is NOT the agent being gone.
+
+    herdr renaming its key syntax is the concrete case, and it is not
+    hypothetical: `send-keys ... ctrl-c` and `send-keys ... "\\x03"` were both
+    measured live answering `{"code":"invalid_key"}` and exit 1, which is why
+    `RealHerdr.stop_agent` sends the named `C-c` twice.
+    """
+
+    def stop_agent(self, task: int) -> None:
+        raise HerdrError("unsupported key C-c", code="invalid_key")
+
+
+def test_a_stop_that_failed_for_an_unknown_reason_leaves_the_worktree_alone(cfg):
+    """`_subprocess` collapses every non-zero exit into one HerdrError, so
+    without the code a stop that failed because herdr rejected the key syntax
+    is indistinguishable from one that failed because the agent had already
+    gone. Removing the worktree on the first of those deletes a LIVE agent's
+    checkout while it keeps running and spending -- a half-written tree and a
+    claude staring at a deleted cwd -- and the orphan rule re-emits Retire every
+    tick, so it would repeat in silence."""
+    gh, herdr = FakeGh(), _UnstoppableHerdr()
+    _role(cfg)
+    number, other = _issue(gh), _issue(gh, "Second task")
+    ex = _executor(cfg, gh, herdr)
+    ex.apply([StartAgent(task=number, role="implementer", base="integration")])
+    ex.apply([StopAgent(task=number), CloseIssue(task=other)])
+    assert herdr.removed == [], "a worktree was deleted under an agent that may still be running"
+    assert number in herdr.worktrees
+    assert gh.get_issue(other)["state"] == "CLOSED", "the rest of the tick must still run"
+    assert any("invalid_key" in message for message in ex.failures)
+
+
+def test_a_stop_of_an_agent_herdr_says_is_gone_still_removes_the_worktree(cfg):
+    """The other half of the same branch, and the one that makes the caution
+    above affordable: `agent_not_found` means the agent is not running, so its
+    checkout is nobody's. Treating every failed stop as dangerous would leak a
+    worktree on every ledger-drift release, and the next dispatch of that task
+    would fail on the occupied path."""
+    gh, herdr = FakeGh(), FakeHerdr()
+    _role(cfg)
+    number = _issue(gh)
+    ex = _executor(cfg, gh, herdr)
+    ex.apply([StartAgent(task=number, role="implementer", base="integration")])
+    herdr._agents.pop(number)
+    ex.apply([StopAgent(task=number)])
+    assert number in herdr.removed
+
+
+class _UnstartableHerdr(FakeHerdr):
+    """A create that fails on the occupied path -- the state left behind when a
+    worktree could not be removed."""
+
+    def create_worktree(self, task: int, slug: str, base: str):
+        raise HerdrError(f"path {self.root}/{task}-{slug} already exists")
+
+
+def test_a_dispatch_that_cannot_start_does_not_kill_the_tick(cfg):
+    """The chain this closes: a checkout that could not be removed stays, the
+    task goes back to READY, and the next tick's create fails on the occupied
+    path. Out of `apply` that drops every later effect in the tick and repeats
+    forever with no counter moving.
+
+    Recorded instead, the loop is self-limiting: the `SetLabels` in the same
+    batch has already moved the task to claimed, so the next tick's REAP sees a
+    claimed row with no agent, emits Release(no_agent), and burns an attempt --
+    escalating to a human at max_attempts."""
+    gh, herdr = FakeGh(), _UnstartableHerdr()
+    _role(cfg)
+    number, other = _issue(gh), _issue(gh, "Second task")
+    ex = _executor(cfg, gh, herdr)
+    ex.apply(
+        [
+            SetLabels(task=number, add=("fleet:claimed",), remove=("fleet:ready",)),
+            StartAgent(task=number, role="implementer", base="integration"),
+            CloseIssue(task=other),
+        ]
+    )
+    assert gh.get_issue(other)["state"] == "CLOSED"
+    assert "fleet:claimed" in gh.get_issue(number)["labels"], (
+        "REAP only recovers this task if the label moved -- that is the counter"
+    )
+    assert any(str(number) in message for message in ex.failures)
+
+
+def test_a_dispatch_that_fails_for_a_reason_that_is_not_herdrs_still_raises(cfg):
+    """A missing role prompt is a policy error, not a worktree that has gone.
+    `build_prompt` raises FileNotFoundError for it, and swallowing that would
+    burn every attempt on every task against a repo whose roles directory is
+    simply misconfigured -- silently, and identically for all of them."""
+    gh = FakeGh()
+    number = _issue(gh)
+    with pytest.raises(FileNotFoundError):
+        _executor(cfg, gh).apply([StartAgent(task=number, role="implementer", base="integration")])
+
+
 def test_a_defect_in_this_layer_is_not_mistaken_for_a_missing_worktree(cfg):
     """The tolerance is `except HerdrError`, not `except Exception`. A TypeError
     out of the same call is a bug here -- a renamed parameter, a task that is

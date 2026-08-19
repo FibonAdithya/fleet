@@ -47,7 +47,53 @@ _LEADING_NUMBER = re.compile(r"^(\d+)(?:-|$)")
 
 
 class HerdrError(RuntimeError):
-    """Anything the herdr client could not do."""
+    """Anything the herdr client could not do.
+
+    `code` is herdr's own machine-readable error code when there is one --
+    `agent_not_found`, `invalid_key`, `dirty_worktree_requires_force` -- and
+    None for a failure that carried no JSON body. It exists because
+    `_subprocess` otherwise collapses every non-zero exit into one exception,
+    and some callers have to tell one failure from another: the executor
+    deletes a stopped agent's worktree, and doing that after a stop that failed
+    for any reason OTHER than the agent already being gone deletes a running
+    agent's checkout out from under it.
+
+    Defaulted rather than required so that `.code` is always present. An
+    attribute that exists on some instances and not others is an AttributeError
+    inside an except clause, which is the worst place to find one.
+    """
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+#: Codes that mean "the agent this call addressed is not running". The whole
+#: point of reading a code at all -- see HerdrError.
+AGENT_ABSENT_CODES = frozenset({"agent_not_found"})
+
+
+def error_code(stderr: str) -> str | None:
+    """herdr's `{"error":{"code":...}}` out of a stderr buffer, or None.
+
+    Not every failure is JSON: an unrecognised flag answers `unknown option:
+    --cwd` and exit 2 as plain text. None for those, because inventing a code
+    would let a caller act on a failure it has not actually recognised.
+
+    The last non-empty line as well as the whole buffer, since a warning
+    printed before the body is ordinary and would otherwise take the code with
+    it.
+    """
+    for candidate in (stderr.strip(), stderr.strip().splitlines()[-1] if stderr.strip() else ""):
+        try:
+            payload = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            code = (payload.get("error") or {}).get("code")
+            if code:
+                return str(code)
+    return None
 
 
 def task_of(checkout_path: str, worktree_root: Path) -> int | None:
@@ -213,8 +259,14 @@ class FakeHerdr:
         # which answers `agent_not_found` and rc=1 for a target that is not
         # there, so it raises. A double-stop must not be silently fine here
         # when it is an exception on the box.
+        #
+        # With the code, because the executor branches on it: a stop that fails
+        # because the agent is already gone is safe to follow with a worktree
+        # removal, and any other failure is not. A fake that raised without one
+        # would send every stop down the cautious path and leak a worktree per
+        # task, in a way no offline test could see.
         if task not in self._agents:
-            raise HerdrError(f"agent fleet-{task} not found")
+            raise HerdrError(f"agent fleet-{task} not found", code="agent_not_found")
         self._agents.pop(task)
         self.stopped.append(task)
 
@@ -270,7 +322,12 @@ class RealHerdr:
             # reason is -- herdr's are named codes like
             # `dirty_worktree_requires_force` and `invalid_key`, and losing
             # them turns every failure into "exit 1".
-            raise HerdrError(f"{' '.join(args)} failed: {(exc.stderr or '').strip()}") from exc
+            #
+            # The code is parsed out as well as printed. A caller branching on
+            # a substring of the message would break on the first message herdr
+            # rewords; the code is the part herdr means as an interface.
+            stderr = (exc.stderr or "").strip()
+            raise HerdrError(f"{' '.join(args)} failed: {stderr}", code=error_code(stderr)) from exc
 
     def _json(self, *args: str) -> dict:
         out = self._run(*args)
@@ -292,16 +349,19 @@ class RealHerdr:
     # -- worktrees ----------------------------------------------------------
 
     def create_worktree(self, task: int, slug: str, base: str) -> Path:
-        path = self.root / f"{task}-{slug}"
         # Fetch first. Parent §8.2's fresh-base rule is this line: branching off
         # a stale local `integration` reproduces exactly the staleness the
         # integration branch exists to remove. `--base origin/<base>` and not
         # `--base <base>` for the same reason -- the fetch updates the
         # remote-tracking ref, so only that name carries what was fetched.
         self._run("git", "-C", str(self.repo_root), "fetch", "origin", base)
-        branch = f"fleet/{task}-{slug}"
+        existing = self._existing_branch(task)
+        branch = existing or f"fleet/{task}-{slug}"
+        # The checkout is named after the branch it is on, so the two cannot
+        # drift apart when the issue is retitled between stages.
+        path = self.root / branch.split("/", 1)[1]
         args = ["--cwd", str(self.repo_root), "--branch", branch]
-        if not self._branch_exists(branch):
+        if existing is None:
             # `--base` only when the branch is new. Every stage after the first
             # arrives here on a branch that already exists -- the reviewer's
             # continuation, and a re-dispatch after a rebase handback -- and
@@ -339,32 +399,49 @@ class RealHerdr:
         self.worktrees[task] = path
         return path
 
-    def _branch_exists(self, branch: str) -> bool:
-        """Does `refs/heads/<branch>` resolve in the target repo?
+    def _existing_branch(self, task: int) -> str | None:
+        """This task's branch, found by the `fleet/<n>-` prefix. None if it has
+        none yet.
 
-        The full ref and not the bare name: `rev-parse --verify fleet/1-lid`
-        would also resolve a *tag* called that, and a worktree created on a tag
-        is not what a re-dispatch means.
+        By prefix and not by the exact `fleet/<n>-<slug>` the caller just built,
+        because the slug comes from the issue title and a title is mutable. A
+        human sharpening the wording of an in-flight issue changes what
+        `slug_of` returns; looked up by exact slug, the branch carrying the
+        implementer's commits then reads as missing, the create takes the
+        `--base origin/<base>` path, and the reviewer starts from an empty tree
+        with the work stranded on a branch nothing checks out again. That is
+        verbatim the failure the `--base` guard exists to prevent. The task
+        number is the identity here, exactly as it is for the checkout path.
 
-        Both signals are read, because `--quiet` produces both at once: a
-        missing ref prints nothing AND exits 1, and `_subprocess` turns that
-        exit code into a HerdrError. Reading only the exception would miss a
-        client whose `_run` returns instead of raising; reading only the output
-        would let the exception escape the create.
+        `refs/heads/fleet/<n>-*` and not a bare name: a *tag* called
+        `fleet/1-lid` must not answer for a branch, and the trailing dash in the
+        pattern is what stops `fleet/1-*` from matching `fleet/12-lid`.
+
+        Sorted by committer date so that two branches for one task -- two
+        retitles -- resolve to the one carrying the most recent work, and
+        resolve to the SAME one every tick. Alphabetical order would flip the
+        next stage onto an abandoned branch on a rename.
+
+        A `for-each-ref` that fails outright says nothing about the branch, and
+        the safe reading is "not there": a first dispatch then works, and the
+        only cost on a re-dispatch is a create herdr refuses -- loudly, one
+        task. Read the other way, a failing git would silently drop every
+        task's `--base`.
         """
         try:
             out = self._run(
                 "git",
                 "-C",
                 str(self.repo_root),
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                f"refs/heads/{branch}",
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format=%(refname:short)",
+                f"refs/heads/fleet/{task}-*",
             )
         except HerdrError:
-            return False
-        return bool(out.strip())
+            return None
+        branches = [line.strip() for line in out.splitlines() if line.strip()]
+        return branches[0] if branches else None
 
     def remove_worktree(self, task: int) -> None:
         """Removes the checkout. The branch survives -- verified live.
@@ -388,15 +465,38 @@ class RealHerdr:
                 # workspace's checkout, and someone's uncommitted work.
                 return
             # A checkout that exists with no workspace to remove it through.
-            # Swallowed, this surfaces two dispatches later as a `worktree
-            # create --path <existing dir>` failure, which points at the wrong
-            # thing entirely. Task 12's executor is specified to catch this
-            # without killing the tick.
-            raise HerdrError(
-                f"task {task} has a worktree checkout at {checkout} but no herdr "
-                "workspace to remove it through; remove it by hand "
-                f"(git -C {self.repo_root} worktree remove --force {checkout})"
-            )
+            # Reporting it is not clearing it: the checkout stays, the task
+            # goes back to READY, and its next dispatch fails on the occupied
+            # path -- every tick, forever, with no counter moving. So the
+            # git-level removal this used to tell a human to run is run here.
+            #
+            # Confined to fleet's own worktrees by construction: `_checkout_of`
+            # resolves the path through `task_of`, which rejects anything
+            # outside `self.root`. --force because a retired agent's worktree
+            # is usually dirty, which is what being retired mid-turn means.
+            try:
+                self._run(
+                    "git",
+                    "-C",
+                    str(self.repo_root),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(checkout),
+                )
+            except HerdrError as exc:
+                # Nothing left to try. The next dispatch will fail on the
+                # occupied path, so the message has to name the path and the
+                # command -- silence would make that later failure point at the
+                # wrong thing entirely.
+                raise HerdrError(
+                    f"task {task} has a worktree checkout at {checkout} with no herdr "
+                    f"workspace, and removing it with git failed too ({exc}); remove it "
+                    f"by hand (git -C {self.repo_root} worktree remove --force {checkout})",
+                    code=getattr(exc, "code", None),
+                ) from exc
+            self.worktrees.pop(task, None)
+            return
         # --force because a retired agent's worktree is usually dirty -- that is
         # what being retired mid-turn means -- and herdr refuses a dirty removal
         # with `dirty_worktree_requires_force`. Without it REAP would fail on

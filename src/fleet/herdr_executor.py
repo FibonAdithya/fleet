@@ -15,7 +15,7 @@ from collections import deque
 from fleet import packet as packet_module
 from fleet.config import FleetConfig
 from fleet.gh import GhClient
-from fleet.herdr import Herdr, HerdrError
+from fleet.herdr import AGENT_ABSENT_CODES, Herdr, HerdrError
 from fleet.model import (
     AgentState,
     Assign,
@@ -124,11 +124,34 @@ class HerdrExecutor:
             elif isinstance(effect, CloseIssue):
                 self.gh.close_issue(effect.task)
             elif isinstance(effect, StartAgent):
-                self._start(effect)
+                self._begin(effect)
             elif isinstance(effect, StopAgent):
                 self._stop(effect.task)
             else:
                 raise ValueError(f"cannot apply {effect!r}")
+
+    def _begin(self, effect: StartAgent) -> None:
+        """Start the agent. A herdr failure is recorded, not raised.
+
+        Same reason the stop is: the batch is one whole tick's effects, and one
+        task that cannot start is not worth every other task's.
+
+        It does not hide the broken task either. The `SetLabels` that precedes
+        this in the same batch has already moved it to claimed, so the next
+        tick's REAP sees a claimed row with no agent, emits `Release(no_agent)`
+        and burns an attempt -- escalating to a human at `max_attempts`. That is
+        a self-limiting loop with a counter. Raising here has none: the checkout
+        that made the create fail is still there next tick, and the tick dies at
+        the same task forever, dropping every later effect in it.
+
+        `HerdrError` only, so a missing role prompt (FileNotFoundError) still
+        raises. That is a policy error identical for every task, and burning
+        every task's attempt budget against it, silently, is not recovery.
+        """
+        try:
+            self._start(effect)
+        except HerdrError as exc:
+            self._record(effect.task, "start agent", exc)
 
     def _start(self, effect: StartAgent) -> None:
         issue = self.gh.get_issue(effect.task)
@@ -169,9 +192,35 @@ class HerdrExecutor:
 
         The failure is recorded and logged rather than swallowed. Silence here
         would make a fleet-wide herdr outage look like a quiet night.
+
+        The removal is conditional on the stop, though, and that is the whole
+        reason `HerdrError` carries a code. `_subprocess` collapses every
+        non-zero exit into one exception, so without it a stop that failed
+        because herdr rejected the key syntax -- `invalid_key`, measured live,
+        which is why `stop_agent` sends the named `C-c` twice -- reads exactly
+        like one that failed because the agent had already gone. Removing the
+        worktree on the first of those deletes a LIVE agent's checkout while it
+        keeps running and spending, and the orphan rule re-emits `Retire` every
+        tick, so it would repeat in silence.
         """
-        self._best_effort(task, "stop agent", self.herdr.stop_agent)
+        if not self._stop_agent(task):
+            # The agent may still be running. Its checkout is still its own, and
+            # the next tick gets to try the stop again.
+            return
         self._best_effort(task, "remove worktree", self.herdr.remove_worktree)
+
+    def _stop_agent(self, task: int) -> bool:
+        """Stop the agent. True when it is known not to be running afterwards."""
+        try:
+            self.herdr.stop_agent(task)
+        except HerdrError as exc:
+            self._record(task, "stop agent", exc)
+            # `agent_not_found` is the ledger-drift scenario's ordinary path:
+            # decide emits Release(no_agent) precisely when the snapshot shows
+            # no agent. The stop failing is then the expected answer, and the
+            # worktree it left behind is nobody's.
+            return exc.code in AGENT_ABSENT_CODES
+        return True
 
     def _best_effort(self, task: int, what: str, call) -> None:
         try:
@@ -180,6 +229,14 @@ class HerdrExecutor:
             # HerdrError only. A GhError or a TypeError from this same call is a
             # defect in this layer, not a worktree that has already gone, and
             # swallowing those would turn a broken executor into a silent one.
-            message = f"task {task}: could not {what}: {exc}"
-            _LOG.warning("%s", message)
-            self.failures.append(message)
+            self._record(task, what, exc)
+
+    def _record(self, task: int, what: str, exc: HerdrError) -> None:
+        # The code as well as the message. It is the part herdr means as an
+        # interface -- the message is prose it may reword -- and it is what
+        # tells an operator reading the runlog at 2am whether the fleet hit one
+        # gone agent or a herdr whose key syntax changed under it.
+        code = f" (code {exc.code})" if exc.code else ""
+        message = f"task {task}: could not {what}{code}: {exc}"
+        _LOG.warning("%s", message)
+        self.failures.append(message)

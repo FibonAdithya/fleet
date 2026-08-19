@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from fleet.cost import UnpricedModel
-from fleet.herdr import STATUS, FakeHerdr, HerdrError, parse_snapshot, task_of
+from fleet.herdr import STATUS, FakeHerdr, HerdrError, error_code, parse_snapshot, task_of
 from fleet.model import AgentState
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/herdr/snapshot-fleet.json"
@@ -412,23 +412,23 @@ def test_real_create_worktree_does_not_steal_focus(tmp_path):
     assert "--focus" not in create
 
 
-def _rev_parse(tmp_path):
-    """The argv prefix `_branch_exists` builds. Derived from the same tmp_path
+def _for_each_ref(tmp_path):
+    """The argv prefix `_existing_branch` builds. Derived from the same tmp_path
     the client is built with, so a repo-root change cannot leave this keyed on a
     path nothing calls and silently answer "no branch" for every test."""
-    return ("git", "-C", str(tmp_path / "repo"), "rev-parse")
+    return ("git", "-C", str(tmp_path / "repo"), "for-each-ref")
 
 
-def test_real_create_worktree_asks_git_whether_the_branch_is_already_there(tmp_path):
-    """A ref, not a name: `rev-parse --verify fleet/1-lid` would also resolve a
-    TAG called that, and creating a worktree on a tag is not what a re-dispatch
-    means."""
+def test_real_create_worktree_looks_for_any_branch_of_this_task(tmp_path):
+    """By the `fleet/<n>-` prefix, not by the slug of the title as it reads
+    right now. `refs/heads/...` and not a bare name for the same reason a ref
+    was used before: a TAG called `fleet/1-lid` must not answer for a branch."""
     run = RecordingRun(_captured_replies())
     herdr = _real(tmp_path, run)
     herdr.create_worktree(task=1, slug="lid", base="integration")
-    checks = run.herdr_calls(*_rev_parse(tmp_path))
+    checks = run.herdr_calls(*_for_each_ref(tmp_path))
     assert checks, f"no branch check: {run.calls}"
-    assert "refs/heads/fleet/1-lid" in checks[0]
+    assert "refs/heads/fleet/1-*" in checks[0]
 
 
 def test_real_create_worktree_reuses_a_branch_that_already_exists(tmp_path):
@@ -438,7 +438,7 @@ def test_real_create_worktree_reuses_a_branch_that_already_exists(tmp_path):
     Recreating it from the base would discard exactly those commits, silently,
     and the next stage would begin from an empty tree."""
     replies = _captured_replies()
-    replies[_rev_parse(tmp_path)] = "a91c2041c4c4b1c0b1e0f4d0a0b0c0d0e0f00112\n"
+    replies[_for_each_ref(tmp_path)] = "fleet/1-lid\n"
     run = RecordingRun(replies)
     herdr = _real(tmp_path, run)
     herdr.create_worktree(task=1, slug="lid", base="integration")
@@ -447,38 +447,82 @@ def test_real_create_worktree_reuses_a_branch_that_already_exists(tmp_path):
     assert "--base" not in create
 
 
+def test_real_create_worktree_reuses_the_branch_after_the_issue_is_retitled(tmp_path):
+    """An issue retitled mid-flight -- a human sharpening it, or `fleet
+    discover` rewriting it -- changes what `slug_of` returns. Looked up by
+    exact slug, the branch carrying the implementer's commits reads as missing,
+    and the create takes the `--base origin/<base>` path: the reviewer starts
+    from an empty tree and the work is on a branch nothing checks out again.
+    The task number is the identity; the slug is decoration."""
+    replies = _captured_replies()
+    replies[_for_each_ref(tmp_path)] = "fleet/1-lid-on-small-samples\n"
+    run = RecordingRun(replies)
+    herdr = _real(tmp_path, run)
+    path = herdr.create_worktree(task=1, slug="clamp-neighbour-count", base="integration")
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert create[create.index("--branch") + 1] == "fleet/1-lid-on-small-samples"
+    assert "--base" not in create
+    # The checkout follows the branch it is on, so the pair cannot drift apart.
+    assert path == tmp_path / "worktrees" / "1-lid-on-small-samples"
+    assert create[create.index("--path") + 1] == str(path)
+
+
+def test_real_create_worktree_takes_the_most_recent_of_several_branches(tmp_path):
+    """Two retitles leave two branches for one task. Whichever is picked must be
+    the same one every tick -- alphabetical order would flip the reviewer onto
+    the abandoned branch on a rename -- and it must be the one carrying the
+    work, which is the one most recently committed to."""
+    replies = _captured_replies()
+    replies[_for_each_ref(tmp_path)] = "fleet/1-newest\nfleet/1-older\n"
+    run = RecordingRun(replies)
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="whatever", base="integration")
+    assert "--sort=-committerdate" in run.herdr_calls(*_for_each_ref(tmp_path))[0]
+    create = run.herdr_calls("herdr", "worktree", "create")[0]
+    assert create[create.index("--branch") + 1] == "fleet/1-newest"
+
+
+def test_real_create_worktree_does_not_mistake_another_tasks_branch_for_its_own(tmp_path):
+    """`fleet/1-*` must not match `fleet/12-lid`. It does not -- the dash is
+    literal -- and this pins it, because task 1 inheriting task 12's branch
+    would put two tasks' commits on one branch."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run)
+    herdr.create_worktree(task=1, slug="lid", base="integration")
+    pattern = run.herdr_calls(*_for_each_ref(tmp_path))[0][-1]
+    assert pattern == "refs/heads/fleet/1-*"
+
+
 def test_real_create_worktree_bases_a_branch_that_does_not_exist_yet(tmp_path):
-    """`rev-parse --verify --quiet` reports a missing ref two ways at once --
-    nothing on stdout AND exit 1 -- and `_subprocess` turns the exit code into a
-    HerdrError. Reading only the empty output would make the exception escape
-    the create; reading only the exception would make a first dispatch reuse a
-    branch that is not there, which herdr refuses."""
-
-    class FailingRevParse(RecordingRun):
-        def __call__(self, *args):
-            if "rev-parse" in args:
-                self.calls.append(args)
-                raise HerdrError(f"{' '.join(args)} failed: ")
-            return super().__call__(*args)
-
-    run = FailingRevParse(_captured_replies())
+    """`for-each-ref` exits 0 and prints nothing when the pattern matches no
+    ref, so an empty answer is a missing branch and not a present one. Reading
+    it the other way would make every FIRST dispatch reuse a branch that is not
+    there, which herdr refuses -- no task would ever start."""
+    run = RecordingRun(_captured_replies())  # nothing keyed on for-each-ref: ""
     herdr = _real(tmp_path, run)
     herdr.create_worktree(task=1, slug="lid", base="integration")
     create = run.herdr_calls("herdr", "worktree", "create")[0]
     assert create[create.index("--base") + 1] == "origin/integration"
 
 
-def test_real_create_worktree_treats_an_empty_branch_check_as_no_branch(tmp_path):
-    """`rev-parse --verify --quiet` prints nothing for a ref that is not there,
-    so an empty answer is a missing branch and not a present one. Only the
-    exception path above proves that for the live client; this pins the other
-    half, for any `_run` that returns rather than raises -- which is every
-    double in this file."""
-    run = RecordingRun(_captured_replies())  # nothing keyed on rev-parse: ""
+def test_real_create_worktree_bases_the_branch_when_git_cannot_be_asked(tmp_path):
+    """A `for-each-ref` that fails outright says nothing about the branch. The
+    safe reading is "not there": a first dispatch then works, and the only cost
+    on a re-dispatch is a create herdr refuses -- loudly, one task. Read the
+    other way, a failing git would silently drop every task's base."""
+
+    class FailingLookup(RecordingRun):
+        def __call__(self, *args):
+            if "for-each-ref" in args:
+                self.calls.append(args)
+                raise HerdrError("for-each-ref failed: not a git repository")
+            return super().__call__(*args)
+
+    run = FailingLookup(_captured_replies())
     herdr = _real(tmp_path, run)
     herdr.create_worktree(task=1, slug="lid", base="integration")
     create = run.herdr_calls("herdr", "worktree", "create")[0]
-    assert "--base" in create
+    assert create[create.index("--base") + 1] == "origin/integration"
 
 
 def test_real_remove_worktree_addresses_the_workspace_not_the_path(tmp_path):
@@ -539,27 +583,122 @@ def test_real_remove_worktree_of_a_task_with_nothing_on_disk_removes_nothing(tmp
     assert run.herdr_calls("herdr", "worktree", "remove") == []
 
 
-def test_real_remove_worktree_raises_when_a_checkout_has_no_workspace(tmp_path):
+def test_real_remove_worktree_clears_a_checkout_that_has_no_workspace(tmp_path):
     """A checkout that exists with no workspace to remove it through is a leak,
-    and a silent `return` makes it unobservable.
+    and reporting it is not clearing it: the checkout stays, the task returns to
+    READY, and the next dispatch fails on the occupied path -- every tick,
+    forever, with no counter moving.
+
+    So the git-level removal the error message used to tell a human to run is
+    run here instead. It is local, reversible, and confined to fleet's own
+    worktree root: `_checkout_of` resolves the path through `task_of`, which
+    rejects anything outside it.
 
     The capture is that exact state, produced live: create the worktree, then
     close its workspace. `herdr workspace list` cannot see the checkout
     afterwards (it is not a workspace any more), so `_workspace_of` answers
-    None -- indistinguishable, without this check, from the task above that has
-    nothing anywhere. `herdr worktree list --cwd <repo> --json` is the
-    git-level view that still sees it, with `open_workspace_id` simply absent.
-
-    Swallowed, the leak surfaces two dispatches later as a `worktree create
-    --path <existing dir>` failure, which points at the wrong thing entirely."""
+    None -- indistinguishable, without the git-level view, from the task above
+    that has nothing anywhere."""
     run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run, worktree_root=ORPHAN_ROOT)
+    herdr.remove_worktree(task=CAPTURE_TASK)
+    removals = [c for c in run.calls if c[0] == "git" and "worktree" in c and "remove" in c]
+    assert removals, f"the leaked checkout was reported, not removed: {run.calls}"
+    assert removals[0][:3] == ("git", "-C", str(tmp_path / "repo"))
+    assert "--force" in removals[0]
+    assert removals[0][-1] == str(ORPHAN_ROOT / "12-lid-small-sample")
+    assert run.herdr_calls("herdr", "worktree", "remove") == [], (
+        "there is no workspace to address; `herdr worktree remove` needs one"
+    )
+
+
+def test_real_remove_worktree_raises_when_even_git_cannot_clear_the_checkout(tmp_path):
+    """The fallback is a best effort, not a guarantee -- a checkout on a
+    filesystem that is gone, or a git that is not there. When it fails there is
+    nothing left to try, and the task's next dispatch will fail on the occupied
+    path, so the message has to name the path and the command a human runs.
+    Silence here would make the next failure point at the wrong thing."""
+
+    class FailingRemoval(RecordingRun):
+        def __call__(self, *args):
+            if "worktree" in args and "remove" in args and args[0] == "git":
+                self.calls.append(args)
+                raise HerdrError("git worktree remove failed: not a working tree")
+            return super().__call__(*args)
+
+    run = FailingRemoval(_captured_replies())
     herdr = _real(tmp_path, run, worktree_root=ORPHAN_ROOT)
     with pytest.raises(HerdrError) as excinfo:
         herdr.remove_worktree(task=CAPTURE_TASK)
     message = str(excinfo.value)
     assert str(CAPTURE_TASK) in message
-    assert str(ORPHAN_ROOT / "12-lid-small-sample") in message
-    assert run.herdr_calls("herdr", "worktree", "remove") == []
+    assert "12-lid-small-sample" in message
+
+
+# --- error codes -----------------------------------------------------------
+#
+# herdr answers a failure with `{"error":{"code":...,"message":...}}` on stderr
+# and exit 1 (fixtures/herdr/README.md records the session). The code is the
+# only thing that tells one failure from another: `_subprocess` otherwise
+# collapses every non-zero exit into one HerdrError, and a caller deciding
+# whether it is safe to delete a worktree cannot tell "the agent was already
+# gone" from "herdr rejected the key syntax and the agent is still running".
+
+
+def test_a_herdr_error_code_is_recovered_from_the_json_body():
+    assert error_code('{"error":{"code":"agent_not_found","message":"agent target x"}}') == (
+        "agent_not_found"
+    )
+    assert error_code('{"error":{"code":"invalid_key","message":"unsupported key ctrl-c"}}') == (
+        "invalid_key"
+    )
+
+
+def test_a_plain_text_herdr_failure_has_no_code():
+    """Not every failure is JSON: `--cwd` on a command that has no such option
+    answers `unknown option: --cwd` and exit 2. A parser that raised here would
+    replace a diagnosable error with a JSONDecodeError, and one that invented a
+    code would let a caller act on a failure it has not actually recognised."""
+    assert error_code("unknown option: --cwd") is None
+    assert error_code("") is None
+
+
+def test_a_code_is_read_from_the_last_line_of_a_noisy_stderr():
+    """Warnings on stderr before the body are ordinary. Parsing only the whole
+    buffer would drop the code the moment anything else printed first."""
+    assert error_code('warning: something\n{"error":{"code":"agent_not_found"}}') == (
+        "agent_not_found"
+    )
+
+
+def test_a_real_subprocess_failure_carries_the_code_herdr_returned(tmp_path):
+    """Through the real `subprocess` path, not a double: `_subprocess` is where
+    stderr is captured, and a code parsed from a string the process never
+    actually emitted would prove nothing about where it lands."""
+    herdr = _real(tmp_path, run=None)
+    body = '{"error":{"code":"agent_not_found","message":"agent target fleet-1 not found"}}'
+    with pytest.raises(HerdrError) as excinfo:
+        herdr._subprocess("sh", "-c", f"printf '%s' '{body}' >&2; exit 1")
+    assert excinfo.value.code == "agent_not_found"
+    assert "agent target fleet-1 not found" in str(excinfo.value)
+
+
+def test_the_fake_names_the_same_code_the_real_client_returns():
+    """The executor decides whether to delete a worktree on this code. A fake
+    that raised without one would make that decision untestable offline and
+    would send the executor down the cautious path for every stop -- leaking a
+    worktree per task, silently."""
+    herdr = FakeHerdr()
+    with pytest.raises(HerdrError) as excinfo:
+        herdr.stop_agent(task=1)
+    assert excinfo.value.code == "agent_not_found"
+
+
+def test_an_error_raised_without_a_code_still_has_the_attribute():
+    """Every `except HerdrError` in the daemon reads `.code`. An attribute that
+    exists on some instances and not others is an AttributeError inside an
+    exception handler, which is the worst place to find one."""
+    assert HerdrError("something went wrong").code is None
 
 
 def test_real_remove_worktree_does_not_consult_git_when_it_has_a_workspace(tmp_path):
