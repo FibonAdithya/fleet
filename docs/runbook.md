@@ -149,15 +149,32 @@ the repo root would show up as untracked in `git status`).
     uv run pytest tests/test_scenarios.py -v
 
 `fixtures/scenarios/` holds one file per claim, and each names its claim in its
-`proves` field. Five of the seven seed from the captured ledger
+`proves` field. Five of the eight seed from the captured ledger
 (`fixtures/ledger/issues.json`), so they are exercised against real gh output
-rather than invented rows; the two that do not say in their own `proves` why the
-capture cannot express their case. Every tick lists **every** intent that tick
-emits — the comparison is exhaustive, which is what lets a scenario assert an
-absence without writing `expect: []`.
+rather than invented rows; the three that do not say in their own `proves` why
+the capture cannot express their case. Every tick lists **every** intent that
+tick emits — the comparison is exhaustive, which is what lets a scenario assert
+an absence without writing `expect: []`.
 
-Three rows of the design's failure table are covered by no scenario at all.
-`docs/m2-inputs.md` §7 names them and says why.
+`docs/m2-inputs.md` §7 named three rows of the design's failure table as covered
+by no scenario at all. Conflict storm is now covered: `rebase-storm.yaml`
+proves `max_rebases` bounds it, and the row needed a rule, not the executor
+signal §7 guessed at. Two remain uncovered:
+
+- **Duplicate discoveries** is not an allocator rule at all — `fleet discover`
+  searches existing issues first, and `tests/test_discover.py` covers it.
+  `decide()` never sees the case, so no scenario ever will either.
+- **Orphaned worktree** has a rule now (`_reap`'s orphan pass, Task 4) but no
+  scenario: `FakeExecutor` only ever puts an agent in its live set via a
+  `StartAgent` effect, which only `Dispatch`/`Continue` produce, and `expand()`
+  pairs every other intent with a `StopAgent` for the same task. So no sequence
+  of `decide()`'s own intents can leave an agent alive on a row it has moved off
+  of — the only way to get one is to seed it directly, and nothing in
+  `simulate.py`'s scenario schema does that. Confirmed by asking `FakeExecutor`
+  directly: scripting an outcome for a task that was never dispatched leaves
+  its live set empty. Covering this row needs a scenario-seeding capability
+  that does not exist yet, which is a harness change and out of scope for a
+  scenario file to make unilaterally.
 
 ## Known warts
 

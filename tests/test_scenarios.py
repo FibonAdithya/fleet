@@ -15,6 +15,7 @@ EXPECTED_STEMS = {
     "integration-lock",
     "ledger-drift",
     "poison-task",
+    "rebase-storm",
     "stall-releases",
 }
 

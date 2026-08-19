@@ -1,0 +1,44 @@
+name: rebase-storm
+proves: >-
+  parent §10 conflict storm: the bound is `max_rebases`, not a signal an
+  executor would need to report a conflict as distinct from a dirty exit.
+  `m2-inputs.md` §7 guessed the row needed `HerdrExecutor` to tell the two
+  apart; it does not. A conflict arrives as an ordinary integrator handback
+  packet -- `to: claimed` from an integrator -- and `_is_rebase_handback`
+  reads it off `FakeExecutor` the same way a real one would. The first
+  handback within the cap counts a rebase and re-dispatches; the second past
+  the cap (`max_rebases: 1`, the fixture policy's default) escalates instead
+  of looping all night on one task.
+seed:
+  policy: fixtures/policy/fleet-fixture
+  packets:
+    4: {to: claimed, from: {role: integrator, agent: fleet-1}, attempt: 1}
+  issues:
+    - {number: 4, title: "integrate the reporting epic", state: OPEN, assignees: [],
+       labels: ["fleet:claimed", "fleet:attempt-1", "fleet:auto-ok", "class:integration"]}
+ticks:
+  # #4 starts CLAIMED with no agent -- the integrator already exited after
+  # posting its handback comment, the same shape ledger-drift's Release(no_agent)
+  # would read, except the packet says integrator handback. That check runs
+  # ahead of the drift rule (Ruling B3) and wins: rebases=0, so the cap is not
+  # yet spent and the task is handed back for a rebase rather than released.
+  - outcomes: {}
+    expect:
+      - "Rebase(4, 1)"
+  # Rebase moved #4 to READY carrying fleet:rebase-1 and left fleet:attempt-1
+  # untouched -- a rebase costs no attempt. class:integration's route is the
+  # integrator alone (task-classes.md), so READY dispatches straight back to
+  # it at the same attempt, not through an implementer.
+  - outcomes: {}
+    expect:
+      - "Dispatch(4, integrator, 1)"
+  # The re-dispatched integrator hits the same conflict and hands back a
+  # second time. rebases is already 1 (the label persisted through the
+  # dispatch), so rebases + 1 > max_rebases (1) and #4 is escalated instead of
+  # rebased again -- the loop `max_rebases` exists to bound, caught on the
+  # attempt that would have made it a third time around.
+  - outcomes: {4: clean_exit}
+    packets:
+      4: {to: claimed, from: {role: integrator, agent: fleet-1}, attempt: 1}
+    expect:
+      - "Escalate(4, rebases_exhausted)"
