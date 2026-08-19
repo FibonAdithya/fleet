@@ -228,3 +228,26 @@ def test_reset_sh_can_actually_invoke_reset_py_as_a_module():
     assert "ModuleNotFoundError" not in result.stderr
     assert result.returncode == 2
     assert "usage:" in result.stderr
+
+
+def test_reset_sh_does_not_claim_the_project_never_fetches():
+    """A comment that is false is worse than no comment, because it is read.
+
+    `reset.sh` stated in as many words that "nothing in this project ever runs
+    `git push` or `git fetch`", and used that to justify resetting only local
+    refs. `RealHerdr.create_worktree` falsifies the fetch half: it runs
+    `git fetch origin <base>` and branches every new worktree off
+    `origin/<base>`, which is the ref this script cannot reset and the one a
+    graded run actually starts from. A human debugging run 2 starting on run 1's
+    commits, reading that comment, goes looking in the wrong place.
+    """
+    script = (REPO_ROOT / "fixtures/seed/reset.sh").read_text()
+    herdr = (REPO_ROOT / "src/fleet/herdr.py").read_text()
+    # The fact the claim was about, asserted rather than assumed -- if the fetch
+    # ever goes away, this test should be the thing that says the comment may
+    # come back.
+    assert '"fetch", "origin", base' in herdr
+    assert "never\n    # runs `git push` or `git fetch`" not in script
+    # And it must name the ref it cannot reset, or "local only" is a fact the
+    # script knows and the operator does not.
+    assert "origin/integration" in script

@@ -85,14 +85,29 @@ gh label list --repo "$REPO" --limit 200 --json name --jq '.[].name' \
 if [ -d "$CLONE/.git" ]; then
   (
     cd "$CLONE"
-    # No fetch, no push: src/fleet/git.py's whole seam (head_sha,
-    # merge_base_sha, branch_name) is local -- nothing in this project ever
-    # runs `git push` or `git fetch`, and integration/fleet/* branches are
-    # local-only inside this one clone, not remote-tracked. `branch -f` moves
-    # the ref without a checkout of its own -- integration tracks main
-    # between graded runs, and a run's rebases and merges must not survive a
-    # reset, or run 2's integrator starts mid-integration rather than from
-    # main.
+    # LOCAL ONLY, and that is a limit rather than a design. This script
+    # resets refs inside this one clone and pushes nothing.
+    #
+    # The old comment here said "nothing in this project ever runs `git push`
+    # or `git fetch`". The push half is still true. The fetch half is not:
+    # src/fleet/herdr.py's create_worktree runs `git fetch origin <base>` and
+    # branches every new worktree off `origin/<base>`, which is spec §8.2's
+    # fresh-base rule. So the branch a graded run actually starts from is
+    # `origin/integration`, and THIS LINE CANNOT RESET IT.
+    #
+    # What the line below does do: move the local `integration` ref back to
+    # `main`, so a run's rebases and merges do not survive into the next one
+    # and run 2's integrator does not start mid-integration. `branch -f`
+    # moves the ref without a checkout of its own.
+    #
+    # What a human still has to do, if run 1 pushed anything (docs/m3-inputs.md
+    # §1.1 and §1.3):
+    #
+    #     git -C "$CLONE" push --force-with-lease origin integration:integration
+    #
+    # Not done here on purpose. Pushing is outward-facing, and a cleanup script
+    # that force-pushes a remote branch is a much worse failure than one that
+    # leaves a human a line to run.
     git branch -f integration main
     # Can't delete a branch that is currently checked out -- switch to main
     # first, the same order docs/runbook.md's manual reset already uses.
@@ -112,6 +127,11 @@ else
 fi
 
 echo "Reset complete: issues 1-11 carry their seeded labels again, everything" >&2
-echo "past 11 is closed, and integration/fleet:*/worktrees are back to main." >&2
-echo "No re-seed needed -- reset.py restores labels directly rather than" >&2
-echo "relying on seed_issues.sh's idempotent-by-title re-run." >&2
+echo "past 11 is closed, and the LOCAL integration/fleet:*/worktrees are back" >&2
+echo "to main. No re-seed needed -- reset.py restores labels directly rather" >&2
+echo "than relying on seed_issues.sh's idempotent-by-title re-run." >&2
+echo >&2
+echo "NOT reset, because this script never pushes: origin/integration, which is" >&2
+echo "the ref create_worktree actually branches from (spec §8.2). If run 1" >&2
+echo "pushed it, reset it by hand before run 2 -- see docs/m3-inputs.md §1.3:" >&2
+echo "  git -C $CLONE push --force-with-lease origin integration:integration" >&2
