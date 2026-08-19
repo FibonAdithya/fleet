@@ -241,7 +241,21 @@ def do_discover(
     # issues -- "t" matches "...explicit k". Narrow with it, then require an exact
     # title match. The design already accepts that some near-duplicates get filed;
     # silently refusing a real discovery is the worse failure.
-    if any(i["title"].strip().lower() == title.strip().lower() for i in gh.search_titles(title)):
+    #
+    # OPEN only, though search_titles ("most recent 200, all states" -- other
+    # callers rely on that contract, so the filter lives here instead) scans
+    # every state: a closed discovery from a prior graded run must not block
+    # re-filing it after a reset, or every run past the first exits 1 on a
+    # rediscovery for a reason that has nothing to do with the orchestrator.
+    # Two OPEN issues for one defect is the duplication this guard exists to
+    # prevent; a closed one and a fresh one are not that. Case-folded through
+    # .upper() for the same reason FakeGh.list_issues is: gh returns
+    # OPEN/CLOSED and hand-built rows use open/closed.
+    if any(
+        i["title"].strip().lower() == title.strip().lower()
+        and str(i.get("state", "OPEN")).upper() == "OPEN"
+        for i in gh.search_titles(title)
+    ):
         raise DuplicateDiscovery(f"an issue titled {title!r} already exists")
     # `discovered-by:<n>` is generated at runtime, so it does not exist in the
     # repo's label set. gh refuses an unknown label and creates no issue at all.

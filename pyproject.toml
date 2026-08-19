@@ -37,6 +37,11 @@ extend-exclude = ["docs"]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# "." (repo root) alongside "src": tests/test_reset.py imports
+# fixtures.seed.reset as a plain package, the way test_seed.py's own
+# importlib.util.spec_from_file_location trick did not need to. fixtures/ has
+# no __init__.py -- PEP 420 namespace packages resolve it once the root is on
+# sys.path, so this is the only change needed.
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-q"

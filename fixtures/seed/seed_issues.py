@@ -50,9 +50,42 @@ def ensure_vocabulary(gh: GhClient) -> None:
     one repo somebody had already set up by hand. Sourcing the set from
     `static_vocabulary` is also what keeps the repo and FakeGh's idea of "this
     label exists" in step when `max_attempts` moves.
+
+    `max_rebases` is passed explicitly rather than read from `fleet.toml`: this
+    script does not read `[fleet] max_attempts` or `max_fix_passes` from config
+    either -- despite a docstring history implying it did -- it calls
+    `static_vocabulary()` with no config at all, and its shell wrapper
+    (`seed_issues.sh`) runs `cd "$ROOT"` to this project's root, which has no
+    `fleet.toml`; the fixture repo's config lives in `~/TIG/fleet-fixture`, a
+    different checkout this script never opens. Passing the constant here is
+    correct today because `vocab.DEFAULT_MAX_REBASES` already equals the
+    fixture's effective value (`fleet.toml` there sets no `[fleet] max_rebases`
+    at all, so `config.py` falls back to the same constant) -- but it is a
+    literal choice, not a config read, and a raised cap only reaches this
+    vocabulary if `DEFAULT_MAX_REBASES` itself moves.
     """
-    for name in sorted(vocab.static_vocabulary()):
+    for name in sorted(vocab.static_vocabulary(max_rebases=vocab.DEFAULT_MAX_REBASES)):
         gh.ensure_label(name, colour(name))
+
+
+def issue_labels(spec: dict) -> list[str]:
+    """The label set one `issues.yaml` row seeds with. Building the names
+    through the vocabulary rather than f-strings means a typo in `area` or
+    `class` fails here, with the offending value named, instead of as an
+    opaque gh label error.
+
+    Shared with `fixtures/seed/reset.py`, which needs the same set keyed by
+    issue number rather than applied directly -- so the seeder and the reset
+    cannot disagree about what "seeded" means.
+    """
+    names = [
+        vocab.state_label("ready"),
+        vocab.area_label(spec["area"]),
+        vocab.class_label(spec["class"]),
+    ]
+    if spec.get("auto_ok"):
+        names.append(vocab.AUTO_OK)
+    return names
 
 
 def main(repo: str, spec_path: str, gh: GhClient | None = None) -> int:
@@ -66,17 +99,7 @@ def main(repo: str, spec_path: str, gh: GhClient | None = None) -> int:
         if spec["title"] in already:
             print(f"skip (exists): {spec['title']}")
             continue
-        # Building the names through the vocabulary rather than f-strings means a
-        # typo in issues.yaml's `area` or `class` fails here, with the offending
-        # value named, instead of as an opaque gh label error.
-        names = [
-            vocab.state_label("ready"),
-            vocab.area_label(spec["area"]),
-            vocab.class_label(spec["class"]),
-        ]
-        if spec.get("auto_ok"):
-            names.append(vocab.AUTO_OK)
-        number = gh.create_issue(spec["title"], spec["body"], names)
+        number = gh.create_issue(spec["title"], spec["body"], issue_labels(spec))
         print(f"created #{number}: {spec['title']}")
     return 0
 

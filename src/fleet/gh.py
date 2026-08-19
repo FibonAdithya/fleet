@@ -29,6 +29,9 @@ class GhClient(Protocol):
     def ensure_label(self, name: str, colour: str = "ededed") -> None: ...
     def assign(self, issue: int, login: str | None) -> None: ...
     def close_issue(self, issue: int) -> None: ...
+    def reopen_issue(self, issue: int) -> None: ...
+    def list_comments(self, issue: int) -> list[dict]: ...
+    def delete_comment(self, comment_id: int) -> None: ...
 
 
 class RealGh:
@@ -125,6 +128,46 @@ class RealGh:
     def close_issue(self, issue: int) -> None:
         self._run("issue", "close", str(issue))
 
+    def reopen_issue(self, issue: int) -> None:
+        self._run("issue", "reopen", str(issue))
+
+    def _run_api(self, *args: str) -> str:
+        """`gh api` has no `--repo` flag at all -- confirmed live, read-only:
+        `gh api repos/{slug}/issues/1/comments --repo {slug}` fails with
+        "unknown flag: --repo" -- unlike every other subcommand `_run` calls,
+        which appends one unconditionally. The endpoint path carries the slug
+        instead, so this bypasses `_run` rather than widening it.
+        """
+        try:
+            return subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
+        except subprocess.CalledProcessError as exc:
+            raise GhError(f"gh {' '.join(args)} failed: {exc.stderr.strip()}") from exc
+
+    def list_comments(self, issue: int) -> list[dict]:
+        """Ids alongside bodies, unlike get_issue's `comments` (deliberately
+        bare body strings -- packet.parse_latest, build_prompt and
+        reader.read_ledger all depend on that shape, so get_issue is not
+        touched here).
+
+        `gh issue view --json comments` also carries an `id`, but it is a
+        GraphQL node id (e.g. "IC_kwDO...Eg"), not the numeric REST id
+        `delete_comment`'s endpoint needs -- confirmed live, read-only, against
+        FibonAdithya/fleet-fixture#1: `gh issue view 1 --json comments` showed
+        `"id":"IC_kwDOT0VXU88AAAABOKnzEg"` and a `url` ending
+        `#issuecomment-5245629202`, while `gh api /repos/.../issues/1/comments`
+        returned that same comment with the numeric `"id":5245629202` --
+        exactly the id the delete endpoint below accepts. `--paginate` because
+        the REST endpoint pages at 30 and a long-lived task can carry more
+        comments than that.
+        """
+        raw = json.loads(
+            self._run_api("api", "--paginate", f"/repos/{self.repo}/issues/{issue}/comments")
+        )
+        return [{"id": c["id"], "body": c["body"]} for c in raw]
+
+    def delete_comment(self, comment_id: int) -> None:
+        self._run_api("api", "-X", "DELETE", f"/repos/{self.repo}/issues/comments/{comment_id}")
+
     def search_titles(self, text: str) -> list[dict]:
         """Case-insensitive substring match over the most recent 200 issues.
 
@@ -170,6 +213,12 @@ class FakeGh:
     ) -> None:
         self.issues: dict[int, dict] = {}
         self._next = 1
+        # Comment ids, monotonic across the whole fake -- not scoped per issue
+        # -- because delete_comment's real endpoint
+        # (/repos/{slug}/issues/comments/{id}) takes only the comment id, no
+        # issue number, so a fake that reused ids per-issue could not tell two
+        # issues' comment 1 apart the way delete_comment must not either.
+        self._next_comment_id = 1
         self.ensured_labels: set[str] = set()
         # A fake standing in for a repo seeded under a different policy needs the
         # same counters that repo was seeded with, or its idea of "this label
@@ -216,7 +265,27 @@ class FakeGh:
         return number
 
     def comment(self, issue: int, body: str) -> None:
-        self._get(issue)["comments"].append(body)
+        # Stored as {id, body}, not a bare string: list_comments needs the id
+        # to give delete_comment something to delete. get_issue still strips
+        # this back down to a bare body string -- its shape is not this
+        # task's to change; see get_issue.
+        self._get(issue)["comments"].append({"id": self._next_comment_id, "body": body})
+        self._next_comment_id += 1
+
+    def list_comments(self, issue: int) -> list[dict]:
+        return [dict(c) for c in self._get(issue)["comments"]]
+
+    def delete_comment(self, comment_id: int) -> None:
+        """Mirrors the real DELETE endpoint's shape: one global id, no issue
+        number. Raises on an id that does not exist anywhere, the same way a
+        404 would -- a fake that silently no-oped here would hide a reset that
+        raced or double-deleted, which real gh would not let pass unnoticed."""
+        for record in self.issues.values():
+            before = len(record["comments"])
+            record["comments"] = [c for c in record["comments"] if c["id"] != comment_id]
+            if len(record["comments"]) != before:
+                return
+        raise GhError(f"no such comment: {comment_id}")
 
     def add_labels(self, issue: int, labels: list[str]) -> None:
         if not labels:
@@ -245,7 +314,11 @@ class FakeGh:
         record = self._get(issue)
         copy = dict(record)
         copy["labels"] = list(record["labels"])
-        copy["comments"] = list(record["comments"])
+        # Bare body strings, matching RealGh's get_issue -- comments are
+        # stored internally as {id, body} now (list_comments needs the id),
+        # but that shape is not this method's to leak. See list_comments for
+        # the id-carrying view.
+        copy["comments"] = [c["body"] for c in record["comments"]]
         copy["assignees"] = list(record["assignees"])
         return copy
 
@@ -265,6 +338,9 @@ class FakeGh:
 
     def close_issue(self, issue: int) -> None:
         self._get(issue)["state"] = "CLOSED"
+
+    def reopen_issue(self, issue: int) -> None:
+        self._get(issue)["state"] = "OPEN"
 
     def list_issues(self, state: str = "open") -> list[dict]:
         """Summary view, deliberately WITHOUT `comments` -- RealGh's `issue list`

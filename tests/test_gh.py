@@ -268,6 +268,71 @@ def test_list_issues_returns_a_copy_of_assignees_not_the_live_list():
     assert gh.get_issue(n)["assignees"] == ["FibonAdithya"]
 
 
+def test_list_comments_is_on_the_protocol_not_only_the_fake():
+    """The same divergence class as close_issue/assign: a fake able to do
+    something the real client cannot is what M1 got burned by."""
+    assert hasattr(GhClient, "list_comments")
+    assert hasattr(RealGh, "list_comments")
+    assert hasattr(FakeGh, "list_comments")
+
+
+def test_delete_comment_is_on_the_protocol_not_only_the_fake():
+    assert hasattr(GhClient, "delete_comment")
+    assert hasattr(RealGh, "delete_comment")
+    assert hasattr(FakeGh, "delete_comment")
+
+
+def test_reopen_issue_is_on_the_protocol_not_only_the_fake():
+    assert hasattr(GhClient, "reopen_issue")
+    assert hasattr(RealGh, "reopen_issue")
+    assert hasattr(FakeGh, "reopen_issue")
+
+
+def test_list_comments_carries_ids_get_issue_deliberately_strips():
+    """get_issue's `comments` is bare body strings on purpose -- packet.
+    parse_latest, build_prompt and reader.read_ledger all depend on that shape.
+    list_comments is reset's only legal way to learn what to delete."""
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [])
+    gh.comment(n, "one")
+    gh.comment(n, "two")
+    rows = gh.list_comments(n)
+    assert [r["body"] for r in rows] == ["one", "two"]
+    assert len({r["id"] for r in rows}) == 2
+    assert gh.get_issue(n)["comments"] == ["one", "two"]
+
+
+def test_delete_comment_removes_it_from_both_views():
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [])
+    gh.comment(n, "one")
+    gh.comment(n, "two")
+    keep = gh.list_comments(n)[1]["id"]
+    gh.delete_comment(gh.list_comments(n)[0]["id"])
+    assert gh.get_issue(n)["comments"] == ["two"]
+    assert [r["id"] for r in gh.list_comments(n)] == [keep]
+
+
+def test_delete_comment_on_an_unknown_id_raises():
+    """Real `gh api -X DELETE .../issues/comments/{id}` 404s on an id nobody
+    ever had. A fake that silently no-ops here would hide a reset that raced
+    or double-deleted, which real gh would not."""
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [])
+    gh.comment(n, "one")
+    with pytest.raises(GhError):
+        gh.delete_comment(9999)
+
+
+def test_reopen_issue_reverses_close_issue():
+    gh = FakeGh()
+    n = gh.create_issue("t", "b", [])
+    gh.close_issue(n)
+    assert gh.get_issue(n)["state"] == "CLOSED"
+    gh.reopen_issue(n)
+    assert gh.get_issue(n)["state"] == "OPEN"
+
+
 def test_the_label_vocabulary_tracks_the_configured_attempt_cap():
     """`max_attempts` is a fleet.toml knob, but the vocabulary hardcoded
     attempt-1 and attempt-2. Raising the cap produced a well-formed
