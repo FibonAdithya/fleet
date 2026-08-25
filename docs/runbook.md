@@ -199,6 +199,19 @@ well as `fleet run` — rather than passing quietly and failing mid-run:
 Get either wrong and `fleet plan` or `fleet run` refuses before dispatching
 anything, naming the role and the missing table or config entry.
 
+**What the gate still cannot ask for.** It checks the models a policy
+*declares*, so a model that only ever appears inside a transcript is outside
+its reach. Claude Code's `<synthetic>` pseudo-model is the one that matters in
+practice: it appears in 38 of the 199 local transcripts that carry usage at
+all (19%), it is never anything a `Role | Agent | Model` table names, and its
+usage block is all zeros in every one of the 72 records of it found there.
+`cost._claude_cost` therefore prices no record that carried zero tokens and
+demands no rate for one -- zero tokens cost $0 at every rate, so a refusal
+there reported nothing an operator could act on while discarding the real cost
+already read from the same transcript and arming the fleet-wide Drain. Do NOT
+add a `[prices."<synthetic>"]` row to work around a refusal; if one appears,
+the record carried real tokens and the rate is genuinely missing.
+
 ## The codex gate
 
 Before routing any role to `codex` in a graded run, launch one codex agent

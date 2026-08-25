@@ -1465,3 +1465,65 @@ def test_an_agent_with_no_transcript_yet_leaves_model_unknown(tmp_path):
     parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=PRICED)
     assert parsed[0].model is None
     assert parsed[0].cost_usd == 0.0
+
+
+def test_a_synthetic_record_does_not_arm_the_drain(tmp_path):
+    """The whole-tick consequence of the unit rule in
+    `test_a_zero_token_model_needs_no_price_row`, pinned where an operator
+    feels it.
+
+    `<synthetic>` is never a DECLARED model, so `policy._validate_agents` --
+    the startup gate this branch adds so an unpriced model fails before
+    anything is spent -- cannot ask for a rate for it. Before the fix, a
+    fleet.toml priced exactly as that gate demands still lost the whole
+    night to one in five Claude sessions: the raise discarded the real cost
+    already computed from the same transcript (0.005 here, reported as 0.0),
+    blanked the observed model so `decide._model_mismatch` went quiet for
+    that agent too, and put a message in `unpriced()` -- which
+    `Daemon.tick` turns into `Drain(reason="unpriced_model: ...")`, stopping
+    every Dispatch and every Continue until a human noticed.
+
+    Catches a fix applied only in `cost.price_lines` while
+    `ClaudeProvider.read` -- the path `parse_snapshot` actually calls -- kept
+    raising: the unit test above would pass and the fleet would still drain.
+    All three assertions matter, and the `unpriced` one most: cost and model
+    could both be restored by a fix that swallowed the exception, and that
+    fix would still arm the drain."""
+    session = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": "claude-opus-5", "usage": {"input_tokens": 1000}}})
+        + "\n"
+        # The verbatim shape of all 72 `<synthetic>` usage records found in
+        # the 199 local transcripts that carry usage at all: every counter
+        # present, every counter zero.
+        + json.dumps(
+            {
+                "message": {
+                    "model": "<synthetic>",
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                }
+            }
+        )
+        + "\n"
+    )
+    # Exactly what `_validate_agents` requires and no more: a rate for every
+    # model the Role | Agent | Model table declares.
+    prices = {
+        "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 10.0}
+    }
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    unpriced: set[str] = set()
+    parsed = parse_snapshot(
+        _snapshot([agent]), ROOT, providers=providers, prices=prices, unpriced=unpriced
+    )
+    assert unpriced == set(), "a zero-token pseudo-model armed the fleet-wide drain"
+    assert parsed[0].cost_usd == pytest.approx(0.005)
+    assert parsed[0].model == "claude-opus-5"

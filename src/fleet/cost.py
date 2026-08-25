@@ -129,6 +129,17 @@ def _decode_lines(lines: list[str]) -> Iterator[dict]:
         yield entry
 
 
+def _carried_tokens(usage: dict) -> bool:
+    """Whether a usage block bills anything at all.
+
+    One predicate, two readers, on purpose. `_claude_models` uses it to decide
+    which models were OBSERVED and `_claude_cost` to decide which records need
+    a rate; two copies of "carried tokens" that drifted apart would make the
+    cost path refuse a transcript the model path had already agreed to ignore.
+    """
+    return any((usage.get(field) or 0) for field in _COUNTERS.values())
+
+
 def _claude_cost(entries: list[dict], prices: Prices) -> float:
     """The pricing rule, over entries `read` (or `price_lines`) has decoded.
 
@@ -143,6 +154,20 @@ def _claude_cost(entries: list[dict], prices: Prices) -> float:
         message = entry.get("message") or {}
         usage = message.get("usage")
         if not usage:
+            continue
+        if not _carried_tokens(usage):
+            # Zero tokens cost $0 at every rate, so a rate is not needed to
+            # price this record -- and demanding one refuses a transcript over
+            # a model no policy can declare. `<synthetic>` is Claude Code's
+            # own pseudo-model, in 19% of local transcripts and zero-token in
+            # every record of it, so `policy._validate_agents` never sees it
+            # and the operator's only warning is a Drain at 2am.
+            #
+            # Skipped rather than priced so the two readers of a transcript
+            # agree: `_claude_models` already defines an OBSERVED model as one
+            # that carried nonzero tokens, and a cost path that refused
+            # exactly the records the model path ignores is the drift that
+            # split the two definitions in the first place.
             continue
         model = message.get("model")
         table = prices.get(model)
@@ -163,7 +188,7 @@ def _claude_models(entries: list[dict]) -> frozenset[str]:
         usage = message.get("usage")
         if not usage:
             continue
-        if not any((usage.get(field) or 0) for field in _COUNTERS.values()):
+        if not _carried_tokens(usage):
             continue
         model = message.get("model")
         if isinstance(model, str) and model:
@@ -267,7 +292,20 @@ class CodexProvider:
             return Reading(cost_usd=0.0, models=frozenset())
 
         models = _codex_models(entries)
-        if len(models) != 1:
+        if not models:
+            # Split from the multi-model message below because this is the
+            # branch real data actually takes: all 50 local total-only
+            # sessions carry no `turn_context` record at all, so every one of
+            # them reaches this raise -- and telling that operator their
+            # session "cannot be split between two rates" names a problem
+            # they do not have and hides the one they do.
+            raise UnpricedTranscript(
+                f"codex transcript reports usage (total_tokens="
+                f"{total.get('total_tokens') or 0}) but names no model in any "
+                "`turn_context` record, so there is no rate to price it at. "
+                "Pricing it at zero would disable the budget ceiling instead."
+            )
+        if len(models) > 1:
             raise UnpricedTranscript(
                 f"codex transcript names {len(models)} models {sorted(models)!r}; its "
                 "token totals are cumulative for the whole session and are not "
