@@ -166,6 +166,31 @@ def _read(provider: Provider, path: Path, prices: dict[str, dict[str, float]]) -
     return provider.read(path.read_text(encoding="utf-8").splitlines(), prices)
 
 
+def _child_cost(provider: Provider, path: Path, prices: dict[str, dict[str, float]]) -> float:
+    """One subagent transcript's spend, refused under exactly its parent's rules.
+
+    Re-raised, never swallowed -- swallowing a child's refusal rebuilds the
+    silent under-billing this whole path exists to fix -- but re-raised NAMING
+    the transcript that refused. Without that, a child on an unpriced model
+    produces the bare `no price for model 'claude-sonnet-5'`, character for
+    character the message the PARENT produces when a model changes under it
+    mid-session. Those are opposite events: the second is a substitution, which
+    `decide._model_mismatch` exists to catch, and the first is delegation,
+    which it deliberately ignores.
+
+    The first is also far commoner. Of the 67 local sessions with subagents, 43
+    run a child model the parent never ran, and every child-only model on this
+    box is `claude-sonnet-5` or `claude-haiku-4-5-20251001` -- models a policy
+    declares nowhere, so no `[prices]` row written from the Role | Agent |
+    Model table covers them. The undecorated message sends the operator hunting
+    a substitution that did not happen, off a fleet that has already stopped.
+    """
+    try:
+        return _read(provider, path, prices).cost_usd
+    except (UnpricedModel, UnpricedTranscript) as exc:
+        raise type(exc)(f"in subagent transcript {path.name}: {exc}") from exc
+
+
 def parse_snapshot(
     raw: dict,
     worktree_root: Path,
@@ -288,7 +313,7 @@ def parse_snapshot(
                         # same way its parent would. Swallowing here would
                         # rebuild the exact under-billing this fixes.
                         total = reading.cost_usd + sum(
-                            _read(provider, child, prices).cost_usd for child in found.children
+                            _child_cost(provider, child, prices) for child in found.children
                         )
                     except (UnpricedModel, UnpricedTranscript) as exc:
                         if unpriced is None:

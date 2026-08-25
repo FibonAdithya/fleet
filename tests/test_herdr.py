@@ -1656,3 +1656,63 @@ def test_an_unpriced_model_in_a_subagent_arms_the_drain(tmp_path):
     # thing the collector exists to prevent; the drain is the answer.
     assert parsed[0].cost_usd == 0.0
     assert parsed[0].model is None
+
+
+def test_an_unpriced_subagent_names_the_subagent_rather_than_reading_as_a_substitution(tmp_path):
+    """The message an operator reads off a drained fleet at 2am has to say
+    which half refused.
+
+    A child on a model with no rate raises the same bare `no price for model
+    'claude-sonnet-5'` the PARENT raises when a model changes under it
+    mid-session -- and that second event is a substitution, the thing
+    `decide._model_mismatch` exists to catch. Locally, 43 of the 67 sessions
+    with subagents run a child model the parent never ran, and every one of
+    those child-only models is `claude-sonnet-5` or
+    `claude-haiku-4-5-20251001`, neither of which any policy declares. So the
+    common case sends the operator hunting a substitution that never happened,
+    on a fleet that is already stopped.
+
+    Naming the transcript is not swallowing it: the refusal still crosses the
+    seam and still arms the drain. Catches dropping the subagent prefix."""
+    session = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    _claude_session(
+        tmp_path,
+        session,
+        [_usage("claude-opus-5", input_tokens=1_000_000)],
+        one=[_usage("claude-sonnet-5", input_tokens=1_000_000)],
+    )
+    agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    unpriced: set[str] = set()
+    parsed = parse_snapshot(
+        _snapshot([agent]),
+        ROOT,
+        providers=providers,
+        prices={"claude-opus-5": _FLAT},
+        unpriced=unpriced,
+    )
+    assert parsed[0].cost_usd == 0.0
+    message = next(iter(unpriced))
+    assert "agent-one.jsonl" in message, message
+    assert "subagent" in message, message
+    # Still the underlying refusal, unaltered -- the rate is what has to be added.
+    assert "claude-sonnet-5" in message, message
+
+
+def test_an_unpriced_parent_is_not_labelled_a_subagent(tmp_path):
+    """The other side of the same rule. A prefix applied to every refusal
+    tells the operator nothing; it has to distinguish. Catches labelling the
+    parent's own refusal as a subagent's."""
+    session = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    _claude_session(tmp_path, session, [_usage("model-nobody-priced", input_tokens=1_000_000)])
+    agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    unpriced: set[str] = set()
+    parse_snapshot(
+        _snapshot([agent]),
+        ROOT,
+        providers=providers,
+        prices={"claude-opus-5": _FLAT},
+        unpriced=unpriced,
+    )
+    assert "subagent" not in next(iter(unpriced))

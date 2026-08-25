@@ -117,7 +117,7 @@ class Provider(Protocol):
     """One agent CLI's transcript format.
 
     `read` is pure: a function of lines and rates, nothing else. Only
-    `transcript` touches the filesystem. That split is the same one the module
+    `session` touches the filesystem. That split is the same one the module
     docstring already defends -- the ceiling is the part most likely to be
     quietly wrong, so it is the part that stays a pure function.
     """
