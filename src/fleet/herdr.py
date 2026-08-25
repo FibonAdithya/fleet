@@ -19,7 +19,14 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
-from fleet.cost import ClaudeProvider, CodexProvider, Provider, UnpricedModel, UnpricedTranscript
+from fleet.cost import (
+    ClaudeProvider,
+    CodexProvider,
+    Provider,
+    Reading,
+    UnpricedModel,
+    UnpricedTranscript,
+)
 from fleet.model import MULTIPLE_MODELS, AgentSpec, AgentState
 
 # herdr's five statuses to AgentState's three.
@@ -148,6 +155,42 @@ def task_of(checkout_path: str, worktree_root: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _read(provider: Provider, path: Path, prices: dict[str, dict[str, float]]) -> Reading:
+    """One transcript, decoded by its own provider.
+
+    Split out only because `parse_snapshot` now reads several files per agent
+    instead of one, and repeating the read-then-decode pair per file is how
+    the parent and its children would drift into being read under different
+    rules.
+    """
+    return provider.read(path.read_text(encoding="utf-8").splitlines(), prices)
+
+
+def _child_cost(provider: Provider, path: Path, prices: dict[str, dict[str, float]]) -> float:
+    """One subagent transcript's spend, refused under exactly its parent's rules.
+
+    Re-raised, never swallowed -- swallowing a child's refusal rebuilds the
+    silent under-billing this whole path exists to fix -- but re-raised NAMING
+    the transcript that refused. Without that, a child on an unpriced model
+    produces the bare `no price for model 'claude-sonnet-5'`, character for
+    character the message the PARENT produces when a model changes under it
+    mid-session. Those are opposite events: the second is a substitution, which
+    `decide._model_mismatch` exists to catch, and the first is delegation,
+    which it deliberately ignores.
+
+    The first is also far commoner. Of the 67 local sessions with subagents, 43
+    run a child model the parent never ran, and every child-only model on this
+    box is `claude-sonnet-5` or `claude-haiku-4-5-20251001` -- models a policy
+    declares nowhere, so no `[prices]` row written from the Role | Agent |
+    Model table covers them. The undecorated message sends the operator hunting
+    a substitution that did not happen, off a fleet that has already stopped.
+    """
+    try:
+        return _read(provider, path, prices).cost_usd
+    except (UnpricedModel, UnpricedTranscript) as exc:
+        raise type(exc)(f"in subagent transcript {path.name}: {exc}") from exc
+
+
 def parse_snapshot(
     raw: dict,
     worktree_root: Path,
@@ -254,17 +297,38 @@ def parse_snapshot(
                     raise UnpricedModel(message)
                 unpriced.add(message)
             else:
-                path = provider.transcript(session)
-                if path is not None:
-                    lines = path.read_text(encoding="utf-8").splitlines()
+                found = provider.session(session)
+                if found is not None:
                     try:
-                        reading = provider.read(lines, prices)
+                        reading = _read(provider, found.parent, prices)
+                        # Subagent spend is spend. Summed rather than ignored
+                        # because ignoring it is silent: the parent prices
+                        # fine, so nothing reaches `unpriced`, no Drain arms,
+                        # and both ceilings are simply short. Measured over
+                        # the 66 local sessions carrying both halves, 46.7%
+                        # of all tokens were in the half nothing read.
+                        #
+                        # Deliberately NOT wrapped in its own handler: a child
+                        # naming an unpriced model must refuse the session the
+                        # same way its parent would. Swallowing here would
+                        # rebuild the exact under-billing this fixes.
+                        total = reading.cost_usd + sum(
+                            _child_cost(provider, child, prices) for child in found.children
+                        )
                     except (UnpricedModel, UnpricedTranscript) as exc:
                         if unpriced is None:
                             raise
                         unpriced.add(str(exc))
                     else:
-                        cost = reading.cost_usd
+                        cost = total
+                        # From the PARENT's reading alone. 43 of those same 66
+                        # sessions run a model in a child the parent never ran
+                        # -- opus delegating to sonnet -- and the check this
+                        # feeds asks whether the agent the POLICY DECLARED was
+                        # substituted. That agent is the parent; a child on
+                        # another model is delegation, not substitution, and
+                        # unioning the sets would escalate two thirds of every
+                        # task that spawns one.
                         if len(reading.models) == 1:
                             model = next(iter(reading.models))
                         elif len(reading.models) > 1:

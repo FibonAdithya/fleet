@@ -189,13 +189,13 @@ def test_codex_transcript_is_found_under_the_date_nested_layout(tmp_path):
     nested.mkdir(parents=True)
     target = nested / f"rollout-2026-08-11T10-11-40-{sid}.jsonl"
     target.write_text("{}\n")
-    assert CodexProvider(sessions_dir=tmp_path).transcript(sid) == target
+    assert CodexProvider(sessions_dir=tmp_path).session(sid).parent == target
 
 
 def test_a_missing_codex_transcript_is_none_not_a_crash(tmp_path):
     """Catches raising on a missing file, which would drain the fleet in the
     seconds after every dispatch when a transcript has not been written yet."""
-    assert CodexProvider(sessions_dir=tmp_path).transcript("no-such-session") is None
+    assert CodexProvider(sessions_dir=tmp_path).session("no-such-session") is None
 
 
 def test_the_registry_exposes_both_providers_by_herdr_agent_kind():
@@ -238,7 +238,7 @@ def test_codex_transcript_glob_requires_separator_before_session_id(tmp_path):
     decoy.write_text("{}\n")
 
     # Must return the correct file, not the decoy
-    assert CodexProvider(sessions_dir=tmp_path).transcript(sid) == correct
+    assert CodexProvider(sessions_dir=tmp_path).session(sid).parent == correct
 
 
 def test_a_real_captured_codex_session_prices():
@@ -298,3 +298,76 @@ def test_a_two_model_session_still_names_the_split_it_cannot_make():
     lines = [_model("gpt-test"), _model("gpt-other"), _tokens(input_tokens=1_000)]
     with pytest.raises(UnpricedTranscript, match="cannot be split between two rates"):
         PROVIDER.read(lines, PRICES)
+
+
+def _world_state(subagents):
+    """A `world_state` record shaped the way codex writes one.
+
+    `payload.state.environments.subagents` is a human-readable list of
+    nicknames -- `"- diverge_games: Rawls"` in the real capture -- which is
+    enough to know children exist and useless for finding their files.
+    """
+    return json.dumps(
+        {
+            "type": "world_state",
+            "payload": {"full": False, "state": {"environments": {"subagents": subagents}}},
+        }
+    )
+
+
+def test_a_codex_parent_that_spawned_subagents_is_refused_not_underbilled():
+    """codex writes each spawned thread to its own rollout named by the CHILD
+    thread id, which appears nowhere in the parent's session id, so
+    `session()` cannot resolve them. On the one local session with children
+    the parent's own final total was 13,435,746 tokens against its 14
+    children's 37,366,303 -- 74% of the real spend, priced at $0.00 and never
+    added to the collector that arms the drain.
+
+    Refused rather than summed, because the parent's own lines can only prove
+    children EXIST, not what they cost. A loud drain on the first tick beats
+    a ceiling that is quietly short by three quarters."""
+    lines = [
+        _model(),
+        _tokens(input_tokens=1_000_000, total_tokens=1_000_000),
+        _world_state("- diverge_games: Rawls"),
+    ]
+    with pytest.raises(UnpricedTranscript) as caught:
+        PROVIDER.read(lines, PRICES)
+    assert "subagent" in str(caught.value)
+
+
+def test_a_codex_session_with_no_subagents_still_prices():
+    """The guard fires on the FIELD, not on the record type. codex writes
+    `world_state` constantly -- 35 records in a single local rollout -- and a
+    guard that refused any session carrying one would drain every codex agent
+    on the box, which is a worse failure than the one it set out to fix."""
+    lines = [
+        _model(),
+        _tokens(input_tokens=1_000_000, total_tokens=1_000_000),
+        json.dumps({"type": "world_state", "payload": {"full": True, "state": {}}}),
+        _world_state(""),
+    ]
+    assert PROVIDER.read(lines, PRICES).cost_usd == pytest.approx(10.0)
+
+
+def test_a_real_captured_codex_parent_with_subagents_is_refused():
+    """The fidelity obligation, applied to the guard. `_world_state` above is
+    an invented record; this is three real ones lifted out of the rollout the
+    74% measurement came from -- a `turn_context` naming a priced model, the
+    session's final cumulative `token_count`, and the `world_state` that
+    announced a spawned thread -- with the session's own prose left out.
+
+    Everything else about this transcript is priceable: the model is known,
+    the breakdown sums to the total, `cache_write_input_tokens` is zero. Which
+    is exactly the danger -- without the guard it prices cleanly to a
+    confident number covering 26% of the session. Catches a guard written to
+    the shape of the hand-built fixture rather than to codex's."""
+    lines = (CAPTURED / "codex-subagent-parent.jsonl").read_text().splitlines()
+    prices = {
+        m: {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}
+        for m in _codex_models(lines)
+    }
+    assert prices, "the capture names no model; re-capture it"
+    with pytest.raises(UnpricedTranscript) as caught:
+        PROVIDER.read(lines, prices)
+    assert "subagent" in str(caught.value)

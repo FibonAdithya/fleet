@@ -51,6 +51,26 @@ before a graded run, with the rates for whatever model the agents actually run
 on. It is not added here: `fixtures/policy/fleet-fixture/**` is a capture, and
 hand-editing it makes it stop being one.
 
+**"Whatever model the agents run on" is not the declared model alone.** Since
+subagent spend is counted, the table has to cover every model an agent's
+*subagents* run too, and those appear in no policy: the `Role | Agent | Model`
+table names the parent, `policy._validate_agents` checks the parent's rate at
+startup, and a child's rate is checked nowhere until a transcript is read
+mid-run. Measured over the 67 local sessions with subagents, 43 run a child
+model the parent never ran, and every child-only model on this box is
+`claude-sonnet-5` or `claude-haiku-4-5-20251001`. So a table priced strictly
+from the declared column — `claude-opus-5` and nothing else, which is what
+`fixtures/policy/fleet-fixture/fleet.toml` carries today — drains on the first
+tick after the first task that delegates. Price the whole family the agents can
+reach, not the row the policy declares.
+
+This one cannot move to a startup error the way §1.2's parent-model check did,
+because nothing before dispatch knows which subagents a prompt will spawn. What
+it gets instead is a message that says which half refused: a child's refusal
+reaches `unpriced` as `in subagent transcript agent-<id>.jsonl: no price for
+model …`, so the drain is not mistaken for a mid-session substitution in the
+parent.
+
 ### 1.3 `fixtures/seed/reset.sh` can fail, and now says so
 
 The git-side reset used to report `Reset complete` whether or not anything
