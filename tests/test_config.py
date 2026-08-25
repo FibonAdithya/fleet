@@ -250,3 +250,15 @@ def test_a_bare_string_args_is_refused(tmp_path):
     )
     with pytest.raises(ConfigError, match="args"):
         load_config(tmp_path)
+
+
+def test_a_non_table_agents_entry_is_refused_by_name(tmp_path):
+    """`agents.claude = "claude"` -- one missing pair of brackets -- used to
+    reach `table.get` and surface as a bare `AttributeError: 'str' object has
+    no attribute 'get'`, a traceback naming neither the section nor the kind.
+    Catches dropping the type check: every other refusal in `_agents` names
+    the table it could not read, and the operator reading this at 2am has to
+    be able to find it."""
+    (tmp_path / "fleet.toml").write_text(BASE + '\n[agents]\nclaude = "claude"\n')
+    with pytest.raises(ConfigError, match=r"\[agents\.claude\]"):
+        load_config(tmp_path)

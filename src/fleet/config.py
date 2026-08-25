@@ -112,6 +112,17 @@ def _agents(raw: dict) -> dict[str, AgentSpec]:
     """
     out: dict[str, AgentSpec] = {}
     for kind, table in raw.items():
+        if not isinstance(table, dict):
+            # `agents.claude = "..."` instead of `[agents.claude]` is one
+            # missing pair of brackets, and without this check it reached
+            # `.get` and came out as a bare AttributeError -- a traceback with
+            # no key in it, where every other refusal in this module names the
+            # table it could not read.
+            raise ConfigError(
+                f"[agents.{kind}] must be a table, got {type(table).__name__}. "
+                f"Write it as a `[agents.{kind}]` section with `model_flag` "
+                "(and optionally `args`) under it."
+            )
         flag = table.get("model_flag")
         if not flag:
             raise ConfigError(
