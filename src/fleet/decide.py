@@ -55,7 +55,15 @@ _LIVE = ("claimed", "review", "integrating")
 # reviewer and a four-role patch route still ends at the integrator. M4 edits
 # this table regardless -- an invariant-review stage needs a state of its own --
 # and three explicit rows are a better thing to edit than a positional guess.
-_STAGE = {"ready": 0, "review": 1, "integrating": -1}
+#
+# `claimed` maps to the same index as `ready`, route[0]: CLAIMED is what READY
+# becomes the instant `_dispatch` hands it to route[0], the same role, just
+# after the handoff rather than before it. Added for `_model_mismatch`, the
+# first caller that needs a CLAIMED task's role -- every earlier reader of this
+# table only ever asked about a task about to be dispatched or continued, and a
+# live-but-not-yet-advanced CLAIMED row is neither, so nothing needed the row
+# until now.
+_STAGE = {"ready": 0, "claimed": 0, "review": 1, "integrating": -1}
 
 # The states that are already holding a slot and an area: their own.
 _CONTINUATIONS = ("review", "integrating")
@@ -79,6 +87,32 @@ def _role_for(task: Task, policy: Policy) -> str | None:
         # cannot produce an INTEGRATING state cannot legitimately arrive here.
         return None
     return route[index]
+
+
+def _model_mismatch(task: Task, agent: AgentState, policy: Policy) -> bool:
+    """True when an agent is demonstrably running a model nobody declared.
+
+    `UnpricedModel` catches a model with no price at all; it cannot catch this
+    -- a substitution between two PRICED models raises nothing and bills the
+    night at a rate nobody chose, the exact hazard `AgentState.model`'s own
+    docstring names.
+
+    False whenever the answer is not yet known: `model=None` is a transcript
+    that has not been written, ordinary in the seconds after a dispatch, and
+    escalating on it would burn the backlog on the first tick. `MULTIPLE_MODELS`
+    is not that -- it is `parse_snapshot` naming a transcript that already
+    carries two models, which is the substitution itself, so it must compare
+    unequal to whatever a policy could ever declare rather than read as unknown.
+    """
+    if agent.model is None:
+        return False
+    role = _role_for(task, policy)
+    if role is None:
+        return False
+    declared = policy.agent_for(role)
+    if declared is None:
+        return False
+    return agent.model != declared[1]
 
 
 def _writes_integration(task: Task) -> bool:
@@ -360,6 +394,15 @@ def _reap(
                 # Not _fail: Release relabels to READY, restarting the task from
                 # its implementer and discarding a review that already happened.
                 intents.append(Escalate(task=task.number, reason="stalled"))
+            elif _model_mismatch(task, agent, policy):
+                # Ahead of over_budget below, same reason as the CLAIMED path:
+                # a reviewer or integrator on an undeclared model has its
+                # `cost_usd` measured against the wrong rate, so an
+                # over_budget verdict computed from it is not a fact worth
+                # acting on. This is the role the docstring hazard names most
+                # directly -- a reviewer judges the implementer's work and
+                # runs long enough to burn real money at a rate nobody chose.
+                intents.append(Escalate(task=task.number, reason="model_mismatch"))
             elif agent.cost_usd > policy.per_task_usd:
                 # Task 3 left this branch with no cost check at all, so a
                 # reviewer that was healthy, moving and far over its ceiling got
@@ -398,6 +441,17 @@ def _reap(
             continue
         if _stalled(task, observations, policy, now):
             intents.append(_fail(task, "stalled", policy))
+            continue
+        if _model_mismatch(task, agent, policy):
+            # Ahead of the cost check below, on purpose: a wrong-model agent's
+            # `cost_usd` was accumulated against the wrong rate, so an
+            # over_budget verdict computed from it is not a fact worth acting
+            # on. Escalate rather than `_fail`: `_fail`'s Release restarts the
+            # task from its implementer on the SAME undeclared model, so the
+            # replacement agent hits this exact branch again next tick. One
+            # agent on the wrong model is a task fault, not a configuration
+            # fault, so this stops the task rather than draining the fleet.
+            intents.append(Escalate(task=task.number, reason="model_mismatch"))
             continue
         # Cost is checked only for a live agent. A finished agent a cent over
         # budget still advances its packet rather than discarding work already

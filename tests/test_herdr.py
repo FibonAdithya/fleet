@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from fleet.cost import UnpricedModel
+from fleet.cost import ClaudeProvider, UnpricedModel
 from fleet.herdr import STATUS, FakeHerdr, HerdrError, error_code, parse_snapshot, task_of
-from fleet.model import AgentState
+from fleet.model import MULTIPLE_MODELS, AgentSpec, AgentState
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/herdr/snapshot-fleet.json"
 ROOT = Path("/home/u/.fleet/worktrees")
@@ -25,6 +25,7 @@ def _agent(cwd: str, **overrides) -> dict:
         "cwd": cwd,
         "foreground_cwd": cwd,
         "agent_session": {"value": "session-id"},
+        "agent": "claude",
     }
     agent.update(overrides)
     return agent
@@ -199,9 +200,8 @@ def test_a_priced_agent_carries_its_transcript_cost(tmp_path):
     )
     prices = {"test-model": {"input": 10.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}}
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
-    parsed = parse_snapshot(
-        _snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices=prices
-    )
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=prices)
     assert parsed[0].cost_usd == pytest.approx(10.0)
 
 
@@ -221,8 +221,9 @@ def test_an_unpriced_model_propagates_out_of_parse_snapshot(tmp_path):
     # would be falsy and skip the join branch entirely, proving nothing.
     prices = {"other-model": {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}}
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     with pytest.raises(UnpricedModel):
-        parse_snapshot(_snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices=prices)
+        parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=prices)
 
 
 def test_cwd_resolves_the_task_when_it_disagrees_with_foreground_cwd():
@@ -336,14 +337,31 @@ def _captured_replies():
     }
 
 
-def _real(tmp_path, run=None, worktree_root=None):
+#: What every pre-existing test in this file assumes `RealHerdr` does when
+#: nobody has told it otherwise: one agent kind, launched with the historical
+#: default args, on the one role these fixtures ever start. `_real`'s
+#: `agents`/`routing` defaults exist ONLY to keep those tests' behaviour
+#: unchanged now that `RealHerdr` no longer hardcodes `agent_kind`/`agent_args`
+#: itself -- a test that cares about routing passes its own.
+_DEFAULT_AGENTS = {
+    "claude": AgentSpec(
+        kind="claude", model_flag="--model", args=("--permission-mode", "acceptEdits")
+    ),
+}
+_DEFAULT_ROUTING = {"implementer": ("claude", "claude-opus-5")}
+
+
+def _real(tmp_path, run=None, worktree_root=None, agents=None, routing=None, sessions_dir=None):
     from fleet.herdr import RealHerdr
 
     herdr = RealHerdr(
         worktree_root=worktree_root or tmp_path / "worktrees",
         projects_dir=tmp_path / "projects",
+        sessions_dir=sessions_dir,
         prices={},
         repo_root=tmp_path / "repo",
+        agents=_DEFAULT_AGENTS if agents is None else agents,
+        routing=_DEFAULT_ROUTING if routing is None else routing,
     )
     herdr._run = run if run is not None else RecordingRun(_captured_replies())
     return herdr
@@ -877,13 +895,28 @@ def test_real_start_agent_grants_permissions_up_front(tmp_path):
 def test_real_start_agent_passes_agent_args_after_a_separator(tmp_path):
     """`herdr agent start <NAME> --kind K --pane P [-- [AGENT_ARG]...]`: without
     the `--`, `--permission-mode` is parsed as one of herdr's own options and
-    the start fails instead of reaching claude."""
+    the start fails instead of reaching claude.
+
+    Pins the whole post-separator sequence, not just `spec.args`: since task
+    7 the model always lands after `spec.args` on that same side of `--` (see
+    `test_a_role_is_started_on_its_declared_agent_and_model`), so a tuple
+    that ended exactly at `acceptEdits` would now be wrong by construction --
+    but a prefix check would also miss the model flag being appended twice,
+    junk appended after it, or the model landing ahead of `spec.args` instead
+    of after it. `_DEFAULT_AGENTS["claude"].args` and
+    `_DEFAULT_ROUTING["implementer"]` are both fixed in this file, so the
+    full tuple is exactly determined and worth pinning exactly."""
     run = RecordingRun(_captured_replies())
     herdr = _real(tmp_path, run)
     herdr.create_worktree(task=1, slug="lid", base="integration")
     herdr.start_agent(task=1, role="implementer", prompt="x")
     start = run.herdr_calls("herdr", "agent", "start")[0]
-    assert start[start.index("--") + 1 :] == ("--permission-mode", "acceptEdits")
+    assert start[start.index("--") + 1 :] == (
+        "--permission-mode",
+        "acceptEdits",
+        "--model",
+        "claude-opus-5",
+    )
     assert start[3] == "fleet-1"
     assert start[start.index("--kind") + 1] == "claude"
 
@@ -982,7 +1015,8 @@ def test_a_freshly_started_agent_has_no_session_id_yet():
     (agent,) = raw["result"]["snapshot"]["agents"]
     assert "agent_session" not in agent
     prices = {"m": {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}}
-    parsed = parse_snapshot(raw, CAPTURE_ROOT, projects_dir=Path("/nonexistent"), prices=prices)
+    providers = {"claude": ClaudeProvider(projects_dir=Path("/nonexistent"))}
+    parsed = parse_snapshot(raw, CAPTURE_ROOT, providers=providers, prices=prices)
     assert parsed[0].cost_usd == 0.0
 
 
@@ -1028,11 +1062,12 @@ def test_an_unpriced_model_is_recorded_rather_than_raised_when_someone_is_collec
     session = "33333333-3333-3333-3333-333333333333"
     prices = _unpriced_transcript(tmp_path, session)
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     unpriced: set[str] = set()
     parsed = parse_snapshot(
         _snapshot([agent]),
         ROOT,
-        projects_dir=tmp_path / "projects",
+        providers=providers,
         prices=prices,
         unpriced=unpriced,
     )
@@ -1050,8 +1085,9 @@ def test_an_unpriced_agent_does_not_silence_the_rest_of_the_snapshot(tmp_path):
         _agent(str(ROOT / "5-slug"), agent_session={"value": session}),
         _agent(str(ROOT / "6-other"), agent_session={"value": "no-transcript-at-all"}),
     ]
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     parsed = parse_snapshot(
-        _snapshot(agents), ROOT, projects_dir=tmp_path / "projects", prices=prices, unpriced=set()
+        _snapshot(agents), ROOT, providers=providers, prices=prices, unpriced=set()
     )
     assert [a.task for a in parsed] == [5, 6]
 
@@ -1103,6 +1139,73 @@ def test_real_unpriced_is_rebuilt_by_every_read(tmp_path):
     assert herdr.unpriced() == set()
 
 
+def test_real_agents_prices_a_codex_agent_when_a_sessions_dir_is_configured(tmp_path):
+    """Catches dropping codex from `RealHerdr`'s provider map. `PROVIDER_KINDS`
+    already advertises codex as known and the policy layer accepts a route to
+    it, but until this test the runtime map built in `RealHerdr.agents()` was
+    Claude-only regardless -- so a correctly-configured codex role would
+    launch, its agent would fall through the unknown-kind branch, and the
+    fleet would drain on the first tick even though a `[agents.codex]`
+    section and a real sessions directory both existed."""
+    session = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    sessions_dir = tmp_path / "codex-sessions"
+    day_dir = sessions_dir / "2026" / "08" / "19"
+    day_dir.mkdir(parents=True)
+    (day_dir / f"rollout-2026-08-19T00-00-00-{session}.jsonl").write_text(
+        json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 1000,
+                            "output_tokens": 0,
+                            "total_tokens": 1000,
+                            "cached_input_tokens": 0,
+                        }
+                    },
+                },
+            }
+        )
+        + "\n"
+    )
+    prices = {
+        "gpt-5.6-sol": {"input": 1000.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    }
+    root = tmp_path / "worktrees"
+    agent = _agent(str(root / "5-slug"), agent="codex", agent_session={"value": session})
+    run = RecordingRun({("herdr", "api", "snapshot"): json.dumps(_snapshot([agent]))})
+    herdr = _real(tmp_path, run, worktree_root=root, sessions_dir=sessions_dir)
+    herdr.prices = prices
+    states = herdr.agents()
+    assert states[0].cost_usd == pytest.approx(1.0)
+    assert states[0].model == "gpt-5.6-sol"
+    assert herdr.unpriced() == set()
+
+
+def test_real_agents_leaves_codex_unregistered_with_no_sessions_dir_configured(tmp_path):
+    """The default's other half: a fleet that never configured a codex
+    sessions directory must not have one silently guessed. A codex agent then
+    correctly falls through the unknown-kind branch and is collected --
+    exactly what `test_an_agent_on_an_unregistered_cli_is_collected_not_priced_at_zero`
+    covers at the `parse_snapshot` level, pinned here at the `RealHerdr`
+    level too so a default-path guess added later would be caught here even
+    if `parse_snapshot`'s own tests kept passing."""
+    session = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    root = tmp_path / "worktrees"
+    agent = _agent(str(root / "5-slug"), agent="codex", agent_session={"value": session})
+    run = RecordingRun({("herdr", "api", "snapshot"): json.dumps(_snapshot([agent]))})
+    herdr = _real(tmp_path, run, worktree_root=root)
+    assert herdr.sessions_dir is None
+    states = herdr.agents()
+    assert states[0].cost_usd == 0.0
+    assert states[0].model is None
+    assert any("codex" in message for message in herdr.unpriced())
+
+
 def test_both_clients_answer_unpriced(tmp_path):
     """The Protocol is what the daemon codes against, and a method on only one
     of the two is a fake/real divergence of exactly the class m2-inputs §6
@@ -1131,9 +1234,10 @@ def test_an_empty_price_table_makes_every_priceable_agent_unpriced(tmp_path):
         json.dumps({"message": {"model": "claude-opus-4", "usage": {"input_tokens": 1}}}) + "\n"
     )
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     unpriced: set[str] = set()
     parsed = parse_snapshot(
-        _snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices={}, unpriced=unpriced
+        _snapshot([agent]), ROOT, providers=providers, prices={}, unpriced=unpriced
     )
     assert unpriced, "an empty [prices] table priced an agent at nothing, silently"
     assert parsed[0].cost_usd == 0.0
@@ -1150,8 +1254,9 @@ def test_an_empty_price_table_raises_when_nobody_is_collecting(tmp_path):
         json.dumps({"message": {"model": "claude-opus-4", "usage": {"input_tokens": 1}}}) + "\n"
     )
     agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
     with pytest.raises(UnpricedModel):
-        parse_snapshot(_snapshot([agent]), ROOT, projects_dir=tmp_path / "projects", prices={})
+        parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices={})
 
 
 def test_real_create_worktree_names_the_push_prerequisite_when_the_base_is_not_on_the_remote(
@@ -1218,3 +1323,207 @@ def test_a_timed_out_herdr_call_takes_the_cautious_path(tmp_path, monkeypatch):
         herdr._subprocess("sh", "-c", "sleep 30")
     assert caught.value.code is None
     assert caught.value.code not in AGENT_ABSENT_CODES
+
+
+# -- launching each role on its declared agent and model ---------------------
+
+
+def test_a_role_is_started_on_its_declared_agent_and_model(tmp_path):
+    """Catches a launcher that keeps one global agent_kind, which would run
+    every role on claude no matter what policy declares."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(
+        tmp_path,
+        run,
+        agents={
+            "codex": AgentSpec(kind="codex", model_flag="--model", args=("--full-auto",)),
+        },
+        routing={"implementer": ("codex", "gpt-5.6-sol")},
+    )
+    herdr.create_worktree(task=7, slug="lid", base="integration")
+    herdr.start_agent(7, "implementer", "do the thing")
+    start = run.herdr_calls("herdr", "agent", "start")[0]
+    assert "--kind" in start and start[start.index("--kind") + 1] == "codex"
+    assert "--model" in start and start[start.index("--model") + 1] == "gpt-5.6-sol"
+    assert "--full-auto" in start
+
+
+def test_a_role_with_no_declared_agent_raises_before_launching(tmp_path):
+    """Catches falling back to a default kind, which would start an agent whose
+    transcript the fleet cannot attribute to a declared model."""
+    run = RecordingRun(_captured_replies())
+    herdr = _real(tmp_path, run, agents={}, routing={})
+    with pytest.raises(HerdrError, match="reviewer"):
+        herdr.start_agent(7, "reviewer", "do the thing")
+    assert not run.herdr_calls("herdr", "agent", "start")
+
+
+# --------------------------------------------------------------------------
+# Task 8: the model each agent actually ran, joined from its own transcript.
+
+
+PRICED = {"test-model": {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}}
+
+
+def _claude_transcript(tmp_path, session, model="test-model", tokens=1_000):
+    """A one-message Claude transcript, mirroring `_unpriced_transcript` above."""
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": model, "usage": {"input_tokens": tokens}}}) + "\n"
+    )
+    return {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+
+
+def test_parse_snapshot_records_the_model_a_transcript_names(tmp_path):
+    """decide compares this against the declared model. Catches leaving it None,
+    which makes every mismatch check pass vacuously and lets a silent model
+    substitution run the whole night unnoticed."""
+    session = "55555555-5555-5555-5555-555555555555"
+    providers = _claude_transcript(tmp_path, session)
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=PRICED)
+    assert parsed[0].model == "test-model"
+
+
+def test_a_model_carrying_no_tokens_is_not_recorded_as_the_observed_model(tmp_path):
+    """`<synthetic>` has a usage block of all zeros. Catches recording it as the
+    observed model, which reports a mismatch against every declared model."""
+    session = "66666666-6666-6666-6666-666666666666"
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": "test-model", "usage": {"input_tokens": 1000}}})
+        + "\n"
+        + json.dumps({"message": {"model": "<synthetic>", "usage": {"input_tokens": 0}}})
+        + "\n"
+    )
+    prices = dict(PRICED)
+    prices["<synthetic>"] = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=prices)
+    assert parsed[0].model == "test-model"
+
+
+def test_an_agent_on_an_unregistered_cli_is_collected_not_priced_at_zero(tmp_path):
+    """Defence in depth behind the load-time check. Catches reading an unknown
+    CLI's agent as free, which leaves the ceiling off for that agent while every
+    other agent reports normally."""
+    session = "77777777-7777-7777-7777-777777777777"
+    providers = _claude_transcript(tmp_path, session)
+    agent = _agent(str(ROOT / "7-slug"), agent="nosuchcli", agent_session={"value": session})
+    unpriced: set[str] = set()
+    parsed = parse_snapshot(
+        _snapshot([agent]), ROOT, providers=providers, prices=PRICED, unpriced=unpriced
+    )
+    assert parsed[0].cost_usd == 0.0
+    assert parsed[0].model is None
+    assert any("nosuchcli" in message for message in unpriced)
+
+
+def test_an_unregistered_cli_raises_when_nobody_is_collecting(tmp_path):
+    """Mirrors the UnpricedModel rule directly above it: a caller that forgot
+    the collector must not get a fleet of free agents."""
+    session = "88888888-8888-8888-8888-888888888888"
+    providers = _claude_transcript(tmp_path, session)
+    agent = _agent(str(ROOT / "7-slug"), agent="nosuchcli", agent_session={"value": session})
+    with pytest.raises(UnpricedModel, match="nosuchcli"):
+        parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=PRICED)
+
+
+def test_a_transcript_naming_two_token_carrying_models_records_the_sentinel(tmp_path):
+    """Catches collapsing a multi-model transcript into None: None is
+    deliberately ignored by the later mismatch check, so a mid-session
+    substitution -- exactly what that check exists to catch -- would pass it
+    vacuously if this recorded None instead of MULTIPLE_MODELS."""
+    session = "99999999-9999-9999-9999-999999999999"
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": "test-model", "usage": {"input_tokens": 1000}}})
+        + "\n"
+        + json.dumps({"message": {"model": "other-model", "usage": {"input_tokens": 500}}})
+        + "\n"
+    )
+    prices = dict(PRICED)
+    prices["other-model"] = {"input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0}
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=prices)
+    assert parsed[0].model == MULTIPLE_MODELS
+
+
+def test_an_agent_with_no_transcript_yet_leaves_model_unknown(tmp_path):
+    """Catches recording any placeholder for 'not written yet' other than
+    None. A transcript missing in the seconds after a dispatch is ordinary;
+    the later mismatch check deliberately ignores None so it does not
+    escalate on every fresh dispatch and burn the backlog on the first tick."""
+    session = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    parsed = parse_snapshot(_snapshot([agent]), ROOT, providers=providers, prices=PRICED)
+    assert parsed[0].model is None
+    assert parsed[0].cost_usd == 0.0
+
+
+def test_a_synthetic_record_does_not_arm_the_drain(tmp_path):
+    """The whole-tick consequence of the unit rule in
+    `test_a_zero_token_model_needs_no_price_row`, pinned where an operator
+    feels it.
+
+    `<synthetic>` is never a DECLARED model, so `policy._validate_agents` --
+    the startup gate this branch adds so an unpriced model fails before
+    anything is spent -- cannot ask for a rate for it. Before the fix, a
+    fleet.toml priced exactly as that gate demands still lost the whole
+    night to one in five Claude sessions: the raise discarded the real cost
+    already computed from the same transcript (0.005 here, reported as 0.0),
+    blanked the observed model so `decide._model_mismatch` went quiet for
+    that agent too, and put a message in `unpriced()` -- which
+    `Daemon.tick` turns into `Drain(reason="unpriced_model: ...")`, stopping
+    every Dispatch and every Continue until a human noticed.
+
+    Catches a fix applied only in `cost.price_lines` while
+    `ClaudeProvider.read` -- the path `parse_snapshot` actually calls -- kept
+    raising: the unit test above would pass and the fleet would still drain.
+    All three assertions matter, and the `unpriced` one most: cost and model
+    could both be restored by a fix that swallowed the exception, and that
+    fix would still arm the drain."""
+    session = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    project = tmp_path / "projects" / "slug"
+    project.mkdir(parents=True)
+    (project / f"{session}.jsonl").write_text(
+        json.dumps({"message": {"model": "claude-opus-5", "usage": {"input_tokens": 1000}}})
+        + "\n"
+        # The verbatim shape of all 72 `<synthetic>` usage records found in
+        # the 199 local transcripts that carry usage at all: every counter
+        # present, every counter zero.
+        + json.dumps(
+            {
+                "message": {
+                    "model": "<synthetic>",
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                }
+            }
+        )
+        + "\n"
+    )
+    # Exactly what `_validate_agents` requires and no more: a rate for every
+    # model the Role | Agent | Model table declares.
+    prices = {
+        "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 10.0}
+    }
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    agent = _agent(str(ROOT / "5-slug"), agent="claude", agent_session={"value": session})
+    unpriced: set[str] = set()
+    parsed = parse_snapshot(
+        _snapshot([agent]), ROOT, providers=providers, prices=prices, unpriced=unpriced
+    )
+    assert unpriced == set(), "a zero-token pseudo-model armed the fleet-wide drain"
+    assert parsed[0].cost_usd == pytest.approx(0.005)
+    assert parsed[0].model == "claude-opus-5"

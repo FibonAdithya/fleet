@@ -24,3 +24,14 @@ do that".
   NEEDS_HUMAN.
 - A task gets **1 review fix pass**. Fix passes do not consume dispatch
   attempts; they are counted separately.
+
+## Which agent and model each role runs on
+
+| Role | Agent | Model |
+|---|---|---|
+| `implementer` | `claude` | `claude-opus-5` |
+| `reviewer` | `claude` | `claude-opus-5` |
+| `integrator` | `claude` | `claude-opus-5` |
+| `planner` | `claude` | `claude-opus-5` |
+| `scout` | `claude` | `claude-opus-5` |
+| `invariant-reviewer` | `claude` | `claude-opus-5` |

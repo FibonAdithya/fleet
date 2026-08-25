@@ -45,9 +45,17 @@ class Task:
 class AgentState:
     """A herdr agent, normalized.
 
-    `task` and `cost_usd` are supplied by the shell: the herdr snapshot carries
-    neither. `change_seq` is herdr's `state_change_seq`, a monotonic counter --
-    a value that has not moved since the last tick is what stall detection reads.
+    `task`, `cost_usd`, and `model` are supplied by the shell: the herdr
+    snapshot carries none of them. `change_seq` is herdr's `state_change_seq`,
+    a monotonic counter -- a value that has not moved since the last tick is
+    what stall detection reads.
+
+    `model` is the single model the transcript named, or None when the
+    transcript named none (no transcript written yet, or no usage recorded --
+    ordinary in the seconds after a dispatch) or more than one (see
+    `MULTIPLE_MODELS`). A later task compares this against the declared model;
+    that check deliberately ignores None, so a transcript not yet written must
+    not read as a mismatch.
 
     A departed agent has no status of its own: it is represented by its absence
     from `agents()`, not by a value here.
@@ -57,6 +65,16 @@ class AgentState:
     status: str  # "working" | "done" | "dirty"
     change_seq: int
     cost_usd: float = 0.0
+    model: str | None = None
+
+
+#: `AgentState.model` when a transcript named more than one model carrying
+#: tokens. Distinct from None, which means "no transcript yet" or "no usage
+#: recorded yet". A declared model can never equal this string, so the
+#: mismatch check a later task adds escalates it without needing a special
+#: case -- collapsing this into None would let a mid-session model
+#: substitution pass the check vacuously.
+MULTIPLE_MODELS = "<multiple>"
 
 
 @dataclass(frozen=True)
@@ -165,6 +183,21 @@ class FleetSnapshot:
 
 
 @dataclass(frozen=True)
+class AgentSpec:
+    """How to launch one agent CLI. Mechanics, not policy.
+
+    `model_flag` is a separate field rather than a placeholder inside `args` so
+    the launcher can always append `[model_flag, model]`. A placeholder someone
+    forgets to include fails by running the operator's default model with no
+    error at all.
+    """
+
+    kind: str
+    model_flag: str
+    args: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Policy:
     """The parsed policy layer. `integration_branch` has no default on purpose:
     a Policy built without it fails at construction rather than dispatching every
@@ -173,6 +206,7 @@ class Policy:
 
     areas: tuple[tuple[str, str], ...]  # (glob, area)
     routes: tuple[tuple[str, tuple[str, ...]], ...]  # (class, role sequence)
+    agents: tuple[tuple[str, str, str], ...]  # (role, agent kind, model)
     slots: int
     stall_minutes: int
     max_attempts: int
@@ -184,6 +218,13 @@ class Policy:
 
     def route_for(self, klass: str | None) -> tuple[str, ...]:
         return dict(self.routes).get(klass or "", ())
+
+    def agent_for(self, role: str) -> tuple[str, str] | None:
+        """(agent kind, model) for a role, or None when the policy has none."""
+        for name, kind, model in self.agents:
+            if name == role:
+                return kind, model
+        return None
 
 
 # ---------------------------------------------------------------- intents

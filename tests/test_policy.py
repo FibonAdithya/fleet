@@ -5,7 +5,14 @@ import pytest
 from conftest import FIXTURE_POLICY
 from fleet import policy as policy_module
 from fleet.config import load_config
-from fleet.policy import PolicyError, known_roles, load, parse_ownership, parse_routes
+from fleet.policy import (
+    PolicyError,
+    known_roles,
+    load,
+    parse_agents,
+    parse_ownership,
+    parse_routes,
+)
 
 OWNERSHIP = """# Ownership map
 
@@ -146,11 +153,20 @@ def test_policy_carries_max_rebases_from_config(cfg, tmp_path):
     (tmp_path / "o.md").write_text("| Glob | Area |\n|---|---|\n| `src/eval/**` | `eval` |\n")
     (tmp_path / "t.md").write_text(
         "| Class | Route | Output | Unattended? |\n|---|---|---|---|\n"
-        "| `patch` | implementer → reviewer → integrator | c | yes |\n"
+        "| `patch` | implementer → reviewer → integrator | c | yes |\n\n"
+        "| Role | Agent | Model |\n|---|---|---|\n"
+        "| `implementer` | `claude` | `m` |\n"
+        "| `reviewer` | `claude` | `m` |\n"
+        "| `integrator` | `claude` | `m` |\n"
     )
     (tmp_path / ".agents" / "roles").mkdir(parents=True)
     for role in ("implementer", "reviewer", "integrator"):
         (tmp_path / ".agents" / "roles" / f"{role}.md").write_text("x")
+    with (tmp_path / "fleet.toml").open("a") as f:
+        f.write(
+            '\n[agents.claude]\nmodel_flag = "--model"\nargs = []\n\n'
+            '[prices."m"]\ninput = 1.0\noutput = 1.0\ncache_read = 1.0\ncache_write = 1.0\n'
+        )
     loaded = policy_module.load(load_config(tmp_path))
     assert loaded.max_rebases == 1
 
@@ -172,3 +188,147 @@ def test_load_reads_the_vendored_fixture_policy():
     assert policy.route_for("investigation") == ("implementer",)
     assert dict(policy.areas)["src/eval/**"] == "eval"
     assert dict(policy.areas)["gates/**"] == "configs"
+
+
+# A local name distinct from the module-level ROLES above: the whole module
+# executes before any test runs, so reusing ROLES here would silently rebind
+# the constant every earlier test in this file reads, shrinking their role
+# vocabulary out from under them.
+AGENT_ROLES = frozenset({"implementer", "reviewer", "integrator", "planner"})
+
+AGENT_TABLE = """
+| Role | Agent | Model |
+|---|---|---|
+| `implementer` | `codex` | `gpt-5.6-sol` |
+| `reviewer` | `claude` | `claude-opus-5` |
+"""
+
+
+def test_the_agent_table_is_parsed_into_role_agent_model_triples():
+    """Catches a parser that reads only two columns and drops the model, which
+    would leave every role on the operator's default model."""
+    assert parse_agents(AGENT_TABLE, AGENT_ROLES) == (
+        ("implementer", "codex", "gpt-5.6-sol"),
+        ("reviewer", "claude", "claude-opus-5"),
+    )
+
+
+def test_an_unknown_role_in_the_agent_table_raises():
+    """Same strictness parse_routes applies to an unknown class. Catches
+    skipping the row, which leaves that role silently unrouted."""
+    text = "\n| Role | Agent | Model |\n|---|---|---|\n| `nobody` | `claude` | `m` |\n"
+    with pytest.raises(PolicyError, match="nobody"):
+        parse_agents(text, AGENT_ROLES)
+
+
+def test_a_missing_agent_table_raises():
+    """Required, not defaulted to all-claude -- the reasoning the Policy
+    docstring gives for integration_branch having no default. Catches an empty
+    tuple, which would make every downstream lookup return None."""
+    with pytest.raises(PolicyError, match="no role/agent"):
+        parse_agents("# no tables here\n", AGENT_ROLES)
+
+
+def test_a_role_listed_twice_raises():
+    """Catches last-wins, which silently discards the first assignment."""
+    text = (
+        "\n| Role | Agent | Model |\n|---|---|---|\n"
+        "| `reviewer` | `claude` | `a` |\n| `reviewer` | `codex` | `b` |\n"
+    )
+    with pytest.raises(PolicyError, match="reviewer"):
+        parse_agents(text, AGENT_ROLES)
+
+
+def _config_with_agent_table(tmp_path, agent: str, model: str):
+    """A FleetConfig whose fixture policy declares one role on `agent`/`model`."""
+    import shutil
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE_POLICY, root)
+    classes = root / "docs/agent/task-classes.md"
+    row = f"| `implementer` | `{agent}` | `{model}` |\n"
+    classes.write_text(classes.read_text() + f"\n\n| Role | Agent | Model |\n|---|---|---|\n{row}")
+    # A fresh fleet.toml, NOT an append. The fixture's fleet.toml already
+    # declares [prices."claude-opus-5"], and tomllib rejects a duplicate table
+    # outright (`Cannot declare ('prices', 'm') twice`), so appending here
+    # would raise TOMLDecodeError.
+    (root / "fleet.toml").write_text(
+        '[repo]\nslug = "FibonAdithya/fleet-fixture"\n'
+        'integration_branch = "integration"\n\n'
+        "[policy]\n"
+        'ownership = "docs/agent/ownership.md"\n'
+        'task_classes = "docs/agent/task-classes.md"\n'
+        'roles = ".agents/roles"\nschemas = ".agents/schemas"\n\n'
+        '[agents.claude]\nmodel_flag = "--model"\nargs = []\n\n'
+        '[prices."claude-opus-5"]\n'
+        "input = 5.0\noutput = 25.0\ncache_read = 0.5\ncache_write = 10.0\n"
+    )
+    return load_config(root)
+
+
+def test_a_declared_model_with_no_price_is_refused_at_load(tmp_path):
+    """docs/m3-inputs.md §1.2: an unpriced model is currently discovered only
+    when a dispatched agent's transcript is read, mid-run, after spending.
+    Catches deferring that to runtime now that the model is declared."""
+    cfg = _config_with_agent_table(tmp_path, agent="claude", model="unpriced-model")
+    with pytest.raises(PolicyError, match="unpriced-model"):
+        policy_module.load(cfg)
+
+
+def test_a_declared_agent_with_no_provider_is_refused_at_load(tmp_path):
+    """Catches routing a role to a CLI whose transcripts nothing can read,
+    which would drain on the first tick instead of failing at startup."""
+    cfg = _config_with_agent_table(tmp_path, agent="nosuchcli", model="claude-opus-5")
+    with pytest.raises(PolicyError, match="nosuchcli"):
+        policy_module.load(cfg)
+
+
+def test_a_declared_kind_with_no_launch_config_is_refused_at_load(tmp_path):
+    """FINDING 1(a). Catches dropping the `kind not in agent_specs` check out of
+    `_validate_agents`. Without it, a role routed to `claude` -- a real
+    transcript-reading, priced kind -- still passes startup when fleet.toml
+    carries no `[agents.claude]` launch config. HerdrExecutor._start then
+    raises HerdrError for every task of that role, `_begin` swallows it, the
+    next tick's REAP releases the claimed row and burns an attempt, and the
+    whole backlog walks to NEEDS_HUMAN overnight having launched nothing."""
+    import shutil
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE_POLICY, root)
+    # The vendored fixture's fleet.toml declares [agents.claude]; this one
+    # deliberately does not, while still declaring the price every role's
+    # model needs so the price check does not fire first.
+    (root / "fleet.toml").write_text(
+        '[repo]\nslug = "FibonAdithya/fleet-fixture"\n'
+        'integration_branch = "integration"\n\n'
+        "[policy]\n"
+        'ownership = "docs/agent/ownership.md"\n'
+        'task_classes = "docs/agent/task-classes.md"\n'
+        'roles = ".agents/roles"\nschemas = ".agents/schemas"\n\n'
+        '[prices."claude-opus-5"]\n'
+        "input = 5.0\noutput = 25.0\ncache_read = 0.5\ncache_write = 10.0\n"
+    )
+    cfg = load_config(root)
+    with pytest.raises(PolicyError, match=r"\[agents\.claude\]"):
+        policy_module.load(cfg)
+
+
+def test_a_role_missing_from_the_agent_table_is_refused_at_load(tmp_path):
+    """FINDING 1(b). Catches dropping the routes-coverage loop out of
+    `_validate_agents`. Without it, a role a route names but the
+    `Role | Agent | Model` table omits still passes startup: dispatch fails
+    at HerdrExecutor._start exactly as (a) does, and worse --
+    `Policy.agent_for('implementer')` returns None, so `_model_mismatch`
+    silently stops checking that role's model at all, with nothing said."""
+    import shutil
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE_POLICY, root)
+    classes = root / "docs/agent/task-classes.md"
+    text = classes.read_text()
+    row = "| `implementer` | `claude` | `claude-opus-5` |\n"
+    assert row in text, "fixture shape changed; this test's precondition no longer holds"
+    classes.write_text(text.replace(row, ""))
+    cfg = load_config(root)
+    with pytest.raises(PolicyError, match="implementer"):
+        policy_module.load(cfg)

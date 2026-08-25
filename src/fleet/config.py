@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fleet.cost import PRICE_KEYS
 from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES, DEFAULT_MAX_REBASES
+from fleet.model import AgentSpec
 
 try:
     import tomllib
@@ -61,6 +62,7 @@ class FleetConfig:
     per_task_usd: float
     fleet_usd: float
     prices: dict[str, dict[str, float]]
+    agents: dict[str, AgentSpec]
     socket_path: Path
     runlog_path: Path
     worktree_root: Path
@@ -74,17 +76,21 @@ def _prices(raw: dict) -> dict[str, dict[str, float]]:
     hole as an unpriced model: the missing rate prices those tokens at nothing,
     and cache reads are most of what an agent spends.
 
-    An absent [prices] table is an empty mapping, not an error *here*. `fleet
-    plan` starts no agents and needs no prices, and requiring the table would
-    refuse every fleet.toml written before it existed, on a key only the daemon
-    reads.
+    An absent [prices] table is an empty mapping, not an error *here* -- this
+    function only shapes whatever raw TOML gave it. It is not permission to run
+    unpriced, though: `policy.load`'s `_validate_agents` requires every model
+    the `Role | Agent | Model` table declares to have a row in this mapping,
+    and raises `PolicyError` at load time if one is missing. That load runs on
+    `fleet plan` as well as the daemon, so a `fleet.toml` with no [prices] --
+    or one missing a rate for a declared model -- now fails at startup, before
+    either command does anything, rather than being read here as merely empty.
 
-    It is not permission to run unpriced. An empty mapping prices nothing, so
-    `cost.price_transcript` raises `UnpricedModel` for the first agent whose
-    transcript names any model at all, `RealHerdr.agents` records that in
-    `unpriced()`, and `Daemon.tick` turns a non-empty `unpriced()` into a
-    Drain. The refusal is the daemon's, at the moment it would otherwise spend,
-    and it is loud there rather than here.
+    `Provider.read` is the second line behind that gate, for a model this
+    function never saw at all: an agent's transcript naming a model no policy
+    declared. That path still runs during a live tick and still refuses rather
+    than pricing at zero, but it is a backstop for an undeclared model, not the
+    mechanism for a declared one with a missing rate -- `_validate_agents`
+    catches that earlier, at startup.
     """
     out: dict[str, dict[str, float]] = {}
     for model, table in raw.items():
@@ -96,6 +102,46 @@ def _prices(raw: dict) -> dict[str, dict[str, float]]:
                 "the ceiling exists to close."
             )
         out[model] = {key: float(table[key]) for key in PRICE_KEYS}
+    return out
+
+
+def _agents(raw: dict) -> dict[str, AgentSpec]:
+    """Launch mechanics per CLI kind. Which role runs on which kind is a
+    routing decision that belongs to the target repo's policy layer, not here
+    -- this only says how to start a given kind once something has chosen it.
+    """
+    out: dict[str, AgentSpec] = {}
+    for kind, table in raw.items():
+        if not isinstance(table, dict):
+            # `agents.claude = "..."` instead of `[agents.claude]` is one
+            # missing pair of brackets, and without this check it reached
+            # `.get` and came out as a bare AttributeError -- a traceback with
+            # no key in it, where every other refusal in this module names the
+            # table it could not read.
+            raise ConfigError(
+                f"[agents.{kind}] must be a table, got {type(table).__name__}. "
+                f"Write it as a `[agents.{kind}]` section with `model_flag` "
+                "(and optionally `args`) under it."
+            )
+        flag = table.get("model_flag")
+        if not flag:
+            raise ConfigError(
+                f"[agents.{kind}] has no model_flag. The declared model is always "
+                "appended as [model_flag, model]; without it the agent runs the "
+                "operator's default model and nothing says so."
+            )
+        args = table.get("args", ())
+        if isinstance(args, str) or not isinstance(args, list | tuple):
+            raise ConfigError(
+                f"[agents.{kind}] args must be a list, got {type(args).__name__}. "
+                "A bare string is iterable too, so it would silently explode into "
+                "one flag per character instead of raising here."
+            )
+        out[kind] = AgentSpec(
+            kind=kind,
+            model_flag=str(flag),
+            args=tuple(str(a) for a in args),
+        )
     return out
 
 
@@ -130,6 +176,7 @@ def load_config(start: Path | None = None) -> FleetConfig:
         ),
         fleet_usd=_positive(float(budget.get("fleet_usd", DEFAULT_FLEET_USD)), "fleet_usd"),
         prices=_prices(data.get("prices", {})),
+        agents=_agents(data.get("agents", {})),
         socket_path=Path(daemon.get("socket", root / ".fleet" / "fleet.sock")).expanduser(),
         runlog_path=Path(daemon.get("runlog", root / ".fleet" / "run.jsonl")).expanduser(),
         worktree_root=Path(daemon.get("worktrees", "~/.fleet/worktrees")).expanduser(),
