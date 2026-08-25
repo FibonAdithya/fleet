@@ -276,3 +276,25 @@ def test_a_real_captured_total_only_session_refuses():
     }
     with pytest.raises(UnpricedTranscript):
         CodexProvider(sessions_dir=Path("/nonexistent")).read(lines, prices)
+
+
+def test_a_nameless_session_says_so_rather_than_blaming_a_model_split():
+    """The 0-model and 2-model refusals are one guard but two different
+    operator problems, and the real-data branch is the 0-model one: all 50
+    local total-only sessions carry no `turn_context` record at all, so every
+    one of them lands here. Catches folding the two back into a single
+    `len(models) != 1` message, which tells that operator their session
+    "cannot be split between two rates" -- a problem they do not have, while
+    saying nothing about the one they do."""
+    lines = [_tokens(total_tokens=39_958)]
+    with pytest.raises(UnpricedTranscript, match="names no model"):
+        PROVIDER.read(lines, PRICES)
+
+
+def test_a_two_model_session_still_names_the_split_it_cannot_make():
+    """The other half of that split. Catches collapsing both branches into
+    the nameless-session message, which would leave a genuine mid-session
+    model substitution reported as a missing `turn_context`."""
+    lines = [_model("gpt-test"), _model("gpt-other"), _tokens(input_tokens=1_000)]
+    with pytest.raises(UnpricedTranscript, match="cannot be split between two rates"):
+        PROVIDER.read(lines, PRICES)
