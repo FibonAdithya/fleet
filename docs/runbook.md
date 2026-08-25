@@ -212,6 +212,32 @@ already read from the same transcript and arming the fleet-wide Drain. Do NOT
 add a `[prices."<synthetic>"]` row to work around a refusal; if one appears,
 the record carried real tokens and the rate is genuinely missing.
 
+**Subagent spend is counted on the Claude path.** `cost.transcript_path`
+globs `~/.claude/projects/*/<uuid>.jsonl` — one level — and Claude Code
+writes subagent transcripts one level deeper, at
+`<project>/<uuid>/subagents/agent-<child>.jsonl`. Measured over 1,204 local
+transcripts: 214 at the level the glob searched and 990 (82%) below it, and
+across the 66 sessions holding both halves, **46.7% of all tokens sat in the
+half nothing read** (worst ratios 3.9x, 3.0x, 2.7x subagent-to-parent). That
+spend was never *refused* — the parent priced fine, so nothing reached
+`unpriced`, no Drain armed, and both `per_task_usd` and `fleet_usd` were
+simply short by roughly half on any task that delegated.
+
+`ClaudeProvider.session()` now returns the parent plus every child beside it
+and `parse_snapshot` sums the fold across all of them. Two things worth
+knowing at 2am:
+
+* The **observed model** still comes from the parent alone. 43 of those 66
+  sessions run a model in a child the parent never ran — opus parents
+  delegating to sonnet and haiku — so unioning the sets would hand
+  `MULTIPLE_MODELS` to `decide._model_mismatch` and escalate two thirds of
+  every task that spawns a subagent. Delegation is not substitution; the
+  agent a policy declares is the parent.
+* A child naming a model with **no `[prices]` row refuses the whole session**,
+  exactly as its parent would. So a role whose subagents run a model the
+  policy never declared now drains where it previously under-billed in
+  silence. Add the rate rather than removing the subagent.
+
 ## The codex gate
 
 Before routing any role to `codex` in a graded run, launch one codex agent
@@ -229,21 +255,32 @@ shapes, and locally 50 of 80 sessions were total-only against 30 with
 breakdowns, on the same CLI version and the same day — so neither the date
 nor `codex --version` tells you which one a given launch will produce.
 
-**Subagent threads are unattributed spend.** codex writes each spawned thread
-to its own rollout file, named by the *child* thread's id, not by the session
-id herdr reports for the parent. Measured across 81 local rollouts: 64 are
-top-level (filename uuid == `payload.session_id`), 17 are subagent threads
-(filename uuid is the child id; `session_id` inside the file still names the
-parent). On the one local session with children, the parent's own final
-`total_token_usage.total_tokens` was 13,435,746 while its 14 children totalled
-**37,366,303** — 74% of that session's real spend, in files
-`CodexProvider.transcript()` cannot resolve from the parent's session id,
-priced at $0.00 and never added to the `unpriced` collector that arms the
-drain. Inherited from the Claude path (subagents get their own transcript
-files there too), and out of scope for this branch to fix — but before a
-`--full-auto` codex agent runs unattended, establish whether it spawns
-subagent threads at all. If it does, the ceiling is short by whatever they
-spend, and nothing says so.
+**A codex agent that spawns subagent threads drains the fleet.** codex writes
+each spawned thread to its own rollout file, named by the *child* thread's id,
+not by the session id herdr reports for the parent. Measured across 81 local
+rollouts: 64 are top-level (filename uuid == `payload.session_id`), 17 are
+subagent threads (filename uuid is the child id; `session_id` inside the file
+still names the parent). On the one local session with children, the parent's
+own final `total_token_usage.total_tokens` was 13,435,746 while its 14
+children totalled **37,366,303** — 74% of that session's real spend, in files
+`CodexProvider.session()` cannot resolve from the parent's session id.
+
+Issue #5 closed the silence, not the gap. `CodexProvider.read` now raises
+`UnpricedTranscript` the moment the parent's own lines show a live subagent
+roster (`world_state.payload.state.environments.subagents`, a list of
+*nicknames* — enough to prove children exist, useless for finding their
+files), so the tick collects it into `unpriced` and `Daemon.tick` drains:
+in-flight agents finish, nothing new starts. That is a loud stop on the first
+tick, not a slow leak, but it *is* a stop. Before routing a role to codex,
+establish whether its prompt leads it to spawn threads. If it does, that
+agent's task cannot complete under a budget ceiling until codex child
+discovery is built — the parent's spend alone was 26% of the real total on
+the one session measured, and a confident number for a quarter of a session
+is worse inside a ceiling than no number at all.
+
+The guard keys on the *field* being non-empty, not on the record existing: a
+single local rollout carries 35 `world_state` records, and refusing on the
+type alone would drain every codex agent on the box.
 
 **The codex session id herdr reports is environment state, not repo state.**
 It reaches herdr via `~/.codex/herdr-agent-state.sh`, a `SessionStart` hook on

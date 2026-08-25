@@ -184,3 +184,63 @@ def test_a_zero_token_model_needs_no_price_row():
         _line(model="some-other-zero-token-pseudo-model", **zero),
     ]
     assert price_lines(lines, PRICES) == pytest.approx(10.0)
+
+
+def _session(root: Path, sid: str, parent_lines: list[str], **children: list[str]) -> Path:
+    """A projects dir laid out the way Claude Code lays one out.
+
+    `<projects>/<slug>/<sid>.jsonl` for the parent and
+    `<projects>/<slug>/<sid>/subagents/agent-<name>.jsonl` for each child --
+    the two-level shape measured over 1,204 local transcripts, where 990 of
+    them (82%) sit at the deeper level.
+    """
+    project = root / "-home-user-proj"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{sid}.jsonl").write_text("\n".join(parent_lines) + "\n")
+    if children:
+        subagents = project / sid / "subagents"
+        subagents.mkdir(parents=True)
+        for name, lines in children.items():
+            (subagents / f"agent-{name}.jsonl").write_text("\n".join(lines) + "\n")
+    return project
+
+
+def test_a_session_finds_the_subagent_transcripts_beside_the_parent(tmp_path):
+    """The hole issue #5 names. `transcript_path` globs one level and Claude
+    Code writes subagents one level deeper, so 82% of local transcripts are
+    invisible to it -- and invisible costs nothing, which is the half of the
+    ceiling nobody was billed for."""
+    project = _session(tmp_path, "abc-123", [_line(input_tokens=1)], one=[], two=[])
+    found = ClaudeProvider(projects_dir=tmp_path).session("abc-123")
+    assert found.parent == project / "abc-123.jsonl"
+    assert found.children == (
+        project / "abc-123" / "subagents" / "agent-one.jsonl",
+        project / "abc-123" / "subagents" / "agent-two.jsonl",
+    )
+
+
+def test_a_session_with_no_subagents_carries_no_children(tmp_path):
+    """The ordinary case, and the one that must not start crashing on a
+    missing directory: 148 of 214 local sessions never spawned anything."""
+    project = _session(tmp_path, "abc-123", [_line(input_tokens=1)])
+    found = ClaudeProvider(projects_dir=tmp_path).session("abc-123")
+    assert found.parent == project / "abc-123.jsonl"
+    assert found.children == ()
+
+
+def test_a_session_ignores_the_tool_results_directory(tmp_path):
+    """`subagents/` has a sibling. 53 local sessions carry a `tool-results/`
+    directory at exactly the same depth, and a `<sid>/*/*.jsonl` glob would
+    price its contents as agent spend. Anchor on the name."""
+    project = _session(tmp_path, "abc-123", [_line(input_tokens=1)], one=[])
+    results = project / "abc-123" / "tool-results"
+    results.mkdir(parents=True)
+    (results / "whatever.jsonl").write_text(_line(input_tokens=999_999) + "\n")
+    found = ClaudeProvider(projects_dir=tmp_path).session("abc-123")
+    assert found.children == (project / "abc-123" / "subagents" / "agent-one.jsonl",)
+
+
+def test_an_unwritten_session_is_none(tmp_path):
+    """Same fact `transcript_path` reports: an agent herdr knows about whose
+    transcript has not landed yet is a race, not an error."""
+    assert ClaudeProvider(projects_dir=tmp_path).session("nope") is None

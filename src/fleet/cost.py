@@ -90,6 +90,29 @@ class Reading:
     models: frozenset[str]
 
 
+@dataclass(frozen=True)
+class Session:
+    """The transcripts one agent session wrote: its own, and its subagents'.
+
+    A pair rather than a flat set of paths, because the two halves are read
+    differently and issue #5's naive "return every path" would have lost that.
+    Cost sums over `parent` AND `children` -- subagent spend is spend. The
+    OBSERVED MODEL comes from `parent` alone: measured over the 66 local
+    sessions that have both, 43 (65%) run a model in a child that the parent
+    never ran, so folding children into the model set would hand
+    `MULTIPLE_MODELS` to `decide._model_mismatch` and escalate two thirds of
+    every task that spawns a subagent -- on a check that exists to catch a
+    substitution in the agent the POLICY DECLARED, which is the parent.
+
+    `children` is empty for a provider that cannot resolve them, which is not
+    the same as a session that has none. `CodexProvider` is the live case: it
+    refuses such a session in `read` rather than reporting it childless here.
+    """
+
+    parent: Path
+    children: tuple[Path, ...] = ()
+
+
 class Provider(Protocol):
     """One agent CLI's transcript format.
 
@@ -101,7 +124,7 @@ class Provider(Protocol):
 
     name: str
 
-    def transcript(self, session_id: str) -> Path | None: ...
+    def session(self, session_id: str) -> Session | None: ...
 
     def read(self, lines: list[str], prices: Prices) -> Reading: ...
 
@@ -203,8 +226,28 @@ class ClaudeProvider:
     projects_dir: Path
     name: str = "claude"
 
-    def transcript(self, session_id: str) -> Path | None:
-        return transcript_path(session_id, self.projects_dir)
+    def session(self, session_id: str) -> Session | None:
+        """The parent transcript, plus every subagent transcript beside it.
+
+        `transcript_path` alone globs `<projects>/*/<uuid>.jsonl` -- one level
+        -- and Claude Code writes subagents one level deeper, at
+        `<projects>/<slug>/<uuid>/subagents/agent-<child>.jsonl`. Measured
+        over 1,204 local transcripts: 214 at the level the glob searched and
+        990 (82%) below it, and across the 66 sessions holding both, 46.7% of
+        all tokens sat in the half nothing read. That spend was not refused,
+        which would have armed the drain -- it was simply absent, so both
+        `per_task_usd` and `fleet_usd` were short by it and nothing said so.
+
+        The glob names `subagents` rather than matching `<uuid>/*/*.jsonl`,
+        because that directory has a sibling: 53 local sessions carry a
+        `tool-results/` directory at the same depth, whose contents are not
+        agent spend and must never be priced as any.
+        """
+        parent = transcript_path(session_id, self.projects_dir)
+        if parent is None:
+            return None
+        subagents = parent.parent / session_id / "subagents"
+        return Session(parent=parent, children=tuple(sorted(subagents.glob("*.jsonl"))))
 
     def read(self, lines: list[str], prices: Prices) -> Reading:
         entries = list(_decode_lines(lines))
@@ -266,6 +309,28 @@ def _codex_models(entries: list[dict]) -> frozenset[str]:
     return frozenset(out)
 
 
+def _codex_spawned_subagents(entries: list[dict]) -> bool:
+    """Whether the parent's own lines say it spawned threads.
+
+    codex mirrors its live subagent roster into
+    `world_state.payload.state.environments.subagents`. Keyed on that FIELD
+    being non-empty rather than on the record existing: a single local rollout
+    carries 35 `world_state` records, so a guard on the type alone would
+    refuse every codex session on the box.
+
+    Nicknames, not ids -- `"- diverge_games: Rawls"`. Enough to know the
+    spend is incomplete, never enough to go and find it, which is exactly why
+    `read` refuses instead of summing.
+    """
+    for entry in entries:
+        if entry.get("type") != "world_state":
+            continue
+        state = (entry.get("payload") or {}).get("state") or {}
+        if (state.get("environments") or {}).get("subagents"):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class CodexProvider:
     """codex. Cumulative session totals: the fold is LAST, never sum."""
@@ -273,18 +338,39 @@ class CodexProvider:
     sessions_dir: Path
     name: str = "codex"
 
-    def transcript(self, session_id: str) -> Path | None:
+    def session(self, session_id: str) -> Session | None:
         """`<sessions>/YYYY/MM/DD/rollout-<timestamp>-<session-id>.jsonl`, or None.
 
         The session id is a suffix of the filename, not the whole stem, and the
         file is date-nested rather than flat -- neither is true of Claude Code's
         layout, so the glob cannot be shared.
+
+        `children` is always empty, and that is a statement about what can be
+        RESOLVED, not about what was spawned. A codex child rollout is named
+        by its own thread id and records its parent only INSIDE the file, in
+        `session_meta.payload.parent_thread_id`, so finding one means reading
+        the first line of every rollout under `sessions_dir` -- 81 files
+        locally and unbounded in general, per agent per tick. The parent's own
+        lines can prove children exist far more cheaply, so `read` refuses
+        that session rather than this method reporting it childless.
         """
         hits = sorted(Path(self.sessions_dir).glob(f"**/*-{session_id}.jsonl"))
-        return hits[0] if hits else None
+        return Session(parent=hits[0]) if hits else None
 
     def read(self, lines: list[str], prices: Prices) -> Reading:
         entries = list(_decode_lines(lines))
+        if _codex_spawned_subagents(entries):
+            # Ahead of every other refusal below, because it is the largest:
+            # on the one local session with children, the parent priced here
+            # would be 26% of the real spend. Reporting a confident number
+            # for a quarter of a session is worse than reporting none.
+            raise UnpricedTranscript(
+                "codex transcript reports spawned subagent threads, whose rollouts "
+                "are named by the CHILD thread id and cannot be resolved from this "
+                "session id. Measured on a real session: 14 children spent 37,366,303 "
+                "tokens against the parent's 13,435,746, so pricing the parent alone "
+                "would put 26% of the session inside a ceiling built to hold all of it."
+            )
         total = _codex_last_total(entries)
         if total is None:
             # No usage record yet. A fact about timing, not an error -- same
