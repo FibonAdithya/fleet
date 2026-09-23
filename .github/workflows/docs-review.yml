@@ -14,13 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  review:
+  # Named apart from review.yml's job so `gh pr checks` can tell them apart.
+  docs-review:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: write
-      id-token: write
+      # No id-token: the action only requests an OIDC token when no
+      # github_token is passed, and one is passed below.
     steps:
       - uses: actions/checkout@v4
         with:

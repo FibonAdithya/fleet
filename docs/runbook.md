@@ -343,7 +343,9 @@ in `.agentify.toml`) and all unable to push to a branch:
       gh secret set CLAUDE_CODE_AUTH_TOKEN --repo FibonAdithya/fleet
 
   Until it is set, both jobs fail at the model step and the PR is otherwise
-  unaffected; `.github/workflows/ci.yml` is the only required check.
+  unaffected; `.github/workflows/ci.yml` is the check a merge waits on.
+  Nothing is enforced server-side: branch protection is unavailable on
+  this private repository's plan.
 - `.github/workflows/notify.yml` assigns the owner to any issue opened with
   the `agent-reported` or `auto-bug` label. GitHub does not notify an account
   about its own token's actions, so an issue an agent files with the owner's

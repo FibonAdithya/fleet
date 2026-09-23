@@ -122,7 +122,9 @@ That is the same command CI runs (`.github/workflows/ci.yml`). No target uses
 `|| true`; a red suite is a failure, not a warning. The `Makefile` is the
 executable definition of a valid change. A pull request also gets a model
 review (`.github/workflows/review.yml`) that can comment and never push; it is
-advisory, and `.github/workflows/ci.yml` is the only required check.
+advisory. `.github/workflows/ci.yml` is the check a merge waits on; GitHub
+enforces nothing server-side, because branch protection is unavailable on
+this private repository's plan, so the wait is a human's discipline.
 
 ## What requires a human
 
