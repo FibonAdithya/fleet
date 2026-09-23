@@ -2,7 +2,7 @@
 name = "fleet"
 version = "0.1.0"
 description = "Parallel coding agents with explicit handoffs"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 # rfc3339-validator is not optional decoration: jsonschema's FormatChecker
 # silently skips "date-time" unless it is installed, which would leave
 # handoff.schema.json's `from.run` format unenforced. See fleet.schemas.
@@ -11,14 +11,17 @@ dependencies = [
     "jsonschema>=4.20",
     "PyYAML>=6.0",
     "rfc3339-validator>=0.1.4",
-    "tomli>=2.0",
 ]
 
 [project.scripts]
 fleet = "fleet.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = [
+    "agentify",
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -29,7 +32,7 @@ packages = ["src/fleet"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 src = ["src", "tests"]
 extend-exclude = ["docs"]
 
@@ -45,3 +48,6 @@ select = ["E", "F", "I", "UP", "B"]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.uv.sources]
+agentify = { git = "https://github.com/FibonAdithya/agentic-coding-scaffold", rev = "v0.3.0" }

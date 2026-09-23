@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -44,7 +44,7 @@ from fleet.model import (
 )
 from fleet.runlog import RunLog
 
-START = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+START = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
 
 _KEYS = {"name", "proves", "seed", "ticks"}
 _SEED_KEYS = {"agents", "issues", "ledger", "packets", "policy"}

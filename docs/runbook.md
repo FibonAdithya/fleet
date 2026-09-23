@@ -312,9 +312,9 @@ tick emits — the comparison is exhaustive, which is what lets a scenario asser
 an absence without writing `expect: []`.
 
 `docs/m2-inputs.md` §7 named three rows of the design's failure table as covered
-by no scenario at all. Two are now covered. Conflict storm: `rebase-storm.yaml`
+by no scenario at all. Two are now covered. Conflict storm: `fixtures/scenarios/rebase-storm.yaml`
 proves `max_rebases` bounds it, and the row needed a rule, not the executor
-signal §7 guessed at. Orphaned worktree: `orphaned-worktree.yaml`, seeded via
+signal §7 guessed at. Orphaned worktree: `fixtures/scenarios/orphaned-worktree.yaml`, seeded via
 `seed.agents` — an agent `FakeExecutor` never started with a `Dispatch` or
 `Continue` of its own, standing in for a worktree from outside this run's own
 history (a daemon restart, a human relabelling a row while its agent keeps
@@ -328,6 +328,38 @@ merely that the right intent was returned in isolation.
 scenario: not an allocator rule at all — `fleet discover` searches existing
 issues first, and `tests/test_discover.py` covers it. `decide()` never sees
 the case, so no scenario ever will either.
+
+## Workflows on this repository
+
+Four workflows besides `.github/workflows/ci.yml`, all written by `agentify` (contract level 2
+in `.agentify.toml`) and all unable to push to a branch:
+
+- `.github/workflows/review.yml` and `.github/workflows/docs-review.yml`
+  review every pull request with a model: one for code, one for documentation
+  drift. Each job's token has `pull-requests: write` and nothing more, so a
+  wrong review costs a comment and never a commit. Both read `AGENTS.md`
+  first. They need one repository secret, a Claude subscription token:
+
+      gh secret set CLAUDE_CODE_AUTH_TOKEN --repo FibonAdithya/fleet
+
+  Until it is set, both jobs fail at the model step and the PR is otherwise
+  unaffected; `.github/workflows/ci.yml` is the check a merge waits on.
+  Nothing is enforced server-side: branch protection is unavailable on
+  this private repository's plan.
+- `.github/workflows/notify.yml` assigns the owner to any issue opened with
+  the `agent-reported` or `auto-bug` label. GitHub does not notify an account
+  about its own token's actions, so an issue an agent files with the owner's
+  token reaches nobody until a different actor touches it.
+- `.github/workflows/branch-hygiene.yml` deletes a PR's branch after merge,
+  and only when the branch still points at the merged commit. A PR labelled
+  `keep-branch` keeps its branch. Run it by hand with `apply` off to list the
+  finished branches without deleting any.
+
+The three labels (`agent-reported`, `auto-bug`, `keep-branch`) exist on
+`FibonAdithya/fleet`; `gh issue create --label X` fails when `X` does not,
+so a fresh repository needs them created first, as
+`fixtures/seed/seed_issues.sh` does for the fixture repository's own
+vocabulary.
 
 ## Known warts
 

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Superseded arithmetic:** this plan's scenario YAML and test bodies were written against a captured ledger that dispatched five tasks on five free areas/slots. The shipped fixture dispatches six; see the spec's §3 invariant (`docs/superpowers/specs/2026-08-17-m2-allocator-design.md`) for what changed and why. This plan is left as-written — it is the record of what implementers were told — so copy a scenario block out of it expecting to update the count, not to find it already right.
+> **Superseded arithmetic:** this plan's scenario YAML and test bodies were written against a captured ledger that dispatched five tasks on five free areas/slots. The shipped fixture dispatches six; see the spec's §3 invariant (`docs/ai/specs/2026-08-17-m2-allocator-design.md`) for what changed and why. This plan is left as-written — it is the record of what implementers were told — so copy a scenario block out of it expecting to update the count, not to find it already right.
 
 **Goal:** Build `decide()` — a pure fold from ledger, policy and agent states to allocation intents — plus a scripted fake executor, a YAML scenario harness that replays whole nights offline, and `fleet plan --dry-run`.
 
@@ -10,7 +10,7 @@
 
 **Tech Stack:** Python 3.10+, `click`, `jsonschema`, `PyYAML`, `tomli`, `pytest`, `ruff`. No new dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-08-17-m2-allocator-design.md`
+**Spec:** `docs/ai/specs/2026-08-17-m2-allocator-design.md`
 
 ## Global Constraints
 

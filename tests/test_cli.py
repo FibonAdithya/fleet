@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import click
@@ -271,7 +271,7 @@ def test_run_new_run_mints_a_fresh_id_and_starts_at_zero(monkeypatch, tmp_path):
     cfg = _run_cfg(tmp_path)
     RunLog(cfg.runlog_path, run_id="night-1").append(
         tick=1,
-        at=datetime(2026, 8, 18, 2, 0, tzinfo=timezone.utc),
+        at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
         intent=Release(task=99, reason="stalled", attempt=2),
         outcome="applied",
         cost_usd=7.5,
@@ -290,7 +290,7 @@ def test_run_takes_an_explicit_run_id(monkeypatch, tmp_path):
     cfg = _run_cfg(tmp_path)
     RunLog(cfg.runlog_path, run_id="night-1").append(
         tick=1,
-        at=datetime(2026, 8, 18, 2, 0, tzinfo=timezone.utc),
+        at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
         intent=Release(task=99, reason="stalled", attempt=2),
         outcome="applied",
         cost_usd=7.5,

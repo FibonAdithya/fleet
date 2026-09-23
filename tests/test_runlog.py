@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -9,7 +9,7 @@ from fleet import runlog
 from fleet.model import Dispatch, Release, Unblock
 from fleet.runlog import RunLog, read
 
-T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
 
 
 def dispatch(task=1, attempt=1):

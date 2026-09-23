@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fleet.decide import decide
 from fleet.model import (
@@ -16,7 +16,7 @@ from fleet.model import (
 )
 from test_decide_reap import POLICY
 
-T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
 
 
 def ready(number, area="eval", klass="patch", auto_ok=True, attempts=0):

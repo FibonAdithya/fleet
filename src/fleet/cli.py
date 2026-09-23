@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -133,7 +133,7 @@ def _context(*, role_required: bool = True) -> tuple:
     identity = {
         "role": role,
         "agent": agent,
-        "run": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "run": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     return cfg, gh, identity
 
@@ -308,7 +308,7 @@ def plan():
     # have seen that. The command previews; the wrapper is what makes "writes
     # nothing" a property of the code path rather than of having read it.
     gh = ReadOnlyGh(RealGh(cfg.repo_slug))
-    for line in do_plan(cfg, gh, datetime.now(timezone.utc)):
+    for line in do_plan(cfg, gh, datetime.now(UTC)):
         click.echo(line)
 
 
@@ -384,7 +384,7 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
     )
     owner = _gh_login()
     executor = HerdrExecutor(herdr, gh, cfg, owner=owner)
-    run_id, origin = resolve_run_id(cfg.runlog_path, run_id, new_run, datetime.now(timezone.utc))
+    run_id, origin = resolve_run_id(cfg.runlog_path, run_id, new_run, datetime.now(UTC))
     log = RunLog(cfg.runlog_path, run_id=run_id)
     daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id)
 
@@ -410,7 +410,7 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
         # handlers on the way out.
         with stop_on_signals(stop):
             if once:
-                daemon.tick(datetime.now(timezone.utc))
+                daemon.tick(datetime.now(UTC))
                 click.echo("\n".join(status_module.render(daemon.snapshot.to_json())))
             else:
                 daemon.run(cfg.poll_seconds if poll_seconds is None else poll_seconds, stop)
