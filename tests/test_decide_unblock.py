@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fleet.decide import decide
 from fleet.model import Escalate, FleetState, Task, Unblock
 from test_decide_reap import POLICY
 
-T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
 
 
 def blocked(number=4, on=11):

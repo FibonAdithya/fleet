@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13, `uv`, pytest, ruff. No new dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-08-19-multi-provider-cost-design.md`
+**Spec:** `docs/ai/specs/2026-08-19-multi-provider-cost-design.md`
 
 ## Global Constraints
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import signal
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -17,7 +17,7 @@ from fleet.herdr_executor import HerdrExecutor
 from fleet.model import Release
 from fleet.runlog import RunLog, spent_from_log
 
-T0 = datetime(2026, 8, 18, 2, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 18, 2, 0, tzinfo=UTC)
 
 #: FakeGh mirrors `gh`: an assignee it cannot resolve fails the whole edit. Its
 #: known-login set is `{"FibonAdithya"}`, so a daemon test that writes ownership

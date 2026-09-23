@@ -1,25 +1,32 @@
-name: check
+name: ci
 
 # `make check` is the repo's whole gate -- ruff check, ruff format --check, and
-# pytest. Running it here rather than a hand-copied set of steps is deliberate:
-# a workflow that lists the commands separately drifts from the Makefile, and
-# the half that drifts is always the one nobody runs locally.
+# pytest (which includes the agentify contract self-check). Running it here
+# rather than a hand-copied set of steps is deliberate: a workflow that lists
+# the commands separately drifts from the Makefile, and the half that drifts is
+# always the one nobody runs locally.
+#
+# The push-to-main trigger is not redundant with the PR one: a direct push
+# reaches main without a PR and would otherwise arrive with nothing having run.
 on:
   push:
     branches: [main]
   pull_request:
 
+# Least privilege: this workflow reads code and runs tests. Nothing it does
+# needs a token that can write.
 permissions:
   contents: read
 
 concurrency:
   # A force-push supersedes its own in-flight run rather than racing it.
-  group: check-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +41,8 @@ jobs:
       # reason that matters here -- jsonschema silently skips "date-time"
       # format checking unless it is installed, so a resolution that dropped it
       # would leave handoff.schema.json's `from.run` format unenforced and every
-      # test still green.
+      # test still green. The dev group also carries agentify, which
+      # tests/test_contract.py imports.
       - name: Install the pinned dependency set
         run: uv sync --locked --dev
 

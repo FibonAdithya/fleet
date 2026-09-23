@@ -1,4 +1,4 @@
-.PHONY: check lint test
+.PHONY: check lint test setup
 
 check: lint test
 
@@ -8,3 +8,8 @@ lint:
 
 test:
 	uv run pytest
+
+# One idempotent entry point for a fresh checkout: uv creates .venv on the
+# interpreter in .python-version if it is absent, and a second run is a no-op.
+setup:
+	uv sync --locked --dev

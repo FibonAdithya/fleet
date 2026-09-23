@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fleet.decide import decide
 from fleet.model import (
@@ -19,7 +19,7 @@ from fleet.model import (
     Task,
 )
 
-T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
 
 POLICY = Policy(
     areas=(("src/eval/**", "eval"),),
@@ -928,7 +928,7 @@ def test_a_handback_from_this_attempt_still_rebases():
     assert intents == [Rebase(task=4, rebase=1)]
 
 
-NOW = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 DECLARED = (("implementer", "claude", "claude-opus-5"),)
 
 

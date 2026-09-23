@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from fleet.cost import PRICE_KEYS
 from fleet.labels import DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_FIX_PASSES, DEFAULT_MAX_REBASES
 from fleet.model import AgentSpec
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 DEFAULT_PER_TASK_USD = 2.0
 DEFAULT_FLEET_USD = 25.0

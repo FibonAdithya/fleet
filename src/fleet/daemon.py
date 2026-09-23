@@ -19,7 +19,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fleet import runlog as runlog_module
 from fleet.config import FleetConfig
@@ -66,7 +66,7 @@ _CENTS = 4
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @contextmanager

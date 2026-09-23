@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -13,7 +13,7 @@ from fleet.config import load_config
 from fleet.gh import FakeGh, GhClient, RealGh
 from fleet.simulate import run
 
-T0 = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURED = "fixtures/ledger/issues.json"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import get_args
 
 import pytest
@@ -128,7 +128,7 @@ def test_fleet_state_looks_an_observation_up_by_task():
     """Catches an `observation` that returns the whole `seen` tuple or raises on
     an unknown task: the first tick a task is seen has no prior observation, and
     stall detection asks for it anyway."""
-    obs = Observation(change_seq=551, since=datetime(2026, 8, 17, tzinfo=timezone.utc))
+    obs = Observation(change_seq=551, since=datetime(2026, 8, 17, tzinfo=UTC))
     state = FleetState(seen=((5, obs),))
     assert state.observation(5) is obs
     assert state.observation(6) is None
