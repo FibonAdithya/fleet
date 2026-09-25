@@ -277,6 +277,7 @@ def parse_snapshot(
         session = (agent.get("agent_session") or {}).get("value")
         cost = 0.0
         model: str | None = None
+        transcript_bytes = 0
         # `prices is not None`, NOT `prices` -- an empty dict is falsy, and
         # `and prices` made a MISSING [prices] table skip the join entirely:
         # every agent read as free, `unpriced` stayed empty, the daemon never
@@ -299,6 +300,13 @@ def parse_snapshot(
             else:
                 found = provider.session(session)
                 if found is not None:
+                    # Stall detection's progress signal (issue #10). Taken
+                    # before the read, so an unpriced model -- which arms a
+                    # drain that still reaps -- does not leave the stall timer
+                    # on the sequence alone.
+                    transcript_bytes = sum(
+                        path.stat().st_size for path in (found.parent, *found.children)
+                    )
                     try:
                         reading = _read(provider, found.parent, prices)
                         # Subagent spend is spend. Summed rather than ignored
@@ -345,6 +353,7 @@ def parse_snapshot(
                 change_seq=int(agent.get("state_change_seq", 0)),
                 cost_usd=cost,
                 model=model,
+                transcript_bytes=transcript_bytes,
             )
         )
     return sorted(out, key=lambda a: a.task)

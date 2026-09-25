@@ -47,6 +47,18 @@ def test_a_stalled_agent_stops_advancing_but_stays_working():
     assert ex.agents()[0].status == "working"
 
 
+def test_a_stalled_agent_keeps_its_transcript_size():
+    """Stall detection reads transcript size as well as the sequence (issue
+    #10), so a stall must hold both. Catches a tick that rebuilds the agent
+    without its `transcript_bytes`: a seeded size falls to 0, the change reads
+    as progress, and the stall this outcome scripts is never detected."""
+    ex = executor()
+    ex.seed([AgentState(task=1, status="working", change_seq=7, transcript_bytes=500)])
+    ex.script(1, "stall")
+    ex.tick()
+    assert ex.agents()[0].transcript_bytes == 500
+
+
 def test_a_scripted_outcome_lasts_exactly_one_tick():
     """A tick's outcomes are the complete scripting for that tick. Sticky
     scripting made `outcomes: {}` mean "keep the previous failure", so a

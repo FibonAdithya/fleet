@@ -1011,3 +1011,27 @@ def test_a_claimed_task_with_no_route_is_now_visible_to_unroutable():
     )
     intents, _ = decide(FleetState(), [task], POLICY, [], T0)
     assert Escalate(task=9, reason="unroutable") in intents
+
+
+def test_a_working_agent_whose_transcript_grows_is_not_stalled():
+    """Issue #10. herdr's `state_change_seq` moves only on a status change, so
+    an agent working through one long turn holds the same sequence for the
+    whole turn and was released as `stalled` while it worked. Transcript growth
+    is the signal that moves with real work. Catches an `_observe` that keys on
+    the sequence alone: the timer started at T0 is never reset and the task is
+    released at the tenth minute."""
+    prev = FleetState(seen=((1, Observation(change_seq=10, since=T0, transcript_bytes=100)),))
+    agents = [AgentState(task=1, status="working", change_seq=10, transcript_bytes=200)]
+    _, state = decide(prev, [claimed()], POLICY, agents, T0 + timedelta(minutes=9))
+    intents, _ = decide(state, [claimed()], POLICY, agents, T0 + timedelta(minutes=10))
+    assert intents == []
+
+
+def test_a_working_agent_whose_sequence_and_transcript_both_hold_is_stalled():
+    """The other side: neither signal moving is a stall. Catches an `_observe`
+    that resets the timer every tick regardless, under which no agent is ever
+    released."""
+    prev = FleetState(seen=((1, Observation(change_seq=10, since=T0, transcript_bytes=100)),))
+    agents = [AgentState(task=1, status="working", change_seq=10, transcript_bytes=100)]
+    intents, _ = decide(prev, [claimed()], POLICY, agents, T0 + timedelta(minutes=10))
+    assert Release(task=1, reason="stalled", attempt=2) in intents

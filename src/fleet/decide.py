@@ -152,7 +152,14 @@ def _open(ledger: list[Task]) -> list[Task]:
 
 
 def _observe(prev: FleetState, agents: list[AgentState], now: datetime) -> dict[int, Observation]:
-    """Advance a task's observation only when its sequence actually moved.
+    """Advance a task's observation only when its agent actually moved: its
+    sequence or its transcript size changed.
+
+    The sequence alone is not enough. herdr moves `state_change_seq` only on a
+    status change, so an agent working through one long turn holds the same
+    value until the turn ends, and any turn longer than `stall_minutes` was
+    released as stalled while it worked (issue #10). The transcript grows with
+    every tool call and result.
 
     Prior observations are carried forward rather than rebuilt from this tick's
     agents. A snapshot that momentarily omits an agent -- a herdr query racing a
@@ -162,8 +169,14 @@ def _observe(prev: FleetState, agents: list[AgentState], now: datetime) -> dict[
     out = dict(prev.seen)
     for agent in agents:
         old = out.get(agent.task)
-        if old is None or old.change_seq != agent.change_seq:
-            out[agent.task] = Observation(change_seq=agent.change_seq, since=now)
+        if (
+            old is None
+            or old.change_seq != agent.change_seq
+            or old.transcript_bytes != agent.transcript_bytes
+        ):
+            out[agent.task] = Observation(
+                change_seq=agent.change_seq, since=now, transcript_bytes=agent.transcript_bytes
+            )
     return out
 
 
