@@ -51,9 +51,17 @@ def _move_state(gh: GhClient, issue: int, state: str, add: list[str] | None = No
     Removing all eight and adding one is how the ledger keeps its "exactly one
     state label" invariant. `add` rides in the same `add_labels` call so a
     counter (`fleet:fix-pass-N`) cannot land without the state it belongs to.
+
+    Add first, then remove the others -- the order `expand._to_state` already
+    uses. Reversed, an interruption between the two calls leaves the task with
+    no state label, invisible to every ledger read: run 2026-09-25T11-23-12Z on
+    project-b lost #22 that way when the daemon retired its integrator
+    mid-command. Added first, the worst case is two state labels, which
+    `ledger.read_one` refuses loudly.
     """
-    gh.remove_labels(issue, labels.all_state_labels())
-    gh.add_labels(issue, [labels.state_label(state), *(add or [])])
+    new = labels.state_label(state)
+    gh.add_labels(issue, [new, *(add or [])])
+    gh.remove_labels(issue, [name for name in labels.all_state_labels() if name != new])
 
 
 def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:

@@ -4,6 +4,7 @@ import pytest
 
 from fleet.commands import ROLE_MAY_HAND_TO, do_block, do_escalate, do_handoff, do_verdict
 from fleet.gh import FakeGh, GhError
+from fleet.labels import STATES
 from fleet.packet import parse_latest
 from fleet.schemas import SchemaError, load_schema
 
@@ -57,6 +58,42 @@ def test_handoff_moves_the_state_label(cfg, gh):
     assert "fleet:review" in names
     assert "fleet:claimed" not in names
     assert "area:eval" in names
+
+
+class _DiesOnSecondLabelEdit(FakeGh):
+    """A relabel cut off between its two calls -- the agent retired mid-command."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.edits = 0
+
+    def _edit(self) -> None:
+        self.edits += 1
+        if self.edits == 2:
+            raise KeyboardInterrupt("retired between the two label calls")
+
+    def add_labels(self, issue, labels):
+        self._edit()
+        super().add_labels(issue, labels)
+
+    def remove_labels(self, issue, labels):
+        self._edit()
+        super().remove_labels(issue, labels)
+
+
+def test_an_interrupted_handoff_never_leaves_the_task_without_a_state_label(cfg):
+    """Run 2026-09-25T11-23-12Z on project-b: #22's integrator ran
+    `fleet handoff --to done`, the remove landed, and the daemon retired the
+    agent (Ctrl-C) before the add. The issue kept no state label, so the ledger
+    could not see it, it was never closed, and #24 -- blocked on it -- stayed
+    blocked. Add first: an interruption then leaves two state labels, which
+    ledger.read_one refuses loudly, never zero, which it cannot see at all."""
+    gh = _DiesOnSecondLabelEdit()
+    number = gh.create_issue("t", "b", ["fleet:claimed", "area:eval"])
+    with pytest.raises(KeyboardInterrupt):
+        do_handoff(cfg, gh, task=number, to="review", **BASE)
+    names = FakeGh.get_issue(gh, number)["labels"]
+    assert any(n.startswith("fleet:") and n.split(":", 1)[1] in STATES for n in names), names
 
 
 def test_handoff_carries_do_not_forward(cfg, gh):
