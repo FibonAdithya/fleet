@@ -60,9 +60,9 @@ def test_closed_is_matched_case_insensitively():
 
 
 def test_a_task_with_no_state_label_reads_as_triage():
-    """Catches raising on a state-less row. _post removes all eight state labels
-    then adds one; a crash between the two leaves a task label-less, and the
-    allocator must see it rather than KeyError on it."""
+    """Catches raising on a state-less row. _post adds before it removes, but a
+    human edit or an older CLI can still leave a task label-less (project-b
+    #22, 2026-09-25), and the allocator must see it rather than KeyError on it."""
     assert ledger.read_one(row(labels=["area:eval"])).state == "triage"
 
 

@@ -2,9 +2,10 @@
 
 Kept separate from decide() so that decide()'s tests read as policy -- they
 assert Dispatch(5, implementer, 1), not a list of label strings -- while the
-mutation sequence still gets covered. That sequence needs the coverage:
-commands._post removes all eight state labels and then adds one, and a failure
-between the two leaves a task with no state label at all.
+mutation sequence still gets covered. That sequence needs the coverage: a
+relabel is two gh calls, and removing before adding lets a failure between
+them leave a task with no state label at all -- which is how the CLI's
+commands._post lost project-b#22 before it was changed to add first.
 """
 
 from __future__ import annotations

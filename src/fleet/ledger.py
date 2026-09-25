@@ -82,9 +82,10 @@ def read_one(row: dict, packet: dict | None = None, verdict: dict | None = None)
     return Task(
         number=row["number"],
         title=row.get("title", ""),
-        # No state label reads as triage rather than raising: _post removes all
-        # eight then adds one, so a crash between the two is a real state the
-        # allocator has to be able to see.
+        # No state label reads as triage rather than raising. _post now adds
+        # before it removes, so it can no longer produce this, but a human edit
+        # or an older CLI can: project-b#22 was left label-less that way on
+        # 2026-09-25, and the allocator has to be able to see such a row.
         state=_state(names) or "triage",
         area=_one_of(names, "area:", labels_module.AREAS, "area"),
         klass=_one_of(names, "class:", labels_module.CLASSES, "class"),

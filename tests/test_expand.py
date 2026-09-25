@@ -44,9 +44,9 @@ MUTATING = [
 
 @pytest.mark.parametrize("intent", MUTATING, ids=lambda i: type(i).__name__)
 def test_a_state_transition_is_exactly_one_labels_effect(intent):
-    """commands._post removes all eight state labels then adds one; a failure
-    between the two strands the task with no state label at all, invisible to
-    every label query. One effect keeps the two halves from drifting apart."""
+    """A relabel is two gh calls, and removing before adding lets a failure
+    between them strand the task with no state label at all, invisible to every
+    label query. One effect keeps the two halves from drifting apart."""
     assert len(labels_of(expand(intent, POLICY))) == 1
 
 
