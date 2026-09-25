@@ -390,7 +390,8 @@ def test_a_failure_that_is_not_herdrs_still_stops_the_batch(cfg):
 
 def test_the_prompt_is_role_issue_packet_and_agents_md_and_nothing_else(cfg):
     """Parent §7.2 is exact about this: 'role prompt + issue body + the latest
-    handoff packet + the repo's AGENTS.md. Nothing else.' The zero-history test
+    handoff packet + the repo's AGENTS.md. Nothing else.' The latest verdict is
+    the one addition (see build_prompt's docstring). The zero-history test
     of parent §6 is enforced by construction rather than by discipline, and every
     extra thing added here weakens it silently."""
     gh = FakeGh()
@@ -434,6 +435,65 @@ def test_a_packet_posted_by_the_previous_stage_reaches_the_next_stages_prompt(cf
     do_handoff(cfg, gh, task=number, to="review", **HANDED_OVER)
     prompt = build_prompt(cfg, gh, number, "reviewer")
     assert HANDED_OVER["did"] in prompt
+
+
+def test_the_prompt_carries_the_latest_verdict(cfg):
+    """A verdict is a packet too, and the stages after REVIEW act on it. Run
+    2026-09-25T11-23-12Z on project-b was left out of it: three fix-pass
+    implementers never saw the `changes_required` findings and handed the same
+    head straight back, and an integrator holding an approved verdict's task
+    escalated asking whether a verdict existed."""
+    gh = FakeGh()
+    number = _issue(gh)
+    _role(cfg, "implementer", "ROLE")
+    gh.comment(number, render({"schema": SCHEMA_IDS["handoff"], "task": number, "did": "WORK"}))
+    gh.comment(
+        number,
+        render({"schema": SCHEMA_IDS["verdict"], "task": number, "findings": ["OLD-FINDING"]}),
+    )
+    gh.comment(
+        number,
+        render({"schema": SCHEMA_IDS["verdict"], "task": number, "findings": ["NEW-FINDING"]}),
+    )
+    prompt = build_prompt(cfg, gh, number, "implementer")
+    assert "NEW-FINDING" in prompt
+    assert "OLD-FINDING" not in prompt
+    assert "WORK" in prompt
+
+
+def test_the_integrator_gets_the_approved_verdict_and_the_packet_it_binds_to(cfg):
+    """integrator.md step 1 is 'confirm the packet carries an approved verdict
+    bound to its head_sha'. Both halves have to be in the prompt for that check
+    to be possible at all."""
+    gh = FakeGh()
+    number = _issue(gh)
+    _role(cfg, "integrator", "INTEGRATOR")
+    do_handoff(cfg, gh, task=number, to="review", **HANDED_OVER)
+    gh.comment(
+        number,
+        render(
+            {
+                "schema": SCHEMA_IDS["verdict"],
+                "task": number,
+                "verdict": "approved",
+                "head_sha": "HEAD-SHA-MARKER",
+            }
+        ),
+    )
+    prompt = build_prompt(cfg, gh, number, "integrator")
+    assert HANDED_OVER["did"] in prompt
+    assert '"verdict": "approved"' in prompt
+    assert "HEAD-SHA-MARKER" in prompt
+
+
+def test_a_prompt_with_no_verdict_has_no_verdict_section(cfg):
+    """The first two stages of every task have no verdict. An empty heading
+    would read to the agent as a review that said nothing."""
+    gh = FakeGh()
+    number = _issue(gh)
+    _role(cfg, "reviewer", "ROLE")
+    gh.comment(number, render({"schema": SCHEMA_IDS["handoff"], "task": number, "did": "WORK"}))
+    assert "# Latest review verdict" not in build_prompt(cfg, gh, number, "reviewer")
 
 
 def test_a_prompt_with_no_packet_yet_is_still_built(cfg):

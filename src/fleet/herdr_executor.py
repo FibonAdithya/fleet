@@ -61,13 +61,21 @@ def slug_of(title: str) -> str:
 
 
 def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
-    """Role prompt + issue body + latest handoff packet + AGENTS.md. Nothing else.
+    """Role prompt + issue body + latest handoff packet + latest verdict +
+    AGENTS.md. Nothing else.
 
     Parent §7.2 is exact about the list, and parent §6's zero-history test is
     enforced by this function's construction rather than by anyone's discipline.
     Every extra thing added here weakens that test silently -- the packet stops
     having to be sufficient, and nobody finds out until the packet is the only
     thing a receiver gets.
+
+    The verdict is the one addition to §7.2's list, and it is a packet, not
+    history. A reviewer leaves REVIEW by writing a verdict, never a handoff, so
+    without it the next stage cannot act on the review at all: run
+    2026-09-25T11-23-12Z on project-b sent three fix-pass implementers back
+    with no findings (each handed the same head straight back) and an integrator
+    to escalate asking whether an approved verdict existed.
 
     A missing role prompt raises. An agent handed an empty role does something
     plausible and wrong, and a blank prompt buries the policy error that caused
@@ -80,13 +88,22 @@ def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
     candidate = cfg.root / "AGENTS.md"
     if candidate.is_file():
         agents_md = candidate.read_text(encoding="utf-8")
-    latest = packet_module.parse_latest(issue.get("comments") or [], "handoff")
+    comments = issue.get("comments") or []
+    latest = packet_module.parse_latest(comments, "handoff")
+    verdict = packet_module.parse_latest(comments, "verdict")
     parts = [
         role_prompt,
         f"# Issue #{task}: {issue.get('title', '')}\n\n{issue.get('body', '')}",
     ]
     if latest is not None:
         parts.append("# Handoff packet\n\n```json\n" + json.dumps(latest, indent=2) + "\n```")
+    if verdict is not None:
+        parts.append(
+            "# Latest review verdict\n\nBound to the `head_sha` it names; a verdict on an "
+            "older head does not approve a newer one.\n\n```json\n"
+            + json.dumps(verdict, indent=2)
+            + "\n```"
+        )
     if agents_md:
         parts.append(agents_md)
     return "\n\n---\n\n".join(parts)
