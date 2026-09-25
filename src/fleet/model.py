@@ -47,8 +47,13 @@ class AgentState:
 
     `task`, `cost_usd`, and `model` are supplied by the shell: the herdr
     snapshot carries none of them. `change_seq` is herdr's `state_change_seq`,
-    a monotonic counter -- a value that has not moved since the last tick is
-    what stall detection reads.
+    a monotonic counter that moves only when the agent's status changes.
+    `transcript_bytes` is the combined size of the agent's transcript and its
+    subagents' transcripts, 0 when none is found. Stall detection reads both:
+    an agent is stalled only when neither has moved. The sequence alone holds
+    still for the whole of one long turn (issue #10), and herdr's `revision`
+    was measured moving on redraws while an agent sat blocked in a tool call,
+    so it would hide a hung agent.
 
     `model` is the single model the transcript named, or None when the
     transcript named none (no transcript written yet, or no usage recorded --
@@ -66,6 +71,7 @@ class AgentState:
     change_seq: int
     cost_usd: float = 0.0
     model: str | None = None
+    transcript_bytes: int = 0
 
 
 #: `AgentState.model` when a transcript named more than one model carrying
@@ -79,10 +85,12 @@ MULTIPLE_MODELS = "<multiple>"
 
 @dataclass(frozen=True)
 class Observation:
-    """When a task's agent sequence was last seen to move."""
+    """When a task's agent was last seen to make progress: its sequence or
+    its transcript size moved."""
 
     change_seq: int
     since: datetime
+    transcript_bytes: int = 0
 
 
 @dataclass(frozen=True)

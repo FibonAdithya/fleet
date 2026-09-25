@@ -141,6 +141,9 @@ class FakeExecutor:
                 # its sequence must NOT move -- that is the only signal there is.
                 change_seq=agent.change_seq if outcome == "stall" else self._seq,
                 cost_usd=agent.cost_usd + self._cost(outcome),
+                # Carried, not reset: a size that fell to 0 would read as
+                # progress and hide the stall scripted above (issue #10).
+                transcript_bytes=agent.transcript_bytes,
             )
         # Consumed by the tick it was written for.
         self._script.clear()

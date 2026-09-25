@@ -1716,3 +1716,58 @@ def test_an_unpriced_parent_is_not_labelled_a_subagent(tmp_path):
         unpriced=unpriced,
     )
     assert "subagent" not in next(iter(unpriced))
+
+
+def test_transcript_bytes_sums_the_parent_and_its_subagents(tmp_path):
+    """Issue #10. Stall detection reads transcript growth, and a parent that
+    has delegated sits still while its subagent works. Catches counting the
+    parent alone: an agent whose subagent runs longer than `stall_minutes`
+    would be released mid-delegation."""
+    session = "66666666-6666-6666-6666-666666666666"
+    _claude_session(
+        tmp_path,
+        session,
+        [_usage("test-model", input_tokens=1)],
+        one=[_usage("test-model", input_tokens=2)],
+    )
+    project = tmp_path / "projects" / "slug"
+    expected = (project / f"{session}.jsonl").stat().st_size + (
+        project / session / "subagents" / "agent-one.jsonl"
+    ).stat().st_size
+    agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    parsed = parse_snapshot(
+        _snapshot([agent]), ROOT, providers=providers, prices={"test-model": _FLAT}
+    )
+    assert parsed[0].transcript_bytes == expected
+
+
+def test_transcript_bytes_is_counted_for_an_agent_whose_model_is_unpriced(tmp_path):
+    """An unpriced model arms a drain, and a drain still reaps: in-flight
+    agents finish or are released. Catches reading the size only on the priced
+    path, which would leave a draining fleet's stall detection on the sequence
+    alone -- the very signal issue #10 found blind."""
+    session = "77777777-7777-7777-7777-777777777777"
+    _claude_session(tmp_path, session, [_usage("unpriced-model", input_tokens=1)])
+    size = (tmp_path / "projects" / "slug" / f"{session}.jsonl").stat().st_size
+    agent = _agent(str(ROOT / "5-slug"), agent_session={"value": session})
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    unpriced: set[str] = set()
+    parsed = parse_snapshot(
+        _snapshot([agent]), ROOT, providers=providers, prices={}, unpriced=unpriced
+    )
+    assert unpriced, "the fixture did not exercise the unpriced path"
+    assert parsed[0].transcript_bytes == size
+
+
+def test_transcript_bytes_is_zero_when_no_transcript_is_found(tmp_path):
+    """Seconds after a dispatch there is no transcript yet. 0 leaves the stall
+    timer on the sequence, which is the behaviour before issue #10."""
+    agent = _agent(
+        str(ROOT / "5-slug"), agent_session={"value": "88888888-8888-8888-8888-888888888888"}
+    )
+    providers = {"claude": ClaudeProvider(projects_dir=tmp_path / "projects")}
+    parsed = parse_snapshot(
+        _snapshot([agent]), ROOT, providers=providers, prices={"test-model": _FLAT}
+    )
+    assert parsed[0].transcript_bytes == 0

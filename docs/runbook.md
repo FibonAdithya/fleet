@@ -143,6 +143,17 @@ night by summing this file's entries for the same run id — the only state a
 restart loses is the idle timers, so a stall in progress is noticed up to
 `stall_minutes` late rather than forgotten.
 
+**What counts as a stall.** An agent is released as `stalled` when, for
+`stall_minutes`, neither herdr's `state_change_seq` nor the combined size of its
+transcript and its subagents' transcripts has changed. The sequence moves only
+on a status change, so on its own it held still through one long turn; the
+transcript grows with every tool call and result. The remaining blind spot is a
+single tool call that writes nothing for longer than `stall_minutes`, such as a
+long test suite, so set `stall_minutes` above the longest such call the target
+repository runs. herdr's `revision` is not used: measured on herdr 0.7.5 it
+moved while an agent sat blocked in one tool call, so a hung agent would never
+read as stalled.
+
 **`fleet run` resumes by default.** With no `--run-id`/`--new-run`, it takes
 the run log's last line as tonight's run id and rebuilds `spent_usd` from
 every entry under that id, rather than minting a fresh id and starting
