@@ -373,10 +373,9 @@ Intent = (
 
 @dataclass(frozen=True)
 class SetLabels:
-    """One gh edit, carrying both halves. `commands._post` removes all eight
-    state labels and then adds one; a failure between the two strands the task
-    with no state label at all, invisible to every label query. One effect, one
-    call."""
+    """One gh edit, carrying both halves. A relabel is two gh calls, and
+    removing before adding lets a failure between them strand the task with no
+    state label at all, invisible to every label query. One effect, one call."""
 
     task: int
     add: tuple[str, ...] = ()
