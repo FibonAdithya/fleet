@@ -1,0 +1,33 @@
+[repo]
+slug = "FibonAdithya/fleet"
+integration_branch = "integration"
+
+[policy]
+ownership = "docs/agent/ownership.md"
+task_classes = "docs/agent/task-classes.md"
+roles = ".agents/roles"
+schemas = ".agents/schemas"
+
+[budget]
+per_task_usd = 2.0
+fleet_usd = 10.0
+
+[fleet]
+slots = 3
+stall_minutes = 10
+max_attempts = 2
+max_fix_passes = 1
+
+[agents.claude]
+model_flag = "--model"
+args = ["--permission-mode", "acceptEdits"]
+
+# First-party API rates, USD per million tokens, read from
+# platform.claude.com/docs/en/about-claude/pricing on 2026-09-24.
+# cache_write is the 5-minute rate. Agents bill the subscription, not these
+# rates; fleet still needs them to enforce fleet_usd.
+[prices."claude-sonnet-5"]
+input = 2.0
+output = 10.0
+cache_read = 0.2
+cache_write = 2.5

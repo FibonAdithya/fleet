@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fleet.handoff.v1",
+  "type": "object",
+  "required": ["schema", "task", "to", "from", "base_sha", "head_sha", "branch", "did", "evidence", "attempt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "fleet.handoff.v1" },
+    "task": { "type": "integer", "minimum": 1 },
+    "to": { "enum": ["review", "claimed", "integrating", "blocked", "human", "done"] },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The dispatch attempt this packet was written on. The issue outlives the attempt, so a receiver must be able to tell attempt 1's evidence from attempt 2's."
+    },
+    "from": {
+      "type": "object",
+      "required": ["role", "agent", "run"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "enum": ["implementer", "reviewer", "invariant-reviewer", "planner", "integrator", "scout"] },
+        "agent": { "type": "string", "minLength": 1 },
+        "run": { "type": "string", "format": "date-time" }
+      }
+    },
+    "base_sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "head_sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "branch": { "type": "string", "minLength": 1 },
+    "did": { "type": "string", "minLength": 1 },
+    "evidence": {
+      "type": "object",
+      "required": ["checks", "commands"],
+      "additionalProperties": false,
+      "properties": {
+        "checks": { "type": "string", "minLength": 1 },
+        "commands": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "artifacts": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } },
+    "do_not": { "type": "array", "items": { "type": "string" } },
+    "discovered": { "type": "array", "items": { "type": "integer" } },
+    "blocked_on": { "type": "integer", "minimum": 1 },
+    "question": { "type": "string", "minLength": 1 },
+    "considered": { "type": "string", "minLength": 1 }
+  },
+  "allOf": [
+    {
+      "$comment": "blocked_on belongs to BLOCKED and nowhere else. Listed as a free optional property, it validated on a REVIEW packet as a phantom dependency an unblock watcher would act on, and a BLOCKED packet could carry none at all -- a task nothing could ever resolve.",
+      "if": { "required": ["to"], "properties": { "to": { "const": "blocked" } } },
+      "then": { "required": ["blocked_on"] },
+      "else": { "properties": { "blocked_on": { "not": {} } } }
+    },
+    {
+      "$comment": "question and considered belong to HUMAN and nowhere else. `{\"not\": {}}` rather than the boolean `false` or a top-level `not`/`required` pair: both of those report the failure against the whole packet, and this module's contract is that the message names the offending field.",
+      "if": { "required": ["to"], "properties": { "to": { "const": "human" } } },
+      "then": { "required": ["question", "considered"] },
+      "else": { "properties": { "question": { "not": {} }, "considered": { "not": {} } } }
+    }
+  ]
+}

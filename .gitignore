@@ -10,3 +10,4 @@ runs/
 .claude/worktrees/
 .claude/settings.local.json
 .agentify/
+.fleet/
