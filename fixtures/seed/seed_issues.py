@@ -78,6 +78,8 @@ def issue_labels(spec: dict) -> list[str]:
     issue number rather than applied directly -- so the seeder and the reset
     cannot disagree about what "seeded" means.
     """
+    if spec["area"] not in vocab.AREAS:
+        raise ValueError(f"unknown area: {spec['area']}")
     names = [
         vocab.state_label("ready"),
         vocab.area_label(spec["area"]),

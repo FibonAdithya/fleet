@@ -7,6 +7,7 @@ from fleet import policy as policy_module
 from fleet.config import load_config
 from fleet.policy import (
     PolicyError,
+    area_names,
     known_roles,
     load,
     parse_agents,
@@ -69,11 +70,32 @@ def test_an_empty_ownership_table_raises():
         parse_ownership("# Ownership map\n\nNothing here.\n")
 
 
-def test_an_unknown_area_in_the_ownership_map_raises():
-    """Catches dropping the AREAS check: an area no label exists for excludes
-    nothing, because no task can ever carry it."""
-    with pytest.raises(PolicyError, match="unknown area"):
-        parse_ownership("| Glob | Area |\n|---|---|\n| `src/x/**` | notanarea |\n")
+def test_a_malformed_area_name_in_the_ownership_map_raises():
+    """Areas now come from this table, so the only check left is that the name
+    can be a label. Catches dropping it: "Not An Area" would become the label
+    `area:Not An Area`, which gh accepts and no task ever carries."""
+    with pytest.raises(PolicyError, match="invalid area name"):
+        parse_ownership("| Glob | Area |\n|---|---|\n| `src/x/**` | Not An Area |\n")
+
+
+def test_areas_outside_the_fixture_vocabulary_are_accepted():
+    """The fleet repository's own areas (allocator, ledger, ...) are not the
+    fixture's. Catches keeping the old membership check."""
+    pairs = parse_ownership(
+        "| Glob | Area |\n|---|---|\n"
+        "| `src/fleet/decide.py` | allocator |\n| `README.md` | docs |\n"
+    )
+    assert {area for _, area in pairs} == {"allocator", "docs"}
+
+
+def test_area_names_reads_only_the_ownership_map(cfg):
+    """`area_names` must work from ownership.md alone: the box's file_task verb
+    calls it in a target repo, and the fixture cfg has no task-classes or
+    roles. Catches implementing it as `load(cfg).area_names`."""
+    cfg.ownership.write_text(
+        "| Glob | Area |\n|---|---|\n| `a/**` | alpha |\n| `b/**` | beta |\n| `c/**` | alpha |\n"
+    )
+    assert area_names(cfg) == frozenset({"alpha", "beta"})
 
 
 def test_routes_split_on_the_arrow():

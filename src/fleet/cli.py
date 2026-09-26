@@ -11,7 +11,7 @@ from pathlib import Path
 
 import click
 
-from fleet import git, labels, statesocket
+from fleet import git, statesocket
 from fleet import policy as policy_module
 from fleet import runlog as runlog_module
 from fleet import status as status_module
@@ -98,8 +98,9 @@ def do_plan(cfg, gh, now: datetime) -> list[str]:
     -- the only wiring of read_ledger, policy.load and decide() in the CLI is
     reachable by no test that does not talk to GitHub.
     """
-    tasks = read_ledger(gh)
-    intents, _ = decide(FleetState(), tasks, policy_module.load(cfg), [], now)
+    policy = policy_module.load(cfg)
+    tasks = read_ledger(gh, policy.area_names)
+    intents, _ = decide(FleetState(), tasks, policy, [], now)
     lines: list[str] = []
     if any(task.state == "claimed" for task in tasks):
         lines.append(NO_AGENTS_CAVEAT)
@@ -238,7 +239,7 @@ def escalate(task, question, considered, did, checks, commands):
 @main.command()
 @click.option("--from", "parent", type=int, required=True, help="The task you are working on.")
 @click.option("--title", required=True)
-@click.option("--area", required=True, type=click.Choice(labels.AREAS))
+@click.option("--area", required=True, help="An area from the target repository's ownership map.")
 @click.option("--evidence", required=True, help="file:line and what is wrong there.")
 def discover(parent, title, area, evidence):
     """File an unrelated defect for someone else. Then carry on with your task."""
@@ -246,6 +247,12 @@ def discover(parent, title, area, evidence):
     # discovery lands in TRIAGE whoever files it. Requiring FLEET_ROLE here would
     # refuse a human triaging by hand and gate nothing.
     cfg, gh, _ = _context(role_required=False)
+    known = policy_module.area_names(cfg)
+    if area not in known:
+        raise click.BadParameter(
+            f"{area!r} is not an area in {cfg.ownership}; choose from {', '.join(sorted(known))}",
+            param_hint="--area",
+        )
     number = do_discover(cfg, gh, parent=parent, title=title, area=area, evidence=evidence)
     click.echo(f"filed #{number} in triage (discovered by #{parent})")
 

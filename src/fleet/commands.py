@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fleet import labels
+from fleet import policy as policy_module
 from fleet.config import FleetConfig
 from fleet.gh import GhClient
 from fleet.ledger import read_one
@@ -243,6 +244,11 @@ def do_discover(
         # scan always passes and every blank discovery files another untitled
         # issue. do_escalate guards its own empty fields the same way.
         raise ValueError("discover needs a title, not an empty one")
+    known = policy_module.area_names(cfg)
+    if area not in known:
+        raise ValueError(
+            f"{area!r} is not an area in {cfg.ownership}; choose from {', '.join(sorted(known))}"
+        )
     area_label = labels.area_label(area)
     gh.get_issue(parent)
     # search_titles is a substring scan, so a short title collides with unrelated

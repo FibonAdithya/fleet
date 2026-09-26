@@ -347,6 +347,16 @@ def test_the_label_vocabulary_tracks_the_configured_attempt_cap():
     assert FakeGh(max_attempts=3).create_issue("t", "b", [attempt_label(3)]) == 1
 
 
+def test_the_vocabulary_carries_the_areas_it_is_given():
+    """Catches static_vocabulary hardcoding the fixture areas: FakeGh would then
+    refuse `area:allocator` while real gh, seeded from the fleet repo's policy,
+    accepts it -- a fake more permissive in one direction and stricter in the other."""
+    vocab = static_vocabulary(areas=("allocator",))
+    assert "area:allocator" in vocab and "area:eval" not in vocab
+    gh = FakeGh(areas=("allocator",))
+    assert "area:allocator" in gh.vocabulary
+
+
 # -- a hung gh call must not hang the fleet ---------------------------------
 
 

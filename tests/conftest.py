@@ -30,6 +30,10 @@ FLEET_TOML = (
 def cfg(tmp_path):
     (tmp_path / "fleet.toml").write_text(FLEET_TOML)
     shutil.copytree(FIXTURE_SCHEMAS, tmp_path / ".agents" / "schemas")
+    # do_discover now reads the target's ownership map (policy.area_names), so
+    # cfg needs a real one; the vendored fixture's is the same file every other
+    # policy test already trusts.
+    shutil.copyfile(FIXTURE_POLICY / "docs/agent/ownership.md", tmp_path / "o.md")
     return load_config(tmp_path)
 
 

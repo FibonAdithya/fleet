@@ -234,6 +234,10 @@ class Policy:
                 return kind, model
         return None
 
+    @property
+    def area_names(self) -> frozenset[str]:
+        return frozenset(area for _, area in self.areas)
+
 
 # ---------------------------------------------------------------- intents
 
