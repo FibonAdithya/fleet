@@ -341,3 +341,16 @@ def test_gh_login_survives_a_gh_that_never_answers(monkeypatch):
     monkeypatch.setattr(cli_module.subprocess, "run", run)
     assert _gh_login() is None
     assert recorded[0]["timeout"] == GH_LOGIN_TIMEOUT_SECONDS > 0
+
+
+def test_discover_refuses_an_area_the_target_repo_does_not_have(env, cfg):
+    """The --area choice used to be the fixture tuple; now it is the target's
+    ownership map, checked before anything is written. Catches validating
+    against labels.AREAS, or not at all."""
+    cfg.ownership.write_text("| Glob | Area |\n|---|---|\n| `src/**` | allocator |\n")
+    env.setenv("FLEET_AGENT", "fleet-3")
+    result = CliRunner().invoke(
+        main, ["discover", "--from", "1", "--title", "t", "--area", "eval", "--evidence", "x:1"]
+    )
+    assert result.exit_code == 2
+    assert "not an area" in result.output and "allocator" in result.output

@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Collection
+
 STATES = ("triage", "ready", "claimed", "review", "integrating", "blocked", "human", "done")
+# The fixture's areas: the default for code that has no policy to read. A target
+# repository's real areas are the Area column of its ownership.md
+# (policy.area_names); nothing validates against this tuple when a policy exists.
 AREAS = ("eval", "train", "models", "data", "configs", "docs")
 CLASSES = ("patch", "spec", "investigation", "integration")
+
+# What an area name must look like to be a label gh and humans can both type.
+AREA_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 AUTO_OK = "fleet:auto-ok"
 
@@ -23,8 +32,8 @@ def state_label(name: str) -> str:
 
 
 def area_label(name: str) -> str:
-    if name not in AREAS:
-        raise ValueError(f"unknown area: {name}")
+    if not AREA_RE.fullmatch(name):
+        raise ValueError(f"invalid area: {name}")
     return f"area:{name}"
 
 
@@ -60,6 +69,7 @@ def static_vocabulary(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     max_fix_passes: int = DEFAULT_MAX_FIX_PASSES,
     max_rebases: int = DEFAULT_MAX_REBASES,
+    areas: Collection[str] = AREAS,
 ) -> set[str]:
     """Exactly the labels created up front in the target repo. Anything outside
     this set is generated at runtime and must be created before it is applied.
@@ -74,7 +84,7 @@ def static_vocabulary(
     return {
         *all_state_labels(),
         AUTO_OK,
-        *(f"area:{a}" for a in AREAS),
+        *(f"area:{a}" for a in areas),
         *(f"class:{c}" for c in CLASSES),
         *(attempt_label(n) for n in range(1, max_attempts + 1)),
         *(fix_pass_label(n) for n in range(1, max_fix_passes + 1)),

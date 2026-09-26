@@ -9,6 +9,8 @@ remember.
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from fleet import labels as labels_module
 from fleet.model import Task
 
@@ -58,7 +60,7 @@ def _counter(names: list[str], prefix: str) -> int:
     return max(found, default=0)
 
 
-def _one_of(names: list[str], prefix: str, allowed: tuple[str, ...], kind: str) -> str | None:
+def _one_of(names: list[str], prefix: str, allowed: Collection[str], kind: str) -> str | None:
     """The single value carried under `prefix`, validated against `allowed`.
 
     Two areas is as broken as an unknown one: area exclusion holds ONE area per
@@ -75,7 +77,12 @@ def _one_of(names: list[str], prefix: str, allowed: tuple[str, ...], kind: str) 
     return values[0] if values else None
 
 
-def read_one(row: dict, packet: dict | None = None, verdict: dict | None = None) -> Task:
+def read_one(
+    row: dict,
+    packet: dict | None = None,
+    verdict: dict | None = None,
+    areas: Collection[str] = labels_module.AREAS,
+) -> Task:
     names = _names(row.get("labels", []))
     assignees = row.get("assignees") or []
     first = assignees[0] if assignees else None
@@ -87,7 +94,7 @@ def read_one(row: dict, packet: dict | None = None, verdict: dict | None = None)
         # or an older CLI can: project-b#22 was left label-less that way on
         # 2026-09-25, and the allocator has to be able to see such a row.
         state=_state(names) or "triage",
-        area=_one_of(names, "area:", labels_module.AREAS, "area"),
+        area=_one_of(names, "area:", areas, "area"),
         klass=_one_of(names, "class:", labels_module.CLASSES, "class"),
         auto_ok=labels_module.AUTO_OK in names,
         attempts=_counter(names, "fleet:attempt-"),
@@ -109,7 +116,11 @@ def read(
     rows: list[dict],
     packets: dict[int, dict] | None = None,
     verdicts: dict[int, dict] | None = None,
+    areas: Collection[str] = labels_module.AREAS,
 ) -> list[Task]:
     packets = packets or {}
     verdicts = verdicts or {}
-    return [read_one(row, packets.get(row["number"]), verdicts.get(row["number"])) for row in rows]
+    return [
+        read_one(row, packets.get(row["number"]), verdicts.get(row["number"]), areas)
+        for row in rows
+    ]

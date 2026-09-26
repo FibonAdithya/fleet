@@ -78,12 +78,21 @@ def parse_ownership(text: str) -> tuple[tuple[str, str], ...]:
         if len(cells) < 2:
             raise PolicyError(f"malformed ownership row: {cells!r}")
         glob, area = _unticked(cells[0]), _unticked(cells[1])
-        if area not in labels_module.AREAS:
-            raise PolicyError(f"unknown area {area!r} in ownership map")
+        if not labels_module.AREA_RE.fullmatch(area):
+            raise PolicyError(f"invalid area name {area!r} in ownership map")
         pairs.append((glob, area))
     if not pairs:
         raise PolicyError("no ownership rules found; area exclusion would be disabled")
     return tuple(pairs)
+
+
+def area_names(cfg: FleetConfig) -> frozenset[str]:
+    """The target repository's areas: the Area column of its ownership map.
+
+    Reads ownership.md alone, so a caller that only needs the vocabulary (the
+    CLI's --area check, the box's file_task verb) does not need task-classes or
+    role prompts to exist."""
+    return frozenset(area for _, area in parse_ownership(cfg.ownership.read_text()))
 
 
 def _role(segment: str, klass: str, roles: frozenset[str]) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Collection
 from typing import Protocol
 
 from fleet import labels as labels_module
@@ -232,6 +233,7 @@ class FakeGh:
         max_fix_passes: int = labels_module.DEFAULT_MAX_FIX_PASSES,
         max_rebases: int = labels_module.DEFAULT_MAX_REBASES,
         known_logins: set[str] | frozenset[str] = DEFAULT_KNOWN_LOGINS,
+        areas: Collection[str] = labels_module.AREAS,
     ) -> None:
         self.issues: dict[int, dict] = {}
         self._next = 1
@@ -245,7 +247,9 @@ class FakeGh:
         # A fake standing in for a repo seeded under a different policy needs the
         # same counters that repo was seeded with, or its idea of "this label
         # exists" diverges from the real one. See labels.static_vocabulary.
-        self.vocabulary = labels_module.static_vocabulary(max_attempts, max_fix_passes, max_rebases)
+        self.vocabulary = labels_module.static_vocabulary(
+            max_attempts, max_fix_passes, max_rebases, areas
+        )
         self.known_logins = set(known_logins)
 
     def _check_labels(self, names: list[str]) -> None:

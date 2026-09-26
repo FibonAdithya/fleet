@@ -7,6 +7,9 @@ m2-inputs §7 names as inherited debt.
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
+from fleet import labels as labels_module
 from fleet import ledger as ledger_module
 from fleet import packet as packet_module
 from fleet.gh import GhClient
@@ -31,7 +34,7 @@ from fleet.model import Task
 PACKET_STATES = ("claimed", "review", "integrating", "blocked")
 
 
-def read_ledger(gh: GhClient) -> list[Task]:
+def read_ledger(gh: GhClient, areas: Collection[str] = labels_module.AREAS) -> list[Task]:
     """Every row, open and closed, with packets for the states that carry one.
 
     `all`, not `open`. Once packets are fetched, `blocked_on` is populated and
@@ -46,7 +49,7 @@ def read_ledger(gh: GhClient) -> list[Task]:
     rows = gh.list_issues("all")
     packets: dict[int, dict] = {}
     for row in rows:
-        shallow = ledger_module.read_one(row)
+        shallow = ledger_module.read_one(row, areas=areas)
         if shallow.state not in PACKET_STATES:
             continue
         found = packet_module.parse_latest(
@@ -54,4 +57,4 @@ def read_ledger(gh: GhClient) -> list[Task]:
         )
         if found is not None:
             packets[row["number"]] = found
-    return ledger_module.read(rows, packets)
+    return ledger_module.read(rows, packets, areas=areas)

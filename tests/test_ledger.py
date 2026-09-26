@@ -112,6 +112,16 @@ def test_an_unknown_area_label_is_rejected_loudly():
         ledger.read_one(row(labels=["area:evla"]))
 
 
+def test_an_area_is_checked_against_the_areas_passed_in():
+    """Catches read_one ignoring its `areas` argument and still using the
+    fixture tuple: `allocator` is valid for the fleet repo and unknown to the
+    fixture."""
+    task = ledger.read_one(row(labels=["area:allocator"]), areas=frozenset({"allocator"}))
+    assert task.area == "allocator"
+    with pytest.raises(ledger.LedgerError, match="unknown area"):
+        ledger.read_one(row(labels=["area:eval"]), areas=frozenset({"allocator"}))
+
+
 def test_two_area_labels_are_rejected_loudly():
     """Catches a parse that validates all values but returns the first. Area
     exclusion holds ONE area per task, so a task in area:eval and area:data is
