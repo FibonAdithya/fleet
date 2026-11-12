@@ -36,7 +36,7 @@ Task-number extraction's positive path is covered separately, by
 `test_a_captured_agent_record_derived_to_a_fleet_path_parses_to_its_task`: it
 deep-copies one genuine agent record out of this file and rewrites only its
 `cwd` to a fleet worktree path, leaving `agent_status`, `state_change_seq`,
-`agent_session`, and `foreground_cwd` exactly as captured. Labelled here as
+`agent_session`, and `foreground_cwd` exactly as they are in this file. Labelled here as
 well as in the test so nobody mistakes this for captured coverage of a live
 fleet agent -- it is a derived case with real field shape, not a second real
 capture, and it does not substitute for the still-open gate item below.

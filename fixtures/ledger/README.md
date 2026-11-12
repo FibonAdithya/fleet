@@ -1,6 +1,6 @@
 # Captured real fixtures
 
-Raw output from real tools, checked in so M2's `decide()` can be tested against
+Output from real tools (one file scrubbed; see the table), checked in so M2's `decide()` can be tested against
 what GitHub actually returns rather than only against `FakeGh`. Four of the
 defects found in M0–M1 were fake/real divergences (see `docs/m2-inputs.md` §6);
 these files are what a parity test reads.

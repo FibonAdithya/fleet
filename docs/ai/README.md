@@ -15,4 +15,4 @@ Agents writing a new spec or plan put it here: design specs in `specs/`,
 implementation plans in `plans/`, named `YYYY-MM-DD-<topic>.md`. Never in
 another directory.
 
-On 2026-11-12 the names of the owner's other projects were replaced in these files with placeholders. `project-d` is the same placeholder the scrubbed captures under `fixtures/herdr/` use for the same project; `project-h` and `project-i` occur only here. Host names were kept. Git history still has the original text.
+On 2026-11-12 the names of the owner's other projects were replaced in these files with placeholders. `project-d` is the same placeholder the scrubbed captures under `fixtures/herdr/` use for the same project; `project-h` and `project-i` occur only here. Host names were kept.
