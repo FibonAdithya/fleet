@@ -36,6 +36,7 @@ AGENTS.md lists "Re-capturing any fixture under `fixtures/`" as a human decision
 - `FibonAdithya` as the GitHub login in `DEFAULT_KNOWN_LOGINS`, `fleet.toml` slugs, `pyproject.toml`/`uv.lock` git URLs: public account name and behaviour, not machine data.
 - AGENTS.md and runbook text saying "this private repository": repository visibility is out of scope.
 - Git history. Earlier commits still contain the unscrubbed captures, and `docs/ai/plans/2026-08-18-m3-daemon.md` and `docs/ai/plans/2026-08-19-multi-provider-cost.md` contain a home path. Scrubbing the tree does not scrub history; whether to rewrite history or publish a fresh-history copy is the owner's decision when changing visibility, which the spec puts out of scope.
+- Older design records that name another project as an early fleet target: `docs/ai/specs/2026-08-10-agent-fleet-design.md`, `docs/ai/specs/2026-08-10-fixture-harness-design.md`, `docs/ai/plans/2026-08-10-fixture-harness-m0-m1.md`, `docs/ai/plans/2026-08-18-m3-daemon.md`; and `pyproject.toml`'s git URL for the `agentify` dependency. Not fixtures, not home paths; outside the spec's scope.
 
 ## Review Focus
 
@@ -44,6 +45,7 @@ AGENTS.md lists "Re-capturing any fixture under `fixtures/`" as a human decision
 3. **`reset.sh` also defaults the clone path to the owner's layout** (`FLEET_FIXTURE_CLONE`, default `$HOME/TIG/fleet-fixture`). A reader resetting after a run with a checkout elsewhere gets "no directory". The runbook reset section names `FLEET_FIXTURE_CLONE`. Pinned by Task 3 Step 1.
 4. **Encoded home paths.** Claude's scratchpad paths encode the home directory as `-home-<name>-...`; a guard that only looks for `/home/<name>` passes over every `/tmp/claude-1000/-home-...` path the spec lists. The guard checks both forms. Pinned by Task 1 Step 1 (`test_an_encoded_foreign_home_is_found`).
 5. **A guard that scans nothing passes.** If `git ls-files` returns nothing (wrong cwd, pathspec typo), a scan over an empty list is green. The repo-wide test asserts that the scanned set includes a known fixture. Pinned by Task 1 Step 1 (`test_the_scan_covers_the_fixtures`).
+6. **In a fork's checkout, bare `gh` commands target the owner's repo.** `gh repo fork --help` (gh 2.95.0): "The `upstream` remote will be set as the default remote repository." The runbook's reset block (`gh issue list --search "SMOKE" ... | xargs gh issue close`, `gh label list ... | xargs gh label delete`) and `gh issue view N` pass no `--repo`, so run from a fork clone they act on `FibonAdithya/fleet-fixture`. README step 3 and the runbook seeding section tell the reader to run `gh repo set-default <you>/fleet-fixture` in the fork's checkout. Pinned by Task 2 Step 1 and Task 3 Step 1.
 
 ---
 
@@ -102,7 +104,9 @@ Helpers in the same file:
 - `text_of(rel: str) -> str`: `(REPO / rel).read_bytes().decode("utf-8", errors="replace")`.
 - `foreign_homes`: two regexes, `/home/([A-Za-z0-9_.-]+)` and `-home-([A-Za-z0-9_]+)-`; keep a match only when the captured name `!= "u"`; return `m.group(0)` for the slash form and `m.group(0)` for the encoded form, in order of appearance within each form (slash-form hits first, then encoded).
 
-Mutations these catch: `test_a_name_that_merely_starts_with_u_is_foreign` catches a prefix check; `test_an_encoded_foreign_home_is_found` catches dropping the encoded regex; `test_the_placeholder_home_is_allowed` catches requiring a trailing slash after `u` (the bare `/home/u` would be flagged); `test_the_scan_covers_the_fixtures` catches an empty or wrong pathspec; `test_no_tracked_file_names_a_foreign_home` is the actual guard.
+Mutations these catch: `test_a_name_that_merely_starts_with_u_is_foreign` catches a prefix check; `test_an_encoded_foreign_home_is_found` catches dropping the encoded regex; `test_the_placeholder_home_is_allowed` catches dropping the `!= "u"` filter (every `/home/u` would be flagged); it does NOT catch a regex that requires a trailing slash (the bare `/home/u` then simply does not match, still `[]`); `test_the_scan_covers_the_fixtures` catches an empty or wrong pathspec; `test_no_tracked_file_names_a_foreign_home` is the actual guard.
+
+`make check` runs `ruff format --check .`, and the snippet above is not ruff-formatted (the aligned comment). After writing the file run `uv run ruff format tests/test_no_home_paths.py && uv run ruff check tests/test_no_home_paths.py`.
 
 - [ ] **Step 2: Run the tests and confirm the right ones fail**
 
@@ -141,7 +145,7 @@ Rows, in this order (longest `find` first within each group, so no row's `find` 
 2. Other projects: every distinct `repo_name`, and every path component directly under `/home/u/` or `/home/u/TIG/` (after row group 1), in the eight captures, except this keep-list: `fleet`, `fleet-fixture`, `repo`, `TIG`, `.fleet`, `.herdr`. Each becomes `project-a`, `project-b`, … in order of first appearance, reading the files in the order of this task's **Files** list. Includes the working directory in `fixtures/cost/codex-subagent-parent.jsonl`; make that row path-anchored (`/home/u/<name>` → `/home/u/project-x`) because its name is a common English word.
 3. Other projects' branches and worktrees: every path component directly after `.claude/worktrees/` or `.herdr/worktrees/project-*/`, and every `branch` value, that is not a fleet branch (`fleet/<n>-<slug>`, `integration`). Each becomes `branch-1`, `branch-2`, … in first-appearance order.
 4. Remaining workspace labels: after groups 1–3, every `label` value on a workspace record (not the per-tab label `"1"`) that is not one of `fleet`, `fleet-fixture`, `fleet-<n>`, `repo`, `repo (deleted)`, `project-*`, `branch-*`. Each becomes `workspace-1`, `workspace-2`, ….
-5. Terminal titles: in the two snapshot files, every agent whose `cwd` (after groups 1–3) is under a `project-*` directory. One row per such agent: find = its `terminal_title_stripped` text, replace = `Other task`. Because `terminal_title` is the glyph plus that same text, the row changes both fields; a leading status glyph and space in `terminal_title` (`✳ `, `⠂ `) stays. `grep -o '"terminal_title_stripped":"[^"]*"'` lists them: 7 and 11 distinct values before the scrub, of which 6 and 10 belong to other projects. The two that stay are fleet's own (one per file, each on a pane whose `cwd` is `/home/u/TIG/fleet`).
+5. Terminal titles: in the two snapshot files, every agent whose `cwd` (after groups 1–3) is not `/home/u/TIG/fleet` or under it. This covers agents in `/home/u/project-*`, `/home/u/TIG/project-*`, `/home/u/.herdr/worktrees/project-*/branch-*` and `/home/u/TIG/project-*/.claude/worktrees/branch-*`. One row per such agent: find = its `terminal_title_stripped` text, replace = `Other task`. Because `terminal_title` is the glyph plus that same text, the row changes both fields; a leading status glyph and space in `terminal_title` (`✳ `, `⠂ `) stays. `grep -o '"terminal_title_stripped":"[^"]*"'` lists them: 7 distinct values in `fixtures/herdr/snapshot-fleet.json` and 10 in `fixtures/ledger/herdr-snapshot.json` before the scrub (MEASURED during the audit: the same `grep -o ... | sort -u | wc -l`), of which 6 and 9 belong to other projects. The two that stay are fleet's own (one per file, each on a pane whose `cwd` is `/home/u/TIG/fleet`).
 
 Print the table and check it by eye: no row's `find` is a fleet name, and every row from groups 2–4 is a name that appears only in other projects' records.
 
@@ -231,7 +235,7 @@ for s in '## Prerequisites' '## Making a repository a fleet target' \
   'https://github.com/FibonAdithya/agent-habits-kit' \
   '`fixtures/policy/fleet-fixture/`' '`fixtures/seed/seed_issues.sh`' \
   'FLEET_FIXTURE_REPO' 'fleet run --new-run' 'fleet_usd' 'run_fleet' \
-  '--enable-issues' 'integration' '[repo]' 'slug' 'agentify' 'origin' \
+  '--enable-issues' 'gh repo set-default <you>/fleet-fixture' 'integration' '[repo]' 'slug' 'agentify' 'origin' \
   'docs/agent/ownership.md' 'docs/agent/task-classes.md' \
   '.agents/roles/' '.agents/schemas/' 'Python 3.11' '`gh`' 'herdr' '`claude`' '`codex`'; do need "$s"; done
 grep -nE '\$[0-9]|[0-9]+ ?(USD|GB|MB|hours?|minutes?)\b' "$f" | grep -v 'ESTIMATE (unverified)' && { echo "UNLABELLED FIGURE"; bad=1; }
@@ -259,7 +263,7 @@ Insert after the existing "Quick start" section and before "Checks", in the orde
    - `.agents/schemas/*.json`: the handoff and verdict schemas every packet is validated against.
    Point to `fixtures/policy/fleet-fixture/` as the worked example, and this repository's own root files as a second one. State that `agentify` does not write these files; the target's owner writes them.
    Before writing each row, read the cited function and the fixture file and describe only what the code reads; if a row above does not match the code, the code wins (AGENTS.md source-of-truth order).
-3. `## Trying it on the demo target` — fork with all branches: `gh repo fork FibonAdithya/fleet-fixture --clone` (without `--default-branch-only`, gh copies every branch; the web UI's default copies only `main`, and fleet branches from `origin/integration`); enable Issues on the fork: `gh repo edit <you>/fleet-fixture --enable-issues`; in the fork, set `[repo] slug = "<you>/fleet-fixture"` in `fleet.toml`, commit and push (fleet reads the slug from there, not from the environment); from this checkout, `FLEET_FIXTURE_REPO=<you>/fleet-fixture ./fixtures/seed/seed_issues.sh`; then in the fork's checkout `fleet plan` and `fleet run --once`. Link `docs/runbook.md` for the rest.
+3. `## Trying it on the demo target` — fork with all branches: `gh repo fork FibonAdithya/fleet-fixture --clone` (without `--default-branch-only`, gh copies every branch; the web UI's default copies only `main`, and fleet branches from `origin/integration`); enable Issues on the fork: `gh repo edit <you>/fleet-fixture --enable-issues`; in the fork, set `[repo] slug = "<you>/fleet-fixture"` in `fleet.toml`, commit and push (fleet reads the slug from there, not from the environment); in the fork's checkout run `gh repo set-default <you>/fleet-fixture` (`gh repo fork --clone` makes the parent, `FibonAdithya/fleet-fixture`, the default, so any `gh` command without `--repo` there, including the runbook's reset commands, would act on the owner's repo); from this checkout, `FLEET_FIXTURE_REPO=<you>/fleet-fixture ./fixtures/seed/seed_issues.sh`; then in the fork's checkout `fleet plan` and `fleet run --once`. Link `docs/runbook.md` for the rest.
 4. `## Starting a night from Hermes` — the box's `run_fleet` verb runs `fleet run --new-run` in the target's checkout; the spend cap is the target's `fleet.toml` `[budget] fleet_usd` (fleet has no budget flag; it reads the file). Readers fork this repository, because the box's deploy step installs fleet from the box checkout's `origin`. Link the hermes-harness README for the verb and the deploy step.
 5. `## fleet and chain` — chain takes one approved spec through plan, audit, implementation, PR and review on the laptop; fleet runs many issues in parallel against one repository on the box. Link `https://github.com/FibonAdithya/agent-habits-kit`.
 6. `## License` — one line: MIT, see `LICENSE`.
@@ -301,7 +305,9 @@ Save as `/tmp/runbook-check.sh` (scratch):
 set -u; f=docs/runbook.md; bad=0
 # Every runnable command naming the owner's fixture repo goes through the variable.
 grep -nE '^\s+.*--repo FibonAdithya/fleet-fixture' "$f" && { echo "HARDCODED SLUG IN COMMAND"; bad=1; }
-for s in 'FLEET_FIXTURE_REPO' 'FLEET_FIXTURE_CLONE' '[repo]' 'README.md#trying-it-on-the-demo-target' \
+# `FLEET_FIXTURE_REPO=owner/name` is already on line 10; require the new forms.
+for s in 'FLEET_FIXTURE_REPO=<you>/fleet-fixture' '${FLEET_FIXTURE_REPO:?' 'FLEET_FIXTURE_CLONE' '[repo]' \
+  'gh repo set-default <you>/fleet-fixture' 'README.md#trying-it-on-the-demo-target' \
   '## Verified live against `FibonAdithya/fleet-fixture`'; do
   grep -qF -- "$s" "$f" || { echo "MISSING: $s"; bad=1; }; done
 # Headings unchanged (anchors are cited elsewhere).
@@ -314,8 +320,8 @@ Expected now: non-zero, with `HARDCODED SLUG IN COMMAND` (line 394) and `MISSING
 
 - [ ] **Step 2: Edit `docs/runbook.md`**
 
-- "Seeding or resetting the fixture backlog": open with a short paragraph: `FibonAdithya/fleet-fixture` is the owner's instance; a reader works on their own fork (see `README.md#trying-it-on-the-demo-target`), sets `FLEET_FIXTURE_REPO=<you>/fleet-fixture` for the seed and reset scripts and `FLEET_FIXTURE_CLONE` for `reset.sh`'s clone path (default `$HOME/TIG/fleet-fixture`), and sets `[repo] slug` in the fork's `fleet.toml`. Paths like `~/TIG/fleet` and `~/TIG/fleet-fixture` in the commands below are the owner's checkout locations; substitute yours. Change the command to `cd ~/TIG/fleet && FLEET_FIXTURE_REPO=<you>/fleet-fixture ./fixtures/seed/seed_issues.sh`.
-- "Resetting after a graded run" (line ~394): `gh issue list --repo FibonAdithya/fleet-fixture ...` → `gh issue list --repo "$FLEET_FIXTURE_REPO" ...`.
+- "Seeding or resetting the fixture backlog": open with a short paragraph: `FibonAdithya/fleet-fixture` is the owner's instance; a reader works on their own fork (see `README.md#trying-it-on-the-demo-target`), sets `FLEET_FIXTURE_REPO=<you>/fleet-fixture` for the seed and reset scripts and `FLEET_FIXTURE_CLONE` for `reset.sh`'s clone path (default `$HOME/TIG/fleet-fixture`), sets `[repo] slug` in the fork's `fleet.toml`, and runs `gh repo set-default <you>/fleet-fixture` in the fork's checkout (a `gh repo fork --clone` checkout defaults to the parent, and the reset commands below pass no `--repo`). Paths like `~/TIG/fleet` and `~/TIG/fleet-fixture` in the commands below are the owner's checkout locations; substitute yours. Change the command to `cd ~/TIG/fleet && FLEET_FIXTURE_REPO=<you>/fleet-fixture ./fixtures/seed/seed_issues.sh`.
+- "Resetting after a graded run" (line ~394): `gh issue list --repo FibonAdithya/fleet-fixture ...` → `gh issue list --repo "${FLEET_FIXTURE_REPO:?set it to <you>/fleet-fixture}" ...`. The `:?` form is required: with the variable unset, a bare `"$FLEET_FIXTURE_REPO"` passes an empty `--repo` and the command's output overwrites the committed `fixtures/ledger/issues.json`.
 - "Workflows on this repository" (line ~354): `gh secret set CLAUDE_CODE_AUTH_TOKEN --repo FibonAdithya/fleet` → `--repo <you>/fleet`, with "your fork of this repository" in the sentence before. Line ~370: keep that the three labels exist on `FibonAdithya/fleet`, and add that a fork needs them created.
 - Leave unchanged: the heading and table of "Verified live against `FibonAdithya/fleet-fixture`", and every other record of a past run.
 
@@ -348,8 +354,8 @@ Expected: `rc=0`, 812 passed.
 
 - [ ] **Step 2: Secrets and account-ID sweep over tracked files**
 
-Run: `git grep -nIE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_|sk-ant-|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{16}|xox[baprs]-|-----BEGIN [A-Z ]*PRIVATE KEY' -- . ':!uv.lock'`
-Expected: no output.
+Run: `git grep -nIE 'gh[pousr]_[A-Za-z0-9]{20,}|github[_]pat[_]|sk[-]ant[-]|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{16}|xox[baprs]-|-----BEGIN [A-Z ]*PRIVATE KEY' -- . ':!uv.lock'`
+Expected: no output. (The `[_]` and `[-]` brackets keep this line from matching itself: the unbracketed form matched this plan file during the audit.)
 
 - [ ] **Step 3: Oracle untouched, `src/` untouched**
 
