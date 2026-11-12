@@ -3,8 +3,9 @@
 ## Seeding or resetting the fixture backlog
 
 `FibonAdithya/fleet-fixture` is the owner's instance. A reader works on their own
-fork (see [the README](../README.md#trying-it-on-the-demo-target)): set
-`FLEET_FIXTURE_REPO=<you>/fleet-fixture` for the seed and reset scripts, set
+fork (see [the README](../README.md#trying-it-on-the-demo-target)): run
+`export FLEET_FIXTURE_REPO=<you>/fleet-fixture` in your shell for the seed and
+reset scripts, set
 `FLEET_FIXTURE_CLONE` for `fixtures/seed/reset.sh`'s clone path (default
 `$HOME/TIG/fleet-fixture`), set `[repo] slug` in the fork's `fleet.toml`, and run
 `gh repo set-default <you>/fleet-fixture` in the fork's checkout. A
@@ -360,7 +361,8 @@ in `.agentify.toml`) and all unable to push to a branch:
   review every pull request with a model: one for code, one for documentation
   drift. Each job's token has `pull-requests: write` and nothing more, so a
   wrong review costs a comment and never a commit. Both read `AGENTS.md`
-  first. They need one repository secret, a Claude subscription token. On your fork of this repository, set it there:
+  first. They need one repository secret, a Claude subscription token. On
+  your fork of this repository, set it with:
 
       gh secret set CLAUDE_CODE_AUTH_TOKEN --repo <you>/fleet
 

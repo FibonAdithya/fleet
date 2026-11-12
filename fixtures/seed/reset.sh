@@ -11,7 +11,7 @@
 #     Capture the ledger BEFORE anything below runs, or the snapshot records a
 #     state no live run produces:
 #
-#         gh issue list --repo FibonAdithya/fleet-fixture --state all \
+#         gh issue list --repo "${FLEET_FIXTURE_REPO:?set it to <you>/fleet-fixture}" --state all \
 #           --limit 200 --json assignees,body,labels,number,state,title \
 #           > fixtures/ledger/issues.json
 #

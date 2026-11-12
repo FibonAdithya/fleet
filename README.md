@@ -52,7 +52,7 @@ checkout (`load_config` in `src/fleet/config.py`, `load` in
 | `docs/agent/ownership.md` | A `Glob` / `Area` table. The area names are the vocabulary for `area:` labels, and the allocator runs one live task per area. Parsing is strict: a malformed row or an invalid area name stops startup (`parse_ownership` in `src/fleet/policy.py`). |
 | `docs/agent/task-classes.md` | The task classes and the role each class routes to. This file also holds the `Role \| Agent \| Model` table that declares which agent CLI and model each role runs as; every declared model needs a `[prices.*]` row in `fleet.toml`, and every declared agent needs an `[agents.*]` table. See `docs/runbook.md#declaring-agents-and-models`. |
 | `.agents/roles/*.md` | One prompt file per role. The file names (without `.md`) are the role vocabulary that routes and the `Role \| Agent \| Model` table are checked against; an empty directory is an error. |
-| `.agents/schemas/*.json` | The handoff and verdict schemas that every packet is validated against before it reaches the ledger. |
+| `.agents/schemas/*.json` | The directory must hold `.agents/schemas/handoff.schema.json` and `.agents/schemas/verdict.schema.json`, the schemas that every packet is validated against before it reaches the ledger. |
 
 `fixtures/policy/fleet-fixture/` is a worked example of the `fleet.toml` and
 `docs/agent/` files, and this repository's own root files are a second one.
