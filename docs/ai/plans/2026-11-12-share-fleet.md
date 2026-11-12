@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make this repository fit to publish: no machine-specific data in fixtures, tests or the runbook, a README that lets a stranger set fleet up, and an MIT `LICENSE`.
+**Goal:** Make this repository fit to publish: no machine-specific data in fixtures, tests or the runbook, no names of the owner's other projects in `docs/ai/`, a README that lets a stranger set fleet up, and an MIT `LICENSE`.
 
 **Architecture:** No code under `src/` changes. Captured fixtures are scrubbed by text substitution that keeps every JSON key, array length and value type. A new test scans tracked files for foreign home directories. README, runbook and LICENSE are documentation edits checked by `tests/test_docs_references.py`.
 
@@ -24,7 +24,24 @@
 - LICENSE: MIT, copyright holder `FibonAdithya`.
 - Runbook: records of past verified runs stay as they are. Headings are not renamed (AGENTS.md and README cite runbook anchors).
 - Stage explicit paths only; never `git add -A` / `git add .` / `git commit -a`.
-- Baseline (MEASURED this session, `uv run pytest --collect-only -q` summed, and `uv run pytest -q` rc=0): 805 tests, all passing.
+- Baseline when this plan was first written: 805 tests, all passing (measured in the session that wrote the first version; not re-run since).
+- Baseline at this revision, after Tasks 1 and 2 (MEASURED 2026-11-12 at `c773636`, `make check`, rc=0): 812 passed. Tasks 3 and 4 add no tests, so the count stays 812.
+
+## Revision 2026-11-12: owner note
+
+The owner's note on this run: "remove those other projects in docs/ai". The first version of this plan listed the old design records that name other projects as out of scope; that item is now in scope as Task 4. Assumption: "other projects" means the owner's other repositories named in `docs/ai/` (two that also appear in the fixture captures, two that do not). The repositories this workflow is published with (hermes-harness, chain, agent-habits-kit), the tools fleet uses (herdr, agentify, claude, codex) and the GitHub login stay.
+
+Status at this revision (MEASURED, `git log --oneline main..HEAD`):
+
+| Task | State | Commits |
+|---|---|---|
+| 1. Scrub fixtures, guard test | done | `a103d55` |
+| 2. LICENSE and README | done | `3c25906`, `c773636` |
+| 3. Runbook | not started | |
+| 4. `docs/ai/` other projects' names (new) | not started | |
+| 5. Final gate (was Task 4) | not started | |
+
+An executor starts at Task 3. Tasks 3 and 4 touch disjoint files and can run in either order.
 
 ## Authority note
 
@@ -32,11 +49,13 @@ AGENTS.md lists "Re-capturing any fixture under `fixtures/`" as a human decision
 
 ## Out of scope (seen, deliberately left)
 
-- Comments and docstrings in `src/fleet/*.py` and in tests that name `project-b` as a past fleet target run (`src/fleet/commands.py`, `expand.py`, `herdr_executor.py`, `ledger.py`, `tests/test_commands.py`, `tests/test_ledger.py`, `tests/test_herdr_executor.py`). Those are records of fleet runs, not fixture captures, and the spec's scope is the fixtures. The exception is `tests/test_herdr.py`, whose references describe the herdr fixture's contents and change with it (Task 1).
+- Comments and docstrings in `src/fleet/*.py` and in tests that name an earlier fleet target project (the one the fixtures call `project-b`) as a past fleet target run (`src/fleet/commands.py`, `expand.py`, `herdr_executor.py`, `ledger.py`, `tests/test_commands.py`, `tests/test_ledger.py`, `tests/test_herdr_executor.py`). Those are records of fleet runs, not fixture captures, and the spec's scope is the fixtures. The exception is `tests/test_herdr.py`, whose references describe the herdr fixture's contents and change with it (Task 1).
 - `FibonAdithya` as the GitHub login in `DEFAULT_KNOWN_LOGINS`, `fleet.toml` slugs, `pyproject.toml`/`uv.lock` git URLs: public account name and behaviour, not machine data.
 - AGENTS.md and runbook text saying "this private repository": repository visibility is out of scope.
-- Git history. Earlier commits still contain the unscrubbed captures, and `docs/ai/plans/2026-08-18-m3-daemon.md` and `docs/ai/plans/2026-08-19-multi-provider-cost.md` contain a home path. Scrubbing the tree does not scrub history; whether to rewrite history or publish a fresh-history copy is the owner's decision when changing visibility, which the spec puts out of scope.
-- Older design records that name another project as an early fleet target: `docs/ai/specs/2026-08-10-agent-fleet-design.md`, `docs/ai/specs/2026-08-10-fixture-harness-design.md`, `docs/ai/plans/2026-08-10-fixture-harness-m0-m1.md`, `docs/ai/plans/2026-08-18-m3-daemon.md`; and `pyproject.toml`'s git URL for the `agentify` dependency. Not fixtures, not home paths; outside the spec's scope.
+- Git history. Earlier commits still contain the unscrubbed captures and the unscrubbed `docs/ai/` files (including the first version of this plan). Scrubbing the tree does not scrub history; whether to rewrite history or publish a fresh-history copy is the owner's decision when changing visibility, which the spec puts out of scope.
+- `pyproject.toml`'s git URL for the `agentify` dependency: a dependency's location, not `docs/ai/`.
+- Host names in the older `docs/ai/` records (`tig-server`, `tig-gpu`; 23 occurrences, MEASURED with `git grep -ohE` for the two names over `docs/ai` excluding this plan, piped to `wc -l`): machines, not projects. The owner's note names projects. If the owner wants them gone too, the same Task 4 procedure applies with a third table group.
+- The synthetic home paths in two old plans (`/home/` + `nobody` in the multi-provider-cost plan, `-home-` + `user-proj` in the m3-daemon plan): copies of old test values, not a real home directory and not a project. `tests/test_no_home_paths.py` does not scan `docs/ai/`, and this plan does not widen it, because the old plans are records and the guard would force edits to them.
 
 ## Review Focus
 
@@ -50,6 +69,8 @@ AGENTS.md lists "Re-capturing any fixture under `fixtures/`" as a human decision
 ---
 
 ### Task 1: Scrub captured fixtures, with a guard test
+
+**Status: done in `a103d55`. Do not redo.**
 
 **Files:**
 - Create: `tests/test_no_home_paths.py`
@@ -213,6 +234,8 @@ other than /home/u/ in fixtures/, tests/ or docs/runbook.md."
 
 ### Task 2: LICENSE and README additions
 
+**Status: done in `3c25906` and `c773636`. Do not redo.**
+
 **Files:**
 - Create: `LICENSE`
 - Modify: `README.md` (keep every existing line; add sections)
@@ -343,26 +366,162 @@ git commit -m "docs(runbook): the fixture repo and clone are the reader's own"
 
 ---
 
-### Task 4: Final gate and leak sweep
+### Task 4: Replace other projects' names in `docs/ai/` with placeholders
+
+**Files:**
+- Modify: `docs/ai/specs/2026-08-10-agent-fleet-design.md`, `docs/ai/specs/2026-08-10-fixture-harness-design.md`, `docs/ai/plans/2026-08-10-fixture-harness-m0-m1.md`, `docs/ai/plans/2026-08-18-m3-daemon.md`
+- Modify: `docs/ai/README.md` (one paragraph saying what was replaced)
+- Not modified: this plan and `docs/ai/specs/2026-11-12-share-fleet-design.md` (neither names another project; Step 4's check covers them), `docs/ai/plans/2026-08-17-m2-allocator.md`, `docs/ai/plans/2026-08-19-multi-provider-cost.md`, `docs/ai/specs/2026-08-17-m2-allocator-design.md`, `docs/ai/specs/2026-08-18-m3-daemon-design.md`, `docs/ai/specs/2026-08-19-multi-provider-cost-design.md` (no project names; the m3-daemon design names only hosts).
+
+**Interfaces:**
+- Consumes: commit `a103d55` (Task 1), whose `fixtures/herdr/workspace-list.json` diff pairs each fixture project name with its placeholder.
+- Produces: nothing later tasks use except `/tmp/docs-ai-names.tsv` and `/tmp/docs-ai-check.sh`, which Task 5 Step 2 re-runs.
+
+This plan does not list the names being removed, for the reason Task 1 Step 4 gives. The table is derived by command and kept outside the repository.
+
+Placeholders: a name that the fixtures already replaced gets the same placeholder here, so `project-d` in `docs/ai/` and in `fixtures/` is the same project. The fixtures use `project-a` to `project-g` (MEASURED: `git grep -ohE 'project-[a-z]\b' -- fixtures tests | sort -u`). Names that occur only in `docs/ai/` get `project-h` onward.
+
+- [ ] **Step 1: Build the replacement table (scratch, not committed)**
+
+1. Fixture names, paired with their placeholders from the Task 1 diff of `workspace-list.json` (labels are in the same order before and after):
+
+```bash
+paste <(git show a103d55^:fixtures/herdr/workspace-list.json | grep -oE '"label":"[^"]*"' | cut -d'"' -f4) \
+      <(git show a103d55:fixtures/herdr/workspace-list.json  | grep -oE '"label":"[^"]*"' | cut -d'"' -f4) \
+  | awk -F'\t' '$2 ~ /^project-/' | sort -u > /tmp/docs-ai-names.tsv
+```
+
+Expected: 5 rows, placeholders `project-a` to `project-e` (MEASURED while writing this revision). Two of them occur in `docs/ai/`: `project-d` and `project-b`. The fixtures' `project-f` and `project-g` names do not occur in `docs/ai/` (MEASURED: `git grep -c` for each, rc=1), so they need no row.
+
+2. Names that occur only in `docs/ai/`: the hyphenated tokens starting with `tig-` that are not the two host names.
+
+```bash
+git grep -ohE '\btig-[a-z0-9-]+' -- docs/ai | sort -u | grep -vxE 'tig-server|tig-gpu' \
+  | awk '{printf "%s\tproject-%c\n", $0, 103+NR}' >> /tmp/docs-ai-names.tsv
+```
+
+Expected: 2 rows, `project-h` and `project-i` (`103+NR` is `h`, `i`). They are the slow-build monorepo (agent-fleet design, non-goals and "Not now" list; fixture-harness design, sizing paragraph and non-goals) and the repository that holds the companion workflow document (agent-fleet design, header).
+
+3. Check the table: `cat /tmp/docs-ai-names.tsv; grep -c . /tmp/docs-ai-names.tsv` gives 7 rows; no `find` value is `fleet`, `fleet-fixture`, a host name, or one of the published repositories in the revision note; no `find` value is a substring of another (substitution order would then matter).
+
+- [ ] **Step 2: Write the check (it fails now)**
+
+Save as `/tmp/docs-ai-check.sh` (scratch):
+
+```bash
+set -u; t=/tmp/docs-ai-names.tsv; bad=0
+n=$(grep -c . "$t"); [ "$n" -eq 7 ] || { echo "TABLE HAS $n ROWS, WANT 7"; bad=1; }
+# No removed name, in any case, anywhere under docs/ai/.
+cut -f1 "$t" | git grep -niF -f - -- docs/ai && { echo "NAME STILL IN docs/ai"; bad=1; }
+# Discovery: every directory under ~/TIG or /home/u/TIG is fleet's own or a placeholder.
+git grep -ohE '(~|/home/u)/TIG/[A-Za-z0-9_.-]+' -- docs/ai | sed -E 's#.*/TIG/##' | sort -u \
+  | grep -vxE 'fleet|fleet-fixture|fleet-fixture\.hidden|project-[a-z]?|\.\.\.' && { echo "UNKNOWN TIG/ DIRECTORY"; bad=1; }
+# Discovery: the only remaining tig- names are the two hosts.
+git grep -ohE '\btig-[a-z0-9-]+' -- docs/ai | sort -u | grep -vxE 'tig-server|tig-gpu' && { echo "UNKNOWN tig- NAME"; bad=1; }
+exit $bad
+```
+
+`git grep` searches the working tree, so the check sees uncommitted edits.
+
+Run: `bash /tmp/docs-ai-check.sh; echo rc=$?`
+Expected now: non-zero, with `NAME STILL IN docs/ai` (hits in the four files listed under **Files**), `UNKNOWN TIG/ DIRECTORY` (two directories: the companion document's, and the first target's in the m3-daemon plan's copy of a test) and `UNKNOWN tig- NAME` (two names). All three messages and 24 name-grep hit lines were MEASURED in a dry run of this task while writing this revision, along with the Step 3 numstat, Step 5 `rc=0` / 812 passed, and all four Step 7 mutations firing; the dry run was then reverted.
+
+What each part catches: the table-row count catches a derivation that silently produced fewer rows (for example `a103d55` not reachable, so `git show` printed nothing and `paste` paired empty lines); the `-i` name grep catches a missed occurrence and a case variant that a case-sensitive substitution left behind; the two discovery greps catch a project name that is not in the table at all, which the name grep cannot see.
+
+- [ ] **Step 3: Apply the table by raw-text substitution**
+
+```bash
+python3 -I - <<'PY'
+from pathlib import Path
+rows = [l.split("\t") for l in Path("/tmp/docs-ai-names.tsv").read_text().splitlines() if l]
+for f in ["docs/ai/specs/2026-08-10-agent-fleet-design.md",
+          "docs/ai/specs/2026-08-10-fixture-harness-design.md",
+          "docs/ai/plans/2026-08-10-fixture-harness-m0-m1.md",
+          "docs/ai/plans/2026-08-18-m3-daemon.md"]:
+    p = Path(f); text = p.read_text()
+    for old, new in rows:
+        text = text.replace(old, new)
+    p.write_text(text)
+PY
+```
+
+Run: `git diff --numstat -- docs/ai`
+Expected (one line changed per affected line, nothing else; counts MEASURED while writing this revision by counting lines that match any row):
+
+```
+12	12	docs/ai/specs/2026-08-10-agent-fleet-design.md
+9	9	docs/ai/specs/2026-08-10-fixture-harness-design.md
+2	2	docs/ai/plans/2026-08-10-fixture-harness-m0-m1.md
+1	1	docs/ai/plans/2026-08-18-m3-daemon.md
+```
+
+Then read every changed line (`git diff -U0 -- docs/ai`) and fix grammar the substitution broke by hand (for example an article before a name). Do not reword anything else: these are records. The m3-daemon plan's changed line is a copy of `tests/test_herdr.py::test_a_path_outside_the_worktree_root_is_not_a_task`; after the substitution it must read `/home/u/TIG/project-d`, the same as that test (`grep -n 'project-d' tests/test_herdr.py`).
+
+- [ ] **Step 4: Add the note to `docs/ai/README.md`**
+
+Append one paragraph:
+
+> On 2026-11-12 the names of the owner's other projects were replaced in these files with placeholders. `project-a` to `project-e` are the same placeholders the scrubbed captures under `fixtures/herdr/` use for the same projects; `project-h` and `project-i` occur only here. Host names were kept. Git history still has the original text.
+
+- [ ] **Step 5: Run the check, the docs tests and the gate**
+
+Run: `bash /tmp/docs-ai-check.sh; echo rc=$?`
+Expected: `rc=0`, no output lines.
+
+Run: `make check > /tmp/share-fleet-t4.log 2>&1; echo rc=$?; tail -3 /tmp/share-fleet-t4.log`
+Expected: `rc=0`, 812 passed (no tests added).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git status --short
+git add docs/ai/specs/2026-08-10-agent-fleet-design.md docs/ai/specs/2026-08-10-fixture-harness-design.md \
+  docs/ai/plans/2026-08-10-fixture-harness-m0-m1.md docs/ai/plans/2026-08-18-m3-daemon.md docs/ai/README.md
+git commit -m "docs(ai): replace other projects' names with placeholders
+
+Same placeholders as the scrubbed fixtures where the project is the same
+one (project-a..e); project-h and project-i for names only in docs/ai.
+Host names kept. Text substitution only, one changed line per hit."
+```
+
+- [ ] **Step 7: Mutation-check the check (after the commit, so `git checkout` restores the committed text)**
+
+1. `cut -f1 /tmp/docs-ai-names.tsv | sed -n 4p | tr a-z A-Z >> docs/ai/README.md` (a removed name, upper-cased). Run the check; expect `NAME STILL IN docs/ai` and rc≠0. This catches a case-sensitive name grep. Restore: `git checkout -- docs/ai/README.md`.
+2. `printf 'see ~/%s/zz-other/notes.md\n' TIG >> docs/ai/README.md` (built with `printf` so this plan's own text does not trip the check). Run the check; expect `UNKNOWN TIG/ DIRECTORY`. Restore the same way.
+3. `printf '%s-zz\n' tig >> docs/ai/README.md`. Run the check; expect `UNKNOWN tig- NAME`. Restore the same way.
+4. `head -6 /tmp/docs-ai-names.tsv > /tmp/six.tsv && sed -i 's#^set -u; t=/tmp/docs-ai-names.tsv#set -u; t=/tmp/six.tsv#' /tmp/docs-ai-check.sh`. Run; expect `TABLE HAS 6 ROWS, WANT 7`. Restore: `sed -i 's#t=/tmp/six.tsv#t=/tmp/docs-ai-names.tsv#' /tmp/docs-ai-check.sh`.
+
+After all four, `git status --short` shows nothing and the check gives `rc=0`.
+
+---
+
+### Task 5: Final gate and leak sweep
 
 **Files:** none modified unless a check fails (then fix in the file the check names, and commit that file).
+
+**Interfaces:** Consumes Tasks 1–4 committed.
 
 - [ ] **Step 1: Full gate**
 
 Run: `make check > /tmp/share-fleet-final.log 2>&1; echo rc=$?; tail -5 /tmp/share-fleet-final.log`
 Expected: `rc=0`, 812 passed.
 
-- [ ] **Step 2: Secrets and account-ID sweep over tracked files**
+- [ ] **Step 2: Re-run the `docs/ai/` check from Task 4**
+
+Run: `bash /tmp/docs-ai-check.sh; echo rc=$?`
+Expected: `rc=0`, no output lines. (If `/tmp/docs-ai-names.tsv` is gone, rebuild it with Task 4 Step 1 commands 1 and 2 run against `c773636` instead of the working tree: replace `git grep ... -- docs/ai` with `git grep ... c773636 -- docs/ai` and strip the `c773636:` prefix git adds to each match with `sed 's/^c773636://'`.)
+
+- [ ] **Step 3: Secrets and account-ID sweep over tracked files**
 
 Run: `git grep -nIE 'gh[pousr]_[A-Za-z0-9]{20,}|github[_]pat[_]|sk[-]ant[-]|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{16}|xox[baprs]-|-----BEGIN [A-Z ]*PRIVATE KEY' -- . ':!uv.lock'`
 Expected: no output. (The `[_]` and `[-]` brackets keep this line from matching itself: the unbracketed form matched this plan file during the audit.)
 
-- [ ] **Step 3: Oracle untouched, `src/` untouched**
+- [ ] **Step 4: Oracle untouched, `src/` untouched**
 
 Run: `git diff --stat main...HEAD -- fixtures/oracle src`
 Expected: no output.
 
-- [ ] **Step 4: Nothing unintended in the branch**
+- [ ] **Step 5: Nothing unintended in the branch**
 
 Run: `git diff --stat main...HEAD`
-Expected: only the files named in Tasks 1–3 plus this plan and the spec.
+Expected: only the files named in Tasks 1–4 plus this plan and the spec.
