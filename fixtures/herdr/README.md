@@ -1,7 +1,10 @@
 # `snapshot-fleet.json`
 
-Raw output of `herdr api snapshot`, unmodified, captured on this box with a live
-`fleet/1-capture` worktree registered in herdr at the moment of capture.
+Output of `herdr api snapshot`, captured on this box with a live
+`fleet/1-capture` worktree registered in herdr at the moment of capture. The
+capture was scrubbed on 2026-11-12: the home directory was replaced with
+`/home/u`, and other projects' names, branch names, workspace labels and
+terminal titles were replaced with placeholders. The structure is unchanged.
 
 ## What it contains
 
@@ -51,8 +54,9 @@ capture -- `result.snapshot.workspaces` contains it, with `worktree.checkout_pat
 == ".../.fleet/worktrees/1-capture"` -- but it holds no agent, so it does not
 appear in `agents`.
 
-Nothing in this file was hand-edited to compensate. It is `herdr api
-snapshot`'s output exactly as returned, with the worktree workspace present and
+Nothing in this file was hand-edited to compensate (the scrub changed only
+string values naming this box's home directory and other projects). It is `herdr api
+snapshot`'s output as returned (apart from the 2026-11-12 scrub described at the top), with the worktree workspace present and
 agent-less. The `agents` array's fidelity claim rests entirely on the 7 real,
 independently-running agents already on the box, which is why the field-shape
 test (`test_the_captured_snapshot_has_the_fields_the_parser_reads`) is
@@ -127,7 +131,8 @@ worktree path. **Task 11 closed that gate item by measurement** -- see
 
 # `agent-fleet-worktree.json`
 
-The gate item above, closed. One verbatim agent record out of `herdr api
+The gate item above, closed. (Scrubbed on 2026-11-12: the home directory in
+the paths was replaced with `/home/u`.) One verbatim agent record out of `herdr api
 snapshot`, wrapped in the same `result.snapshot.agents` envelope so
 `parse_snapshot` can read it unchanged.
 
@@ -181,7 +186,9 @@ afterwards (`herdr worktree remove --workspace w3Q --force`).
 
 # `worktree-created.json`, `pane-list.json`, `workspace-list.json`
 
-Verbatim output of, respectively:
+Scrubbed on 2026-11-12: the home directory was replaced with `/home/u`, and the
+names of other projects, their branches and their workspace labels were
+replaced with placeholders. Verbatim otherwise, output of, respectively:
 
 ```
 herdr worktree create --cwd <repo> --branch fleet/12-lid-small-sample \
@@ -213,7 +220,8 @@ unconditionally would raise on the first entry, and one that matched on
 
 # `worktree-list-orphan.json`
 
-Verbatim `herdr worktree list --cwd <repo> --json`, captured on this box in a
+Scrubbed on 2026-11-12: the home directory was replaced with `/home/u`.
+Verbatim otherwise, `herdr worktree list --cwd <repo> --json`, captured on this box in a
 state built deliberately: create a worktree, then **close its workspace** and
 leave the checkout on disk. That is the leak `RealHerdr._checkout_of` exists to
 detect.

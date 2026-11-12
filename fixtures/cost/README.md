@@ -26,7 +26,8 @@ runbook section. A `turn_context` naming the model, the session's final
 cumulative `token_count`, and the `world_state` announcing a live subagent
 roster. The session's own prose is left out on the rule above; what remains of
 `turn_context` is codex's own configuration (sandbox policy, personality,
-collaboration mode), not conversation.
+collaboration mode), not conversation. The session's working directory was
+replaced with its `/home/u/project-g` placeholder on 2026-11-12.
 
 It is kept because everything else about this transcript is priceable — known
 model, a breakdown that sums to its total, no cache-write field — so without

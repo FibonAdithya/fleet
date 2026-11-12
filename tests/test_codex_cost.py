@@ -203,7 +203,7 @@ def test_the_registry_exposes_both_providers_by_herdr_agent_kind():
     parse_snapshot dispatches on. Catches a registry keyed by display name."""
     from fleet.cost import build_providers
 
-    providers = build_providers(Path("/home/nobody"))
+    providers = build_providers(Path("/home/u/nobody"))
     assert set(providers) == {"claude", "codex"}
     assert providers["claude"].name == "claude"
     assert providers["codex"].name == "codex"
@@ -214,7 +214,7 @@ def test_provider_kinds_matches_build_providers_keys():
     Catches editing one without updating the other."""
     from fleet.cost import PROVIDER_KINDS, build_providers
 
-    providers = build_providers(Path("/home/nobody"))
+    providers = build_providers(Path("/home/u/nobody"))
     assert set(providers) == PROVIDER_KINDS
 
 
