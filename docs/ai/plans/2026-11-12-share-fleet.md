@@ -25,11 +25,11 @@
 - Runbook: records of past verified runs stay as they are. Headings are not renamed (AGENTS.md and README cite runbook anchors).
 - Stage explicit paths only; never `git add -A` / `git add .` / `git commit -a`.
 - Baseline when this plan was first written: 805 tests, all passing (measured in the session that wrote the first version; not re-run since).
-- Baseline at this revision, after Tasks 1 and 2 (MEASURED 2026-11-12 at `c773636`, `make check`, rc=0): 812 passed. Tasks 3 and 4 add no tests, so the count stays 812.
+- Baseline at this revision, after Tasks 1 and 2 (MEASURED 2026-11-12 at `c773636`, `make check`, rc=0): 812 passed. Re-measured by the audit at `566fb90` (`make check`, rc=0, "812 passed"). Tasks 3 and 4 add no tests, so the count stays 812.
 
 ## Revision 2026-11-12: owner note
 
-The owner's note on this run: "remove those other projects in docs/ai". The first version of this plan listed the old design records that name other projects as out of scope; that item is now in scope as Task 4. Assumption: "other projects" means the owner's other repositories named in `docs/ai/` (two that also appear in the fixture captures, two that do not). The repositories this workflow is published with (hermes-harness, chain, agent-habits-kit), the tools fleet uses (herdr, agentify, claude, codex) and the GitHub login stay.
+The owner's note on this run: "remove those other projects in docs/ai". The first version of this plan listed the old design records that name other projects as out of scope; that item is now in scope as Task 4. Assumption: "other projects" means the owner's other repositories named in `docs/ai/`: three names, one of which also appears in the fixture captures (`project-d` there) and two that do not (MEASURED during the audit: of the seven table rows built in Task 4 Step 1, `git grep -ciF` over `docs/ai` is non-zero for exactly three). The repositories this workflow is published with (hermes-harness, chain, agent-habits-kit), the tools fleet uses (herdr, agentify, claude, codex) and the GitHub login stay.
 
 Status at this revision (MEASURED, `git log --oneline main..HEAD`):
 
@@ -327,10 +327,13 @@ Save as `/tmp/runbook-check.sh` (scratch):
 ```bash
 set -u; f=docs/runbook.md; bad=0
 # Every runnable command naming the owner's fixture repo goes through the variable.
-grep -nE '^\s+.*--repo FibonAdithya/fleet-fixture' "$f" && { echo "HARDCODED SLUG IN COMMAND"; bad=1; }
+# Matches both `--repo FibonAdithya/fleet-fixture` (line 394) and `--repo FibonAdithya/fleet` (line 354).
+grep -nE '^\s+.*--repo FibonAdithya/' "$f" && { echo "HARDCODED SLUG IN COMMAND"; bad=1; }
 # `FLEET_FIXTURE_REPO=owner/name` is already on line 10; require the new forms.
 for s in 'FLEET_FIXTURE_REPO=<you>/fleet-fixture' '${FLEET_FIXTURE_REPO:?' 'FLEET_FIXTURE_CLONE' '[repo]' \
   'gh repo set-default <you>/fleet-fixture' 'README.md#trying-it-on-the-demo-target' \
+  'gh secret set CLAUDE_CODE_AUTH_TOKEN --repo <you>/fleet' 'your fork of this repository' \
+  'a fork needs them created' \
   '## Verified live against `FibonAdithya/fleet-fixture`'; do
   grep -qF -- "$s" "$f" || { echo "MISSING: $s"; bad=1; }; done
 # Headings unchanged (anchors are cited elsewhere).
@@ -339,13 +342,13 @@ exit $bad
 ```
 
 Run: `bash /tmp/runbook-check.sh; echo rc=$?`
-Expected now: non-zero, with `HARDCODED SLUG IN COMMAND` (line 394) and `MISSING:` lines.
+Expected now: non-zero, with `HARDCODED SLUG IN COMMAND` (lines 354 and 394) and `MISSING:` lines. (The audit ran the earlier version of this script at `566fb90`: rc=1, line 394 flagged, six `MISSING:` lines. That version's regex ended in `fleet-fixture`, so it did not see line 354 and passed with the `gh secret set` edit skipped; the regex and the three extra strings above close that gap.)
 
 - [ ] **Step 2: Edit `docs/runbook.md`**
 
 - "Seeding or resetting the fixture backlog": open with a short paragraph: `FibonAdithya/fleet-fixture` is the owner's instance; a reader works on their own fork (see `README.md#trying-it-on-the-demo-target`), sets `FLEET_FIXTURE_REPO=<you>/fleet-fixture` for the seed and reset scripts and `FLEET_FIXTURE_CLONE` for `reset.sh`'s clone path (default `$HOME/TIG/fleet-fixture`), sets `[repo] slug` in the fork's `fleet.toml`, and runs `gh repo set-default <you>/fleet-fixture` in the fork's checkout (a `gh repo fork --clone` checkout defaults to the parent, and the reset commands below pass no `--repo`). Paths like `~/TIG/fleet` and `~/TIG/fleet-fixture` in the commands below are the owner's checkout locations; substitute yours. Change the command to `cd ~/TIG/fleet && FLEET_FIXTURE_REPO=<you>/fleet-fixture ./fixtures/seed/seed_issues.sh`.
 - "Resetting after a graded run" (line ~394): `gh issue list --repo FibonAdithya/fleet-fixture ...` → `gh issue list --repo "${FLEET_FIXTURE_REPO:?set it to <you>/fleet-fixture}" ...`. The `:?` form is required: with the variable unset, a bare `"$FLEET_FIXTURE_REPO"` passes an empty `--repo` and the command's output overwrites the committed `fixtures/ledger/issues.json`.
-- "Workflows on this repository" (line ~354): `gh secret set CLAUDE_CODE_AUTH_TOKEN --repo FibonAdithya/fleet` → `--repo <you>/fleet`, with "your fork of this repository" in the sentence before. Line ~370: keep that the three labels exist on `FibonAdithya/fleet`, and add that a fork needs them created.
+- "Workflows on this repository" (line ~354): `gh secret set CLAUDE_CODE_AUTH_TOKEN --repo FibonAdithya/fleet` → `--repo <you>/fleet`, with "your fork of this repository" in the sentence before. Line ~370: keep that the three labels exist on `FibonAdithya/fleet`, and add a sentence containing the words "a fork needs them created" (the Step 1 check greps for that phrase).
 - Leave unchanged: the heading and table of "Verified live against `FibonAdithya/fleet-fixture`", and every other record of a past run.
 
 - [ ] **Step 3: Run the runbook checks, the guard and the docs test**
@@ -379,7 +382,7 @@ git commit -m "docs(runbook): the fixture repo and clone are the reader's own"
 
 This plan does not list the names being removed, for the reason Task 1 Step 4 gives. The table is derived by command and kept outside the repository.
 
-Placeholders: a name that the fixtures already replaced gets the same placeholder here, so `project-d` in `docs/ai/` and in `fixtures/` is the same project. The fixtures use `project-a` to `project-g` (MEASURED: `git grep -ohE 'project-[a-z]\b' -- fixtures tests | sort -u`). Names that occur only in `docs/ai/` get `project-h` onward.
+Placeholders: a name that the fixtures already replaced gets the same placeholder here, so `project-d` in `docs/ai/` and in `fixtures/` is the same project (it is the only fixture name that occurs in `docs/ai/`; see Step 1). The fixtures use `project-a` to `project-g` (MEASURED: `git grep -ohE 'project-[a-z]\b' -- fixtures tests | sort -u`). Names that occur only in `docs/ai/` get `project-h` onward.
 
 - [ ] **Step 1: Build the replacement table (scratch, not committed)**
 
@@ -391,7 +394,7 @@ paste <(git show a103d55^:fixtures/herdr/workspace-list.json | grep -oE '"label"
   | awk -F'\t' '$2 ~ /^project-/' | sort -u > /tmp/docs-ai-names.tsv
 ```
 
-Expected: 5 rows, placeholders `project-a` to `project-e` (MEASURED while writing this revision). Two of them occur in `docs/ai/`: `project-d` and `project-b`. The fixtures' `project-f` and `project-g` names do not occur in `docs/ai/` (MEASURED: `git grep -c` for each, rc=1), so they need no row.
+Expected: 5 rows, placeholders `project-a` to `project-e` (MEASURED while writing this revision; re-run by the audit, 5 rows). Only one of them occurs in `docs/ai/`: `project-d` (MEASURED during the audit: `git grep -ciF` for each `find` value over `docs/ai`; the other four give no hits in either case). The `project-b` name occurs only in `src/` and `tests/` comments, which are out of scope. The other four rows stay in the table anyway: they cost nothing and the case-insensitive check then guards against them. The fixtures' `project-f` and `project-g` names do not occur in `docs/ai/` (MEASURED: `git grep -c` for each, rc=1), so they need no row.
 
 2. Names that occur only in `docs/ai/`: the hyphenated tokens starting with `tig-` that are not the two host names.
 
@@ -400,7 +403,7 @@ git grep -ohE '\btig-[a-z0-9-]+' -- docs/ai | sort -u | grep -vxE 'tig-server|ti
   | awk '{printf "%s\tproject-%c\n", $0, 103+NR}' >> /tmp/docs-ai-names.tsv
 ```
 
-Expected: 2 rows, `project-h` and `project-i` (`103+NR` is `h`, `i`). They are the slow-build monorepo (agent-fleet design, non-goals and "Not now" list; fixture-harness design, sizing paragraph and non-goals) and the repository that holds the companion workflow document (agent-fleet design, header).
+Expected: 2 rows, `project-h` and `project-i` (`103+NR` is `h`, `i`, in `sort -u` order). `project-h` is the repository that holds the companion workflow document (agent-fleet design, header, one line); `project-i` is the slow-build monorepo (agent-fleet design, non-goals and "Not now" list; fixture-harness design, sizing paragraph and non-goals). MEASURED during the audit by running both commands and reading the matched lines.
 
 3. Check the table: `cat /tmp/docs-ai-names.tsv; grep -c . /tmp/docs-ai-names.tsv` gives 7 rows; no `find` value is `fleet`, `fleet-fixture`, a host name, or one of the published repositories in the revision note; no `find` value is a substring of another (substitution order would then matter).
 
@@ -461,7 +464,7 @@ Then read every changed line (`git diff -U0 -- docs/ai`) and fix grammar the sub
 
 Append one paragraph:
 
-> On 2026-11-12 the names of the owner's other projects were replaced in these files with placeholders. `project-a` to `project-e` are the same placeholders the scrubbed captures under `fixtures/herdr/` use for the same projects; `project-h` and `project-i` occur only here. Host names were kept. Git history still has the original text.
+> On 2026-11-12 the names of the owner's other projects were replaced in these files with placeholders. `project-d` is the same placeholder the scrubbed captures under `fixtures/herdr/` use for the same project; `project-h` and `project-i` occur only here. Host names were kept. Git history still has the original text.
 
 - [ ] **Step 5: Run the check, the docs tests and the gate**
 
@@ -479,8 +482,8 @@ git add docs/ai/specs/2026-08-10-agent-fleet-design.md docs/ai/specs/2026-08-10-
   docs/ai/plans/2026-08-10-fixture-harness-m0-m1.md docs/ai/plans/2026-08-18-m3-daemon.md docs/ai/README.md
 git commit -m "docs(ai): replace other projects' names with placeholders
 
-Same placeholders as the scrubbed fixtures where the project is the same
-one (project-a..e); project-h and project-i for names only in docs/ai.
+Same placeholder as the scrubbed fixtures where the project is the same
+one (project-d); project-h and project-i for names only in docs/ai.
 Host names kept. Text substitution only, one changed line per hit."
 ```
 
