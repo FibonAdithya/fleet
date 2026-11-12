@@ -1,6 +1,6 @@
 # Captured real fixtures
 
-Raw output from real tools, checked in so M2's `decide()` can be tested against
+Output from real tools (one file scrubbed; see the table), checked in so M2's `decide()` can be tested against
 what GitHub actually returns rather than only against `FakeGh`. Four of the
 defects found in M0–M1 were fake/real divergences (see `docs/m2-inputs.md` §6);
 these files are what a parity test reads.
@@ -8,7 +8,7 @@ these files are what a parity test reads.
 | File | Captured with |
 |---|---|
 | `issues.json` | `gh issue list --repo FibonAdithya/fleet-fixture --state all --limit 200 --json assignees,body,labels,number,state,title` |
-| `herdr-snapshot.json` | `herdr` CLI snapshot API, unmodified |
+| `herdr-snapshot.json` | `herdr` CLI snapshot API; scrubbed 2026-11-12 (home directory, other projects' names, branches, labels and terminal titles replaced; structure unchanged) |
 | `issue-comments.json` | `gh issue view 12 --repo FibonAdithya/fleet-fixture --json number,title,body,labels,state,assignees,comments` |
 
 ## Read `issues.json` with these caveats

@@ -101,8 +101,8 @@ def test_the_captured_transcript_prices_without_error():
 
 
 def test_transcript_path_finds_a_session_by_uuid(tmp_path):
-    (tmp_path / "-home-user-proj").mkdir()
-    target = tmp_path / "-home-user-proj" / "abc-123.jsonl"
+    (tmp_path / "-home-u-proj").mkdir()
+    target = tmp_path / "-home-u-proj" / "abc-123.jsonl"
     target.write_text("")
     assert transcript_path("abc-123", tmp_path) == target
 
@@ -194,7 +194,7 @@ def _session(root: Path, sid: str, parent_lines: list[str], **children: list[str
     the two-level shape measured over 1,204 local transcripts, where 990 of
     them (82%) sit at the deeper level.
     """
-    project = root / "-home-user-proj"
+    project = root / "-home-u-proj"
     project.mkdir(parents=True, exist_ok=True)
     (project / f"{sid}.jsonl").write_text("\n".join(parent_lines) + "\n")
     if children:

@@ -11,11 +11,15 @@
 #     Capture the ledger BEFORE anything below runs, or the snapshot records a
 #     state no live run produces:
 #
-#         gh issue list --repo FibonAdithya/fleet-fixture --state all \
+#         gh issue list --repo "${FLEET_FIXTURE_REPO:?set it to <you>/fleet-fixture}" --state all \
 #           --limit 200 --json assignees,body,labels,number,state,title \
 #           > fixtures/ledger/issues.json
 #
-# This script does not do that capture for you.
+# This script does not do that capture for you. The capture line requires
+# FLEET_FIXTURE_REPO while this script defaults REPO to the owner's repository:
+# a capture pasted against the wrong repository silently records the wrong
+# ledger, whereas this script names $REPO in its confirmation prompt before it
+# touches anything.
 set -euo pipefail
 
 REPO="${FLEET_FIXTURE_REPO:-FibonAdithya/fleet-fixture}"

@@ -2,7 +2,19 @@
 
 ## Seeding or resetting the fixture backlog
 
-    cd ~/TIG/fleet && ./fixtures/seed/seed_issues.sh
+`FibonAdithya/fleet-fixture` is the owner's instance. A reader works on their own
+fork (see [the README](../README.md#trying-it-on-the-demo-target)): run
+`export FLEET_FIXTURE_REPO=<you>/fleet-fixture` in your shell for the seed and
+reset scripts, set
+`FLEET_FIXTURE_CLONE` for `fixtures/seed/reset.sh`'s clone path (default
+`$HOME/TIG/fleet-fixture`), set `[repo] slug` in the fork's `fleet.toml`, and run
+`gh repo set-default <you>/fleet-fixture` in the fork's checkout. A
+`gh repo fork --clone` checkout defaults to the parent repository, and the reset
+commands below pass no `--repo`. Paths like `~/TIG/fleet` and
+`~/TIG/fleet-fixture` in the commands below are the owner's checkout locations;
+substitute yours.
+
+    cd ~/TIG/fleet && FLEET_FIXTURE_REPO=<you>/fleet-fixture ./fixtures/seed/seed_issues.sh
 
 Creates the full label vocabulary first, then the eleven issues. Idempotent both
 ways — an existing label is left alone (colour included) and an existing title is
@@ -349,14 +361,15 @@ in `.agentify.toml`) and all unable to push to a branch:
   review every pull request with a model: one for code, one for documentation
   drift. Each job's token has `pull-requests: write` and nothing more, so a
   wrong review costs a comment and never a commit. Both read `AGENTS.md`
-  first. They need one repository secret, a Claude subscription token:
+  first. They need one repository secret, a Claude subscription token. On
+  your fork of this repository, set it with:
 
-      gh secret set CLAUDE_CODE_AUTH_TOKEN --repo FibonAdithya/fleet
+      gh secret set CLAUDE_CODE_AUTH_TOKEN --repo <you>/fleet
 
   Until it is set, both jobs fail at the model step and the PR is otherwise
   unaffected; `.github/workflows/ci.yml` is the check a merge waits on.
-  Nothing is enforced server-side: branch protection is unavailable on
-  this private repository's plan.
+  Nothing is enforced server-side: no branch protection rule is
+  configured.
 - `.github/workflows/notify.yml` assigns the owner to any issue opened with
   the `agent-reported` or `auto-bug` label. GitHub does not notify an account
   about its own token's actions, so an issue an agent files with the owner's
@@ -370,7 +383,8 @@ The three labels (`agent-reported`, `auto-bug`, `keep-branch`) exist on
 `FibonAdithya/fleet`; `gh issue create --label X` fails when `X` does not,
 so a fresh repository needs them created first, as
 `fixtures/seed/seed_issues.sh` does for the fixture repository's own
-vocabulary.
+vocabulary. The labels do not carry over from
+`FibonAdithya/fleet`, so a fork needs them created.
 
 ## Known warts
 
@@ -391,7 +405,7 @@ Capture the ledger **before** anything below runs, or the snapshot records a
 state no live run produces:
 
     cd ~/TIG/fleet
-    gh issue list --repo FibonAdithya/fleet-fixture --state all --limit 200 \
+    gh issue list --repo "${FLEET_FIXTURE_REPO:?set it to <you>/fleet-fixture}" --state all --limit 200 \
       --json assignees,body,labels,number,state,title > fixtures/ledger/issues.json
 
 Then reset:
