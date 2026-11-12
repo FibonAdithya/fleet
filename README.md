@@ -67,7 +67,18 @@ repository, where you run `uv sync --locked --dev` once) and the fork checkout
 `uv run --project <path-to-fleet-checkout> fleet ...`. It finds `fleet.toml` by
 searching upward from the current directory, so it acts on the fork.
 
-The demo target is `FibonAdithya/fleet-fixture`. Fork it with every branch,
+The demo target is `FibonAdithya/fleet-fixture`, and it must be public for the
+fork step to work: GitHub lets only users with access to a private repository
+fork it. When this section was written the repository was still private, and
+its owner has to check its history for anything that should not be published
+before making it public. Check its current visibility first:
+
+    gh repo view FibonAdithya/fleet-fixture --json visibility
+
+If that prints `PRIVATE`, or fails because you have no access, the fork step
+below fails too.
+
+Fork it with every branch,
 because fleet branches from `origin/integration` and the web UI's default fork
 copies only `main`. `gh repo fork` without `--default-branch-only` copies all
 branches. Run these in the directory where you want the fork checkout to appear
