@@ -368,8 +368,8 @@ in `.agentify.toml`) and all unable to push to a branch:
 
   Until it is set, both jobs fail at the model step and the PR is otherwise
   unaffected; `.github/workflows/ci.yml` is the check a merge waits on.
-  Nothing is enforced server-side: branch protection is unavailable on
-  this private repository's plan.
+  Nothing is enforced server-side: no branch protection rule is
+  configured.
 - `.github/workflows/notify.yml` assigns the owner to any issue opened with
   the `agent-reported` or `auto-bug` label. GitHub does not notify an account
   about its own token's actions, so an issue an agent files with the owner's

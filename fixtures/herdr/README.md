@@ -132,7 +132,7 @@ worktree path. **Task 11 closed that gate item by measurement** -- see
 # `agent-fleet-worktree.json`
 
 The gate item above, closed. (Scrubbed on 2026-11-12: the home directory in
-the paths was replaced with `/home/u`.) One verbatim agent record out of `herdr api
+the paths was replaced with `/home/u`.) One agent record, otherwise verbatim, out of `herdr api
 snapshot`, wrapped in the same `result.snapshot.agents` envelope so
 `parse_snapshot` can read it unchanged.
 
