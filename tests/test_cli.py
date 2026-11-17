@@ -10,7 +10,9 @@ import pytest
 from click.testing import CliRunner
 
 from conftest import FIXTURE_POLICY, git
+from fleet import chain_executor
 from fleet.cli import ReadOnlyGh, _context, _git_facts, main
+from fleet.composite_executor import CompositeExecutor
 from fleet.config import load_config
 from fleet.daemon import Daemon
 from fleet.gh import FakeGh
@@ -219,6 +221,12 @@ def _fake_backends(monkeypatch, cfg, gh, herdr):
     monkeypatch.setattr("fleet.cli.RealGh", lambda slug: gh)
     monkeypatch.setattr("fleet.cli.RealHerdr", lambda **kwargs: herdr)
     monkeypatch.setattr("fleet.cli._gh_login", lambda: "FibonAdithya")
+    # The fixture policy routes build and bug to chain, so `fleet run` builds a
+    # ChainExecutor. Answered as a `chain` that is not installed, so no test
+    # runs a real one found on PATH.
+    monkeypatch.setattr(
+        "fleet.chain_executor.run_cli", lambda argv: (127, "", f"{argv[0]}: not installed")
+    )
 
 
 def _run_id_of(output: str) -> str:
@@ -354,3 +362,36 @@ def test_discover_refuses_an_area_the_target_repo_does_not_have(env, cfg):
     )
     assert result.exit_code == 2
     assert "not an area" in result.output and "allocator" in result.output
+
+
+def test_run_hands_the_daemon_a_composite_with_chain(monkeypatch, tmp_path):
+    """`fleet run` is the one command that builds a ChainExecutor, and it must
+    build it with the real `run_cli` looked up at call time (so the stand-in
+    from `_fake_backends` is what it holds) and herdr's failures deque."""
+    cfg = _run_cfg(tmp_path)
+    _fake_backends(monkeypatch, cfg, FakeGh(), FakeHerdr(worktree_root=cfg.worktree_root))
+    seen = {}
+
+    def fake_tick(self, now):
+        seen["executor"] = self.executor
+        self.snapshot = FleetSnapshot(
+            run_id=self.run_id,
+            tick=1,
+            at=now.isoformat(),
+            rows=(),
+            spent_usd=0.0,
+            fleet_usd=self.policy.fleet_usd,
+            free_slots=self.policy.slots,
+            held_areas=(),
+        )
+        return self.snapshot
+
+    monkeypatch.setattr(Daemon, "tick", fake_tick)
+    result = CliRunner().invoke(main, ["run", "--once"])
+    assert result.exit_code == 0, result.output
+    executor = seen["executor"]
+    assert isinstance(executor, CompositeExecutor)
+    assert executor.chain is not None
+    assert executor.chain.run_cli is chain_executor.run_cli
+    assert executor.chain.run_cli(["chain", "status"])[0] == 127
+    assert executor.chain.failures is executor.herdr.failures

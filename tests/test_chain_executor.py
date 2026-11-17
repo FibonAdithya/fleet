@@ -5,6 +5,7 @@ import dataclasses
 import json
 import os
 import re
+import sys
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1411,3 +1412,39 @@ def test_closing_comment_not_reposted_after_crash_before_save(ccfg):
     assert len(_comments(gh)) == 1
     assert _comments(gh)[0].splitlines()[-1] == "<!-- fleet:chain-outcome run=r-c -->"
     assert gh.get_issue(5)["state"] == "CLOSED"
+
+
+# --- the real run_cli --------------------------------------------------------------
+
+
+def test_run_cli_returns_code_stdout_and_stderr():
+    argv = [
+        sys.executable,
+        "-c",
+        "import sys; print('run-1'); print('warn', file=sys.stderr); sys.exit(3)",
+    ]
+    code, out, err = chain_executor.run_cli(argv)
+    assert (code, out, err) == (3, "run-1\n", "warn\n")
+
+
+def test_run_cli_timeout_is_a_failed_call_not_an_exception():
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    code, out, err = chain_executor.run_cli(argv, timeout=0.2)
+    assert code != 0
+    assert out == ""
+    assert "timed out after 0.2" in err
+
+
+def test_run_cli_bounds_every_call():
+    """The bound the daemon uses is the module constant, and it is finite: a
+    wedged `chain status` would otherwise hang every tick that follows."""
+    assert chain_executor.CLI_TIMEOUT_SECONDS == 120
+
+
+def test_a_missing_binary_through_the_real_run_cli_is_recorded(ccfg, tmp_path):
+    gh = FakeGh()
+    chain = ChainExecutor(
+        ccfg, gh, str(tmp_path / "no-such-chain"), chain_executor.run_cli, tmp_path / "s.json"
+    )
+    assert chain.agents() == []
+    assert any("cannot run" in line for line in chain.failures)

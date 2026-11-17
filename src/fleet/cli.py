@@ -11,12 +11,14 @@ from pathlib import Path
 
 import click
 
-from fleet import git, statesocket
+from fleet import chain_executor, git, statesocket
 from fleet import policy as policy_module
 from fleet import runlog as runlog_module
 from fleet import status as status_module
+from fleet.chain_executor import ChainExecutor
 from fleet.commands import do_block, do_discover, do_escalate, do_handoff, do_verdict
-from fleet.config import load_config
+from fleet.composite_executor import CompositeExecutor
+from fleet.config import CHAIN_KIND, load_config
 from fleet.daemon import Daemon, stop_on_signals
 from fleet.decide import decide
 from fleet.gh import RealGh
@@ -390,7 +392,11 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
         routing={role: (kind, model) for role, kind, model in policy.agents},
     )
     owner = _gh_login()
-    executor = HerdrExecutor(herdr, gh, cfg, owner=owner)
+    # Looked up here, not bound as a default: a test replaces the module's
+    # `run_cli` so that no test runs a real `chain` found on PATH.
+    executor = build_executor(
+        cfg, policy, gh, HerdrExecutor(herdr, gh, cfg, owner=owner), chain_executor.run_cli
+    )
     run_id, origin = resolve_run_id(cfg.runlog_path, run_id, new_run, datetime.now(UTC))
     log = RunLog(cfg.runlog_path, run_id=run_id)
     daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id)
@@ -424,6 +430,30 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
     finally:
         stop.set()
         thread.join(timeout=2)
+
+
+def build_executor(cfg, policy, gh, herdr: HerdrExecutor, run_cli) -> CompositeExecutor:
+    """The daemon's executor: herdr's, plus a ChainExecutor when any route
+    names a role of kind `chain`.
+
+    Only `fleet run` calls this. `ChainExecutor.agents()` writes a finished
+    run's packets to the ledger, so it must never be built on a read-only path
+    (`fleet plan`, `fleet status`, the simulator).
+
+    The task map sits next to the run log, in the daemon's state directory:
+    one map per target repository, as the run log is.
+    """
+    routed = {role for _, stages in policy.routes for role in stages}
+    chain = None
+    if any(kind == CHAIN_KIND for role, kind, _ in policy.agents if role in routed):
+        chain = ChainExecutor(
+            cfg,
+            gh,
+            cfg.agents[CHAIN_KIND].command,
+            run_cli,
+            cfg.runlog_path.parent / "chain-runs.json",
+        )
+    return CompositeExecutor(herdr, chain, policy)
 
 
 @main.command()

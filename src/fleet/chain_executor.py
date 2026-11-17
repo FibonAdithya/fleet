@@ -25,6 +25,7 @@ import logging
 import math
 import os
 import re
+import subprocess
 import tempfile
 import time
 from collections import deque
@@ -68,6 +69,13 @@ _FAILURE_LIMIT = 64
 #: What `run_cli` answers when the binary cannot be executed at all.
 _EXEC_FAILED = 127
 
+#: Seconds one chain CLI call (`status`, `abort`, `start`) may take. The calls
+#: run inside the daemon's tick, so an unbounded one that wedges stops every
+#: tick after it, herdr's agents included.
+CLI_TIMEOUT_SECONDS = 120
+#: What `run_cli` answers for a call that timed out; coreutils `timeout`'s code.
+_TIMED_OUT = 124
+
 #: Seconds past `paused_until` a run may still read as paused. chain resumes a
 #: paused run on its own next tick after `paused_until`; a run still paused well
 #: after that is stuck, and reporting it paused would hold its slot all night
@@ -101,6 +109,24 @@ _SHA = re.compile(r"[0-9a-f]{7,40}")
 #: The hidden last line of a not-reproduced or duplicate closing comment, so
 #: a retry can tell that its comment already landed.
 _OUTCOME_MARKER = "<!-- fleet:chain-outcome run={run_id} -->"
+
+
+def run_cli(argv: list[str], timeout: float = CLI_TIMEOUT_SECONDS) -> tuple[int, str, str]:
+    """Run one chain CLI call: (exit code, stdout, stderr).
+
+    A call that runs past `timeout` is killed and answered as a failed call,
+    never raised: a timed-out `status` then keeps the last good read, and a
+    timed-out `start` is a failed start. A start that timed out after chain
+    created its run leaves that run unmapped: fleet never saw its id, and
+    `chain status` lists it under its `fleet_task` for a human to abort. A
+    binary that cannot be executed still raises OSError; `ChainExecutor._call`
+    answers that one.
+    """
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return (_TIMED_OUT, "", f"{argv[0]} {' '.join(argv[1:2])} timed out after {timeout}s")
+    return (done.returncode, done.stdout, done.stderr)
 
 
 class ChainStateError(Exception):
