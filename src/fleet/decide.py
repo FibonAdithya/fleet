@@ -32,6 +32,7 @@ from fleet.model import (
     Retire,
     Task,
     Unblock,
+    effective_caps,
 )
 
 # Intents whose expansion stops the agent, so that agent's cost is final.
@@ -183,9 +184,11 @@ def _observe(prev: FleetState, agents: list[AgentState], now: datetime) -> dict[
 def _fail(task: Task, reason: str, policy: Policy) -> Intent:
     """One more attempt, or a human. The cap is checked before the release, not
     after: releasing first and counting later is the shape that produces a third
-    attempt, which is one of the four hard fails."""
+    attempt, which is one of the four hard fails. The cap is the effective one:
+    an owner's answer raises it (`model.effective_caps`)."""
     attempt = task.attempts + 1
-    if attempt > policy.max_attempts:
+    max_attempts, _, _ = effective_caps(policy, task)
+    if attempt > max_attempts:
         return Escalate(task=task.number, reason="attempts_exhausted")
     return Release(task=task.number, reason=reason, attempt=attempt)
 
@@ -374,7 +377,8 @@ def _reap(
             # packet while an agent is actively working: a stale packet is a
             # fact about issue-comment history, not about what the current
             # agent is doing right now.
-            if task.rebases + 1 > policy.max_rebases:
+            _, _, max_rebases = effective_caps(policy, task)
+            if task.rebases + 1 > max_rebases:
                 intents.append(Escalate(task=task.number, reason="rebases_exhausted"))
             else:
                 intents.append(Rebase(task=task.number, rebase=task.rebases + 1))

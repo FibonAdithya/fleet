@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from fleet.expand import expand
@@ -100,14 +102,15 @@ def test_release_stops_the_agent_unassigns_and_writes_the_attempt():
     assert "fleet:attempt-2" in add
 
 
-def test_release_never_emits_an_attempt_label_beyond_the_cap():
-    """labels.static_vocabulary is sized from max_attempts, so a label past the
-    cap is one gh has never heard of -- and gh refuses an unknown label and
-    changes nothing at all. Drift releases are not capped, so this arrives."""
-    effects = expand(Release(task=1, reason="no_agent", attempt=3), POLICY)
-    add = labels_of(effects)[0].add
-    assert "fleet:attempt-3" not in add
-    assert "fleet:attempt-2" in add
+def test_release_attempt_label_not_clamped():
+    """An answered task's cap is max_attempts * (1 + answers), past the static
+    vocabulary. A clamp would write attempt-2 for attempt 3, `task.attempts`
+    would stay 2, and the task would re-run attempt 3 forever without the cap
+    ever binding. HerdrExecutor.apply creates the label instead."""
+    policy = dataclasses.replace(POLICY, max_attempts=2)
+    add = labels_of(expand(Release(task=1, reason="x", attempt=3), policy))[0].add
+    assert "fleet:attempt-3" in add
+    assert "fleet:attempt-2" not in add
 
 
 def test_a_zero_attempt_raises_rather_than_being_rounded_up():
@@ -132,18 +135,14 @@ def test_rebase_lands_in_ready_with_its_counter_and_no_new_attempt():
     assert effects[0] == StopAgent(task=4)
 
 
-def test_rebase_never_emits_a_counter_label_beyond_the_cap():
-    """Clamped for the same reason `_attempt_label` is: labels.static_vocabulary
-    is sized from `max_rebases`, so `fleet:rebase-(cap+1)` is a label gh has
-    never heard of, and gh refuses an unknown label and changes nothing at all.
-    decide() never emits a Rebase past the cap -- it escalates instead -- but
-    expand() has no way to know that about its caller, and a rebase number
-    handed straight to `labels.rebase_label` without clamping would raise
-    ValueError past `max_rebases` labels in the static vocabulary."""
-    effects = expand(Rebase(task=4, rebase=5), POLICY)
-    add = [e for e in effects if isinstance(e, SetLabels)][0].add
-    assert not any(label.startswith("fleet:rebase-") and label != "fleet:rebase-1" for label in add)
-    assert "fleet:rebase-1" in add
+def test_rebase_label_not_clamped():
+    """The rebase counter is monotonic for the same reason the attempt counter
+    is: with the cap raised by answers, a clamp writes rebase-1 for Rebase(2),
+    `task.rebases` stays 1, and the task rebases forever without escalating."""
+    policy = dataclasses.replace(POLICY, max_rebases=1)
+    add = labels_of(expand(Rebase(task=4, rebase=2), policy))[0].add
+    assert "fleet:rebase-2" in add
+    assert "fleet:rebase-1" not in add
 
 
 def test_escalate_reaches_human_and_stops_the_agent():

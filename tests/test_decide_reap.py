@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 from datetime import UTC, datetime, timedelta
 
-from fleet.decide import decide
+from fleet.decide import _advance, decide
 from fleet.model import (
     Advance,
     AgentState,
@@ -180,6 +180,45 @@ def test_a_second_failure_escalates_rather_than_making_a_third_attempt():
     intents, _ = decide(FleetState(), [claimed(attempts=2)], POLICY, agents, T0)
     assert Escalate(task=1, reason="attempts_exhausted") in intents
     assert only(intents, Release) == []
+
+
+def test_answered_task_gets_a_third_attempt():
+    """An owner answer raises the attempt cap to max_attempts * (1 + answers).
+    Catches `_fail` still comparing against the bare policy cap, which escalates
+    an answered task straight back to the owner without trying the answer."""
+    agents = [AgentState(task=1, status="dirty", change_seq=10)]
+    task = claimed(attempts=2, answers=1)
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Release(task=1, reason="dirty_exit", attempt=3) in intents
+    assert only(intents, Escalate) == []
+
+
+def test_answered_task_attempt_at_new_cap_is_released():
+    """The boundary of the raised cap: attempt 4 of 4 is allowed. Catches `>=`
+    for `>`, and `max_attempts + answers` (cap 3) for `max_attempts * (1 + answers)`."""
+    agents = [AgentState(task=1, status="dirty", change_seq=10)]
+    task = claimed(attempts=3, answers=1)
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Release(task=1, reason="dirty_exit", attempt=4) in intents
+    assert only(intents, Escalate) == []
+
+
+def test_answered_task_escalates_after_its_new_allowance():
+    """The raised cap still binds. Catches an answer that lifts the cap entirely."""
+    agents = [AgentState(task=1, status="dirty", change_seq=10)]
+    task = claimed(attempts=4, answers=1)
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Escalate(task=1, reason="attempts_exhausted") in intents
+    assert only(intents, Release) == []
+
+
+def test_old_attempt_packet_does_not_advance_after_answer():
+    """Regression guard: a packet is bound to the task's current attempt, not to
+    the cap. An answered task on attempt 3 must not advance on attempt 1's
+    packet. Catches a change that compares the packet's attempt to the cap."""
+    stale = {"to": "review", "attempt": 1, "from": {"role": "implementer"}}
+    task = claimed(attempts=3, answers=1, packet=stale)
+    assert _advance(task) == []
 
 
 def test_a_claimed_task_with_no_live_agent_is_released_even_at_the_attempt_cap():
@@ -577,6 +616,25 @@ def test_a_handback_past_the_cap_escalates():
     forever, burning the fleet's budget on one task all night."""
     task = claimed(number=4, state="claimed", attempts=1, rebases=1, packet=HANDBACK)
     intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert intents == [Escalate(task=4, reason="rebases_exhausted")]
+
+
+def test_answers_raise_rebase_cap():
+    """Two answers on a one-rebase cap allow rebase 3. Catches the rebase cap
+    ignoring answers, and answers treated as a flag rather than a count."""
+    task = claimed(number=4, state="claimed", attempts=1, rebases=2, answers=2, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert intents == [Rebase(task=4, rebase=3)]
+
+
+def test_answered_rebase_loop_escalates():
+    """The raised rebase cap still ends. With max_rebases=1 and one answer the
+    cap is 2: rebase 2 is allowed, a third handback escalates."""
+    at_one = claimed(number=4, state="claimed", attempts=1, rebases=1, answers=1, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [at_one], POLICY, [], T0)
+    assert intents == [Rebase(task=4, rebase=2)]
+    at_two = claimed(number=4, state="claimed", attempts=1, rebases=2, answers=1, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [at_two], POLICY, [], T0)
     assert intents == [Escalate(task=4, reason="rebases_exhausted")]
 
 

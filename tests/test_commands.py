@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from fleet.commands import ROLE_MAY_HAND_TO, do_block, do_escalate, do_handoff, do_verdict
+from fleet.commands import (
+    ROLE_MAY_HAND_TO,
+    _verdict_target,
+    do_block,
+    do_escalate,
+    do_handoff,
+    do_verdict,
+)
 from fleet.gh import FakeGh, GhError
 from fleet.labels import STATES
 from fleet.packet import parse_latest
@@ -284,6 +291,39 @@ def test_a_second_changes_required_reaches_a_human_rather_than_looping(cfg, in_r
     assert landed == "human"
     assert "fleet:human" in names
     assert "fleet:ready" not in names
+
+
+def test_answers_raise_fix_pass_cap():
+    """One answer on a one-pass cap allows a second fix pass. Catches the
+    fix-pass cap ignoring answers."""
+    assert _verdict_target("changes_required", 1, 1, answers=1) == ("ready", ["fleet:fix-pass-2"])
+
+
+def test_answered_fix_pass_cap_still_ends():
+    """The raised cap still binds: two passes spent on a cap of 1 * (1 + 1)."""
+    assert _verdict_target("changes_required", 2, 1, answers=1) == ("human", [])
+
+
+def test_answered_fix_pass_label_is_ensured(cfg, in_review):
+    """`fleet:fix-pass-2` is outside the static vocabulary when
+    max_fix_passes=1, and gh refuses an unknown label and changes nothing.
+    FakeGh mirrors that. Catches do_verdict passing answers to the target but
+    not creating the label it then writes, and do_verdict not passing answers."""
+    in_review.ensure_label("fleet:answered-1")
+    in_review.add_labels(1, ["fleet:fix-pass-1", "fleet:answered-1"])
+    assert cfg.max_fix_passes == 1
+    _, landed = do_verdict(
+        cfg,
+        in_review,
+        task=1,
+        verdict="changes_required",
+        findings=[{"severity": "must_fix", "detail": "still no test"}],
+        **VERDICT,
+    )
+    names = in_review.get_issue(1)["labels"]
+    assert landed == "ready"
+    assert "fleet:fix-pass-2" in names
+    assert "fleet:fix-pass-2" in in_review.ensured_labels
 
 
 def test_the_verdict_round_trips_through_the_comment(cfg, in_review):

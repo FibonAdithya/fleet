@@ -126,7 +126,9 @@ def do_escalate(
     return _post(cfg, gh, packet, "human")
 
 
-def _verdict_target(verdict: str, fix_passes: int, max_fix_passes: int) -> tuple[str, list[str]]:
+def _verdict_target(
+    verdict: str, fix_passes: int, max_fix_passes: int, answers: int = 0
+) -> tuple[str, list[str]]:
     """Where a verdict sends a task, and which counter label rides along.
 
     Spec §5 ruling 4: approved -> INTEGRATING; `changes_required` -> another
@@ -143,10 +145,13 @@ def _verdict_target(verdict: str, fix_passes: int, max_fix_passes: int) -> tuple
     pass costs no attempt, so CLAIMED here would break the rule this function
     exists to enforce. READY leaves DISPATCH to pick it up with `attempt`
     unchanged and leaves no window where a task is claimed by nobody.
+
+    The cap is `max_fix_passes * (1 + answers)`, the fix-pass third of
+    `model.effective_caps`: an owner's answer buys another allowance.
     """
     if verdict == "approved":
         return "integrating", []
-    if fix_passes >= max_fix_passes:
+    if fix_passes >= max_fix_passes * (1 + answers):
         return "human", []
     return "ready", [labels.fix_pass_label(fix_passes + 1)]
 
@@ -208,7 +213,17 @@ def do_verdict(
     if packet_was_sufficient is not None:
         payload["packet_was_sufficient"] = packet_was_sufficient
     validate(cfg, "verdict", payload)
-    state, extra = _verdict_target(verdict, current.fix_passes, cfg.max_fix_passes)
+    state, extra = _verdict_target(
+        verdict, current.fix_passes, cfg.max_fix_passes, answers=current.answers
+    )
+    # A fix pass past `max_fix_passes` exists only on an answered task, and its
+    # label is outside the seeded vocabulary: gh refuses an unknown label by
+    # failing the whole edit, so create it first. `_move_state` writes it
+    # directly, not through HerdrExecutor.apply, which ensures its own.
+    seeded = {labels.fix_pass_label(n) for n in range(1, cfg.max_fix_passes + 1)}
+    for label in extra:
+        if label not in seeded:
+            gh.ensure_label(label)
     gh.comment(task, render(payload))
     _move_state(gh, task, state, extra)
     return payload, state

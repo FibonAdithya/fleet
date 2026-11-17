@@ -7,6 +7,7 @@ import pytest
 
 from fleet import ledger
 from fleet.gh import FakeGh
+from fleet.labels import static_vocabulary
 
 CAPTURED = Path(__file__).resolve().parents[1] / "fixtures/ledger/issues.json"
 
@@ -215,3 +216,9 @@ def test_answered_label_is_highest_n():
 
 def test_no_answered_label_is_zero():
     assert ledger.read_one(row(labels=["fleet:ready"])).answers == 0
+
+
+def test_answered_label_not_in_static_vocabulary():
+    """The box writes `fleet:answered-N` and creates it when it does; the seed
+    does not. Catches the answer counter added to the up-front label set."""
+    assert not any(label.startswith("fleet:answered-") for label in static_vocabulary())

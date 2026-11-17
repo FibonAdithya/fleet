@@ -12,7 +12,9 @@ import logging
 import re
 from collections import deque
 
+from fleet import labels as labels_module
 from fleet import packet as packet_module
+from fleet import policy as policy_module
 from fleet.config import FleetConfig
 from fleet.gh import GhClient
 from fleet.herdr import AGENT_ABSENT_CODES, Herdr, HerdrError
@@ -126,6 +128,10 @@ class HerdrExecutor:
         #: disagree with it. The bound is what makes a herdr that fails every
         #: removal survivable if a tick ever dies before the drain.
         self.failures: deque[str] = deque(maxlen=_FAILURE_LIMIT)
+        #: The seeded label set, built on first use; see `_ensure_runtime_labels`.
+        self._vocabulary: set[str] | None = None
+        #: Runtime labels this process has already created.
+        self._ensured: set[str] = set()
 
     def agents(self) -> list[AgentState]:
         return self.herdr.agents()
@@ -146,6 +152,7 @@ class HerdrExecutor:
                 # `remove` precisely so this order is safe; reversed, a failure
                 # between the two calls strands the task with no state label at
                 # all, invisible to every label query.
+                self._ensure_runtime_labels(effect.add)
                 self.gh.add_labels(effect.task, list(effect.add))
                 self.gh.remove_labels(effect.task, list(effect.remove))
             elif isinstance(effect, Assign):
@@ -158,6 +165,30 @@ class HerdrExecutor:
                 self._stop(effect.task)
             else:
                 raise ValueError(f"cannot apply {effect!r}")
+
+    def _ensure_runtime_labels(self, names: tuple[str, ...]) -> None:
+        """Create each label outside the seeded vocabulary, once per process.
+
+        An owner's answer raises a task's caps past the policy's
+        (`model.effective_caps`), so `fleet:attempt-3` on a two-attempt policy is
+        a legitimate label the seed never created. gh refuses an unknown label by
+        failing the whole edit and changing nothing, so without this the answered
+        task's release never lands. The vocabulary is built from the same config
+        counters and ownership areas the seed uses, read once; `ensure_label`
+        tolerates a label that already exists, so a restart that ensures one
+        again is harmless.
+        """
+        if self._vocabulary is None:
+            self._vocabulary = labels_module.static_vocabulary(
+                self.cfg.max_attempts,
+                self.cfg.max_fix_passes,
+                self.cfg.max_rebases,
+                policy_module.area_names(self.cfg),
+            )
+        for name in names:
+            if name not in self._vocabulary and name not in self._ensured:
+                self.gh.ensure_label(name)
+                self._ensured.add(name)
 
     def _begin(self, effect: StartAgent) -> None:
         """Start the agent. A herdr failure is recorded, not raised.

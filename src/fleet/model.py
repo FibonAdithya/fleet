@@ -240,6 +240,23 @@ class Policy:
         return frozenset(area for _, area in self.areas)
 
 
+def effective_caps(policy: Policy, task: Task) -> tuple[int, int, int]:
+    """(attempts, fix passes, rebases) this task may spend.
+
+    Each policy cap times `1 + task.answers`: an owner's answer to an escalated
+    task buys it a whole new allowance, not one more try. Multiplied rather
+    than added so the cap still scales with policy -- a fleet.toml that allows
+    three attempts allows three more per answer. The counters themselves never
+    reset, so the cap always binds again.
+    """
+    scale = 1 + task.answers
+    return (
+        policy.max_attempts * scale,
+        policy.max_fix_passes * scale,
+        policy.max_rebases * scale,
+    )
+
+
 # ---------------------------------------------------------------- intents
 
 

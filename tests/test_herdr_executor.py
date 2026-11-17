@@ -565,3 +565,27 @@ def test_unpriced_is_read_fresh_rather_than_cached(cfg):
     assert executor.unpriced() == set()
     herdr.unpriced_models = {"m"}
     assert executor.unpriced() == {"m"}
+
+
+def test_apply_ensures_runtime_labels(cfg):
+    """An answered task's third attempt carries `fleet:attempt-3`, outside the
+    static vocabulary at max_attempts=2. Real gh refuses an unknown label and
+    changes nothing; FakeGh does the same. Catches apply adding a label it never
+    created."""
+    gh = FakeGh()
+    number = _issue(gh)
+    assert cfg.max_attempts == 2
+    _executor(cfg, gh=gh).apply([SetLabels(task=number, add=("fleet:attempt-3",))])
+    assert "fleet:attempt-3" in gh.get_issue(number)["labels"]
+    assert "fleet:attempt-3" in gh.ensured_labels
+
+
+def test_apply_does_not_ensure_static_labels(cfg):
+    """Only runtime labels are created. Catches an apply that calls ensure_label
+    for every label, which costs a gh call per label per tick."""
+    gh = FakeGh()
+    number = _issue(gh)
+    _executor(cfg, gh=gh).apply(
+        [SetLabels(task=number, add=("fleet:claimed", "fleet:attempt-2"), remove=("fleet:ready",))]
+    )
+    assert gh.ensured_labels == set()
