@@ -196,3 +196,22 @@ def test_blocked_on_comes_from_the_packet_not_a_label():
     )
     assert task.blocked_on == 11
     assert ledger.read_one(row(labels=["fleet:blocked"])).blocked_on is None
+
+
+def test_class_build_and_bug_parse():
+    assert ledger.read_one(row(labels=["class:build"])).klass == "build"
+    assert ledger.read_one(row(labels=["class:bug"])).klass == "bug"
+
+
+def test_answered_label_parses_to_count():
+    task = ledger.read_one(row(labels=["fleet:answered-1", "fleet:answered-2"]))
+    assert task.answers == 2
+
+
+def test_answered_label_is_highest_n():
+    """Catches counting labels instead of taking the highest N."""
+    assert ledger.read_one(row(labels=["fleet:answered-3"])).answers == 3
+
+
+def test_no_answered_label_is_zero():
+    assert ledger.read_one(row(labels=["fleet:ready"])).answers == 0

@@ -100,6 +100,7 @@ def read_one(
         attempts=_counter(names, "fleet:attempt-"),
         fix_passes=_counter(names, "fleet:fix-pass-"),
         rebases=_counter(names, "fleet:rebase-"),
+        answers=_counter(names, "fleet:answered-"),
         # gh's assignees are objects; FakeGh has no assignees at all and callers
         # that build rows by hand use bare logins. Accept all three.
         assignee=first.get("login") if isinstance(first, dict) else first,

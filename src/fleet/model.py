@@ -33,6 +33,7 @@ class Task:
     attempts: int = 0
     fix_passes: int = 0
     rebases: int = 0
+    answers: int = 0
     assignee: str | None = None
     is_open: bool = True
     blocked_on: int | None = None
