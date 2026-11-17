@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -114,6 +115,16 @@ def _typed(raw: dict, key: str, kind: type | tuple[type, ...]):
     return value
 
 
+def _finite(raw: dict, key: str) -> float:
+    """`raw[key]` as a finite float. nan and inf are refused: every comparison
+    against nan is False, so a nan spend is never over any ceiling and a nan
+    `paused_until` never ends."""
+    value = float(_typed(raw, key, (int, float)))
+    if not math.isfinite(value):
+        raise ValueError(f"run field {key!r} is {value!r}, not a finite number")
+    return value
+
+
 def _run_of(raw: dict) -> ChainRun:
     task = raw["fleet_task"]
     return ChainRun(
@@ -124,17 +135,17 @@ def _run_of(raw: dict) -> ChainRun:
             else FleetTask(
                 slug=_typed(task, "slug", str),
                 number=_typed(task, "number", int),
-                kind=task["kind"],
+                kind=_kind_of(task),
             )
         ),
         status=_typed(raw, "status", str),
         stage=raw["stage"],
-        run_spent_usd=float(_typed(raw, "run_spent_usd", (int, float))),
+        run_spent_usd=_spend_of(raw),
         created_at=raw["created_at"],
         updated_at=raw["updated_at"],
         progress=_typed(raw, "progress", int),
         output_bytes=_typed(raw, "output_bytes", int),
-        paused_until=raw["paused_until"],
+        paused_until=None if raw["paused_until"] is None else _finite(raw, "paused_until"),
         escalation=raw["escalation"],
         outcome=raw["outcome"],
         verdict=raw["verdict"],
@@ -145,6 +156,20 @@ def _run_of(raw: dict) -> ChainRun:
         head_sha=raw["head_sha"],
         test_command=raw["test_command"],
     )
+
+
+def _kind_of(task: dict) -> str:
+    kind = task["kind"]
+    if kind not in CHAIN_CLASSES:
+        raise ValueError(f"fleet_task kind is {kind!r}, not one of {CHAIN_CLASSES}")
+    return kind
+
+
+def _spend_of(raw: dict) -> float:
+    spent = _finite(raw, "run_spent_usd")
+    if spent < 0:
+        raise ValueError(f"run_spent_usd is {spent!r}, below zero")
+    return spent
 
 
 def parse_status(text: str) -> list[ChainRun]:
