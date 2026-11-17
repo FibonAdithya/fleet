@@ -408,7 +408,11 @@ agent kind `chain`, as in `fixtures/policy/fleet-fixture/docs/agent/task-classes
 
 - `[agents.chain]`: `command` is required (the chain binary); `model_flag` is
   refused. `per_task_usd` is the cost ceiling per chain task. The shipped 40.0
-  is ESTIMATE (unverified); measured chain runs cost $3.31-$18.67.
+  is ESTIMATE (unverified). The range $3.31-$18.67 was measured from chain's
+  run records (`run_spent_usd` in each run.json) on 2026-11-17, as reported in
+  the hermes-harness repository's
+  docs/ai/specs/2026-11-17-fleet-chain-coordination-design.md. Without a
+  `per_task_usd` here, the global `[budget] per_task_usd` is the ceiling.
 - `[chain] default_area`: the area name an adopted `bug` issue is filed under.
   Unset, nothing is adopted. `policy.load` refuses a name that is not an area
   of the ownership map.
@@ -440,9 +444,12 @@ agent kind `chain`, as in `fixtures/policy/fleet-fixture/docs/agent/task-classes
 The executor keeps a task-map file, chain-runs.json, next to the run log: which chain run is
 which task, and which of a finished run's ledger writes have landed, so a
 restart neither loses a live run nor writes an outcome twice. If the file
-exists but cannot be read, `fleet run` stops with `ChainStateError` naming it.
-Fix it by hand or remove it, but check `chain status` first: an empty map would
-orphan live runs that keep spending.
+exists but cannot be read, the error is `ChainStateError` naming it. When a
+route runs chain, `fleet run` stops with it. With no chain route it is only a
+failure line (`no route runs chain, and ...`) and the run continues. Fix the
+file by hand, but check `chain status` first: an empty map would orphan live
+runs that keep spending. The file also holds the outcome records of finished
+runs, so losing it would write every finished run's packets again.
 
 ### How outcomes map
 
@@ -454,13 +461,20 @@ orphan live runs that keep spending.
 | anything else (aborted, ended without an outcome, `waiting`) | the agent reads as dirty; the task is retried within its caps |
 | an outcome fleet cannot record | an escalation written by fleet, naming the run |
 
-An escalation comment starts with the exact line
-`<!-- fleet:escalation reason=<reason> -->`. A run's cost counts toward the
+Two kinds of escalation exist. The allocator's own (stalled,
+attempts_exhausted and the like) start with the exact line
+`<!-- fleet:escalation reason=<reason> -->`. Chain-outcome and fallback
+escalations are written through `commands.do_escalate` as a `fleet.handoff.v1`
+packet to `human`, with no marker line. `fleet.escalation.latest` reads either
+kind. A run's cost counts toward the
 night when its outcome is reaped, not while it runs.
 
 ### Failure lines
 
-These appear in the daemon's failure record and `fleet status`:
+These appear in the daemon's failure record and `fleet status`. The
+lines about one run begin `task <n>: ` (the task number); the text below is what
+follows that prefix. The `no route runs chain` and `chain status` lines have no
+prefix:
 
 - `chain run <id> is <status> but fleet has no record of starting it`: a live run
   for this repository that no task maps to, usually a start that timed out. Its

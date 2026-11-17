@@ -22,8 +22,9 @@ max_fix_passes = 1
 model_flag = "--model"
 args = ["--permission-mode", "acceptEdits"]
 
-# Cost ceiling per chain task, USD. ESTIMATE (unverified): measured chain runs
-# cost $3.31-$18.67.
+# Cost ceiling per chain task, USD. The 40.0 is an ESTIMATE (unverified). The
+# $3.31-$18.67 range was measured from chain's run records (run_spent_usd in
+# each run.json) on 2026-11-17, as reported in the design spec.
 [agents.chain]
 command = "chain"
 per_task_usd = 40.0
