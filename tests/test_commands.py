@@ -485,3 +485,42 @@ def test_chain_may_write_verdict(cfg, in_review):
     )
     assert landed == "integrating"
     assert "fleet:integrating" in in_review.get_issue(1)["labels"]
+
+
+# -- the target's own areas --------------------------------------------------
+
+OWN_AREAS = "# Ownership map\n\n| Glob | Area |\n|---|---|\n| `src/fleet/decide.py` | allocator |\n"
+
+
+@pytest.fixture()
+def own_areas(cfg):
+    """A target whose ownership map names an area `labels.AREAS` does not have
+    (fleet's own ownership.md: allocator, cli, ...). The fake knows that area's
+    label, as the target repo seeded from its own map would."""
+    cfg.ownership.write_text(OWN_AREAS)
+    client = FakeGh(areas=("allocator",))
+    client.create_issue("decide is wrong", "body", ["fleet:claimed", "area:allocator"])
+    return cfg, client
+
+
+def test_handoff_reads_the_issue_with_the_targets_areas(own_areas):
+    cfg, gh = own_areas
+    do_handoff(cfg, gh, task=1, to="review", **BASE)
+    assert "fleet:review" in gh.get_issue(1)["labels"]
+
+
+def test_escalate_reads_the_issue_with_the_targets_areas(own_areas):
+    cfg, gh = own_areas
+    do_escalate(cfg, gh, task=1, question="Which?", considered="A or B", **BASE)
+    assert "fleet:human" in gh.get_issue(1)["labels"]
+
+
+def test_verdict_reads_the_issue_with_the_targets_areas(own_areas):
+    cfg, gh = own_areas
+    gh.remove_labels(1, ["fleet:claimed"])
+    gh.add_labels(1, ["fleet:review"])
+    _, state = do_verdict(
+        cfg, gh, task=1, verdict="approved", findings=[], checks_rerun="make check: pass", **VERDICT
+    )
+    assert state == "integrating"
+    assert "fleet:integrating" in gh.get_issue(1)["labels"]

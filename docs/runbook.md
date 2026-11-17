@@ -422,9 +422,10 @@ agent kind `chain`, as in `fixtures/policy/fleet-fixture/docs/agent/task-classes
   `~/.local/state/fleet/answers`. The file for a task is
   `<answers_dir>/<owner>__<name>/<number>.json`, a JSON list of
   `{"text": str, "at": float}`. The box writes it; fleet only reads it, and
-  shows the answers to a native role in its prompt. The box also labels the
-  issue `fleet:answered-N`, and each attempt, fix-pass and rebase cap is then
-  multiplied by `1 + N`.
+  shows the answers to a native role in its prompt. fleet reads only `text`
+  and ignores `at`; a chain run is given the file's path and reads it itself.
+  The box also labels the issue `fleet:answered-N`, and each attempt, fix-pass
+  and rebase cap is then multiplied by `1 + N`.
 
 ### How a task gets there
 
@@ -466,8 +467,17 @@ attempts_exhausted and the like) start with the exact line
 `<!-- fleet:escalation reason=<reason> -->`. Chain-outcome and fallback
 escalations are written through `commands.do_escalate` as a `fleet.handoff.v1`
 packet to `human`, with no marker line. `fleet.escalation.latest` reads either
-kind. A run's cost counts toward the
-night when its outcome is reaped, not while it runs.
+kind.
+
+A running chain run's cost counts toward the fleet budget while it runs: the
+executor reports chain's `run_spent_usd` as the agent's cost, and the allocator
+adds every live agent's cost to the night's spend before it dispatches anything
+new, so a run that is spending can drain the fleet. On the tick its outcome is
+written, and while the issue still reads `claimed`, the run is reported at zero
+cost so the per-task ceiling cannot escalate or release the task over the
+outcome. The run's cost is added to the night's recorded spend (`spent_usd`)
+only when the allocator reaps the run, which happens once the issue has left
+`claimed` and the run is reported `done` with its cost.
 
 ### Failure lines
 

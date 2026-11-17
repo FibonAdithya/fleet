@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
+from fleet import escalation as escalation_module
 from fleet import labels as labels_module
 from fleet import ledger as ledger_module
 from fleet import packet as packet_module
@@ -57,9 +58,37 @@ def read_ledger(
         shallow = ledger_module.read_one(row, areas=areas)
         if shallow.state not in PACKET_STATES:
             continue
-        found = packet_module.parse_latest(
-            gh.get_issue(row["number"]).get("comments") or [], "handoff"
-        )
+        comments = gh.get_issue(row["number"]).get("comments") or []
+        found = current_packet(comments)
         if found is not None:
             packets[row["number"]] = found
     return ledger_module.read(rows, packets, areas=areas, login=login)
+
+
+def current_packet(comments: list[str]) -> dict | None:
+    """The newest handoff packet, unless an escalation came at or after it.
+
+    The issue outlives the attempt, and after an owner's answer `_dispatch`
+    stamps `max(task.attempts, 1)` again, so the attempt binding in
+    `decide._advance` and `decide._is_rebase_handback` no longer tells the
+    escalated attempt's packet from the new agent's. Two shapes, both real:
+    the newest packet IS the escalation (a handoff to `human`), which then
+    advances a finished agent's task straight back to `fleet:human` with no new
+    escalation comment, so the owner is never pinged; or the allocator
+    escalated with a marker comment after a same-attempt `to: review` packet or
+    an integrator's rebase handback, which then advances or rebases on the work
+    the owner asked to change.
+
+    "At or after": a packet to `human` is itself the escalation (same index).
+    A `to: blocked` packet is not an escalation, so its `blocked_on` survives
+    unless an escalation came later, when the block is stale too.
+    """
+    found = packet_module.parse_latest(comments, "handoff")
+    if found is None:
+        return None
+    escalated = escalation_module.latest(comments)
+    if escalated is not None and escalated["index"] >= packet_module.latest_index(
+        comments, "handoff"
+    ):
+        return None
+    return found

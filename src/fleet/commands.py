@@ -82,7 +82,10 @@ def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
     # the move Task 7's binding in decide._advance exists to prevent. `_post`
     # is reached only through build_handoff's callers (do_handoff, do_block,
     # do_escalate), so this never touches a verdict.
-    packet["attempt"] = max(read_one(gh.get_issue(issue)).attempts, 1)
+    # The target's own areas, not labels.AREAS: a target whose ownership map
+    # differs would otherwise refuse every handoff on an unknown area.
+    areas = policy_module.area_names(cfg)
+    packet["attempt"] = max(read_one(gh.get_issue(issue), areas=areas).attempts, 1)
     validate(cfg, "handoff", packet)
     gh.comment(issue, render(packet))
     _move_state(gh, issue, state)
@@ -200,7 +203,7 @@ def do_verdict(
     # the same vocabulary through the same parser, so they cannot disagree about
     # what state a task is in or how many fix passes it has spent. It also
     # raises GhError for an issue that does not exist.
-    current = read_one(gh.get_issue(task))
+    current = read_one(gh.get_issue(task), areas=policy_module.area_names(cfg))
     if current.state != "review":
         # A verdict is REVIEW's exit, not a general relabelling tool. Without
         # this, `fleet verdict --verdict approved` on a task still CLAIMED walks

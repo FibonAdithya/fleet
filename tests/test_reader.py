@@ -159,3 +159,158 @@ def test_captured_rows_without_author_or_created_at_are_never_the_owners():
     assert tasks and all(not t.by_owner and t.created_at is None for t in tasks)
     # No login and no author are both None; None is nobody, not a match.
     assert all(not t.by_owner for t in ledger_module.read(rows))
+
+
+# -- R18: a packet older than the latest escalation is not current ------------
+
+
+def _r18_policy():
+    from fleet.model import Policy
+
+    return Policy(
+        areas=(("src/eval/**", "eval"),),
+        routes=(("patch", ("implementer", "reviewer", "integrator")),),
+        agents=(),
+        integration_branch="integration",
+        slots=6,
+        stall_minutes=10,
+        max_attempts=2,
+        max_fix_passes=1,
+        max_rebases=1,
+        per_task_usd=2.0,
+        fleet_usd=25.0,
+    )
+
+
+def _r18_decide(tasks, agents):
+    from datetime import UTC, datetime
+
+    from fleet.decide import decide
+    from fleet.model import FleetState
+
+    intents, _ = decide(
+        FleetState(), tasks, _r18_policy(), agents, datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+    )
+    return intents
+
+
+def _answered_claimed(gh, *extra):
+    """A claimed task on attempt 1 that the owner has answered once: what
+    `_dispatch` stamps after an answer (it writes `max(task.attempts, 1)` again)."""
+    gh.ensure_label("fleet:answered-1")
+    return gh.create_issue(
+        "t",
+        "b",
+        [
+            "fleet:claimed",
+            "area:eval",
+            "class:patch",
+            "fleet:attempt-1",
+            "fleet:answered-1",
+            *extra,
+        ],
+    )
+
+
+def _handoff(number, to, role="implementer", **kw):
+    from fleet import packet as packet_module
+
+    return packet_module.render(
+        {
+            "schema": "fleet.handoff.v1",
+            "task": number,
+            "to": to,
+            "attempt": 1,
+            "from": {"role": role, "agent": "fleet-3"},
+            **kw,
+        }
+    )
+
+
+def test_a_handoff_to_human_is_not_current_for_the_agent_after_the_answer():
+    """The reviewer's case for R18. The newest packet IS the escalation (a
+    handoff to human, attempt 1); after the answer `_dispatch` stamps attempt 1
+    again, so without the rule the packet passes `_advance`'s attempt check and
+    the finished agent's task goes straight back to fleet:human with no new
+    escalation comment -- the owner is never told."""
+    from fleet.model import Advance, AgentState
+
+    gh = FakeGh()
+    number = _answered_claimed(gh)
+    gh.comment(number, _handoff(number, "human", question="Which?", considered="A or B"))
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet is None
+    intents = _r18_decide(
+        list(tasks.values()), [AgentState(task=number, status="done", change_seq=10)]
+    )
+    assert [i for i in intents if isinstance(i, Advance)] == []
+
+
+def test_an_allocator_escalation_after_a_same_attempt_review_packet_drops_the_packet():
+    """The allocator escalated (marker comment) after attempt 1's `to: review`
+    packet; the owner answered and asked for changes. That packet describes the
+    work the owner rejected, so it is not the new agent's handoff."""
+    from fleet import escalation
+    from fleet.model import Advance, AgentState
+
+    gh = FakeGh()
+    number = _answered_claimed(gh)
+    gh.comment(number, _handoff(number, "review"))
+    gh.comment(number, escalation.render("stage_produced_nothing"))
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet is None
+    intents = _r18_decide(
+        list(tasks.values()), [AgentState(task=number, status="done", change_seq=10)]
+    )
+    assert Advance(task=number, to="review") not in intents
+
+
+def test_a_rebase_handback_before_rebases_exhausted_does_not_rebase_after_the_answer():
+    """The answer doubles the rebase cap (1 -> 2), so a stale integrator
+    handback from before the `rebases_exhausted` escalation would read as a
+    second rebase the task never asked for."""
+    from fleet import escalation
+    from fleet.model import AgentState, Rebase
+
+    gh = FakeGh()
+    number = _answered_claimed(gh, "fleet:rebase-1")
+    gh.comment(number, _handoff(number, "claimed", role="integrator"))
+    gh.comment(number, escalation.render("rebases_exhausted"))
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet is None
+    intents = _r18_decide(
+        list(tasks.values()), [AgentState(task=number, status="done", change_seq=10)]
+    )
+    assert [i for i in intents if isinstance(i, Rebase)] == []
+
+
+def test_a_packet_newer_than_the_escalation_is_kept():
+    """The new agent's own handoff, written after the escalation, is current."""
+    from fleet import escalation
+    from fleet import packet as packet_module
+    from fleet.model import Advance, AgentState
+
+    gh = FakeGh()
+    number = _answered_claimed(gh)
+    gh.comment(number, escalation.render("stage_produced_nothing"))
+    gh.comment(number, _handoff(number, "review", did="new work"))
+    comments = gh.get_issue(number)["comments"]
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet == packet_module.parse_latest(comments, "handoff")
+    assert tasks[number].packet["did"] == "new work"
+    intents = _r18_decide(
+        list(tasks.values()), [AgentState(task=number, status="done", change_seq=10)]
+    )
+    assert Advance(task=number, to="review") in intents
+
+
+def test_with_no_escalation_the_packet_is_kept():
+    """No escalation anywhere: the reader's behaviour before R18, unchanged."""
+    gh = FakeGh()
+    number = gh.create_issue("t", "b", ["fleet:claimed", "area:eval", "fleet:attempt-1"])
+    gh.comment(number, "unrelated chatter")
+    gh.comment(number, _handoff(number, "review", did="the work"))
+    gh.comment(number, "more chatter after the packet")
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet is not None
+    assert tasks[number].packet["did"] == "the work"

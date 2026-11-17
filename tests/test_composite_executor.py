@@ -264,7 +264,9 @@ def _unrouted_chain_policy(tmp_path) -> Path:
 
 def test_no_chain_roles_no_chain_executor(tmp_path):
     cfg = dataclasses.replace(
-        load_config(_unrouted_chain_policy(tmp_path)), runlog_path=tmp_path / "run.jsonl"
+        load_config(_unrouted_chain_policy(tmp_path)),
+        runlog_path=tmp_path / "run.jsonl",
+        answers_dir=tmp_path / "answers",
     )
     policy = policy_module.load(cfg)
     assert "chain" in {role for role, _, _ in policy.agents}
@@ -295,7 +297,9 @@ def test_a_chain_state_file_with_no_chain_route_is_reported(tmp_path):
     ChainExecutor, so those runs are neither stopped nor reported. Said once,
     at startup, with the file and the run ids."""
     cfg = dataclasses.replace(
-        load_config(_unrouted_chain_policy(tmp_path)), runlog_path=tmp_path / "run.jsonl"
+        load_config(_unrouted_chain_policy(tmp_path)),
+        runlog_path=tmp_path / "run.jsonl",
+        answers_dir=tmp_path / "answers",
     )
     state = tmp_path / "chain-runs.json"
     state.write_text(json.dumps({"runs": {"5": "run-a", "6": "run-b"}, "outcomes": {}}))
@@ -311,7 +315,9 @@ def test_a_chain_state_file_with_no_chain_route_is_reported(tmp_path):
 
 def test_no_chain_route_and_no_state_file_reports_nothing(tmp_path):
     cfg = dataclasses.replace(
-        load_config(_unrouted_chain_policy(tmp_path)), runlog_path=tmp_path / "run.jsonl"
+        load_config(_unrouted_chain_policy(tmp_path)),
+        runlog_path=tmp_path / "run.jsonl",
+        answers_dir=tmp_path / "answers",
     )
     (tmp_path / "chain-runs.json").write_text(json.dumps({"runs": {}, "outcomes": {}}))
     herdr_exec = HerdrExecutor(FakeHerdr(), FakeGh(), cfg)

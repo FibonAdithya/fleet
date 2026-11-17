@@ -167,6 +167,7 @@ def test_run_once_builds_its_collaborators_and_ticks_exactly_once(monkeypatch, t
         socket_path=tmp_path / "fleet.sock",
         runlog_path=tmp_path / "run.jsonl",
         worktree_root=tmp_path / "worktrees",
+        answers_dir=tmp_path / "answers",
     )
 
     calls = []
@@ -209,6 +210,7 @@ def _run_cfg(tmp_path):
         socket_path=tmp_path / "fleet.sock",
         runlog_path=tmp_path / "run.jsonl",
         worktree_root=tmp_path / "worktrees",
+        answers_dir=tmp_path / "answers",
     )
 
 
