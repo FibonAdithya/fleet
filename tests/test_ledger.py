@@ -7,6 +7,7 @@ import pytest
 
 from fleet import ledger
 from fleet.gh import FakeGh
+from fleet.labels import static_vocabulary
 
 CAPTURED = Path(__file__).resolve().parents[1] / "fixtures/ledger/issues.json"
 
@@ -196,3 +197,38 @@ def test_blocked_on_comes_from_the_packet_not_a_label():
     )
     assert task.blocked_on == 11
     assert ledger.read_one(row(labels=["fleet:blocked"])).blocked_on is None
+
+
+def test_class_build_and_bug_parse():
+    assert ledger.read_one(row(labels=["class:build"])).klass == "build"
+    assert ledger.read_one(row(labels=["class:bug"])).klass == "bug"
+
+
+def test_answered_label_parses_to_count():
+    task = ledger.read_one(row(labels=["fleet:answered-1", "fleet:answered-2"]))
+    assert task.answers == 2
+
+
+def test_answered_label_is_highest_n():
+    """Catches counting labels instead of taking the highest N."""
+    assert ledger.read_one(row(labels=["fleet:answered-3"])).answers == 3
+
+
+def test_no_answered_label_is_zero():
+    assert ledger.read_one(row(labels=["fleet:ready"])).answers == 0
+
+
+def test_answered_label_not_in_static_vocabulary():
+    """The box writes `fleet:answered-N` and creates it when it does; the seed
+    does not. Catches the answer counter added to the up-front label set."""
+    assert not any(label.startswith("fleet:answered-") for label in static_vocabulary())
+
+
+@pytest.mark.parametrize("raw", ["2026-11-16T09:30:00", "yesterday", 1763285400])
+def test_a_created_at_without_an_offset_is_refused(raw):
+    """decide compares createdAt with an aware `now`; a naive time raises
+    TypeError there, inside the pure core, on every tick. Refused at the read,
+    where every other malformed row is."""
+    row = {"number": 1, "labels": [], "createdAt": raw}
+    with pytest.raises(ledger.LedgerError, match="createdAt"):
+        ledger.read_one(row)

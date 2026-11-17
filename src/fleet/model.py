@@ -33,12 +33,28 @@ class Task:
     attempts: int = 0
     fix_passes: int = 0
     rebases: int = 0
+    answers: int = 0
     assignee: str | None = None
     is_open: bool = True
     blocked_on: int | None = None
     parent_epic: int | None = None
     packet: dict | None = field(default=None, hash=False)
     verdict: dict | None = field(default=None, hash=False)
+    #: Carries the `agent-reported` label: the owner's own agent filed it from
+    #: outside the fleet. Read by `decide._adopt`.
+    agent_reported: bool = False
+    #: Written by the login the daemon runs as. False whenever that login is
+    #: unknown, so nobody's issue is mistaken for the owner's.
+    by_owner: bool = False
+    #: gh's `createdAt`, timezone-aware. None for a row that did not carry it
+    #: (the captured ledger fixtures predate the field), and such a row has no
+    #: age, so it is never adopted.
+    created_at: datetime | None = None
+    #: False only when the row carries no `fleet:<state>` label at all. `state`
+    #: reads such a row as `triage`, which makes it indistinguishable from one
+    #: a human deliberately labelled `fleet:triage`; this field is the
+    #: difference, and only the unlabelled row may be adopted.
+    has_state_label: bool = True
 
 
 @dataclass(frozen=True)
@@ -64,6 +80,19 @@ class AgentState:
 
     A departed agent has no status of its own: it is represented by its absence
     from `agents()`, not by a value here.
+
+    `paused` is True for a chain run waiting out a usage limit. It makes no
+    progress while it waits, and that is not a stall: `decide` refreshes the
+    stall timer on every tick it is seen paused, so the timer counts from when
+    the pause ends.
+
+    `holding` is True for a chain run that has finished while fleet writes its
+    outcome to the ledger, which can be read before those writes land. Its
+    `cost_usd` is the run's final, real cost: the drain counts it and a reap
+    charges it, as for any agent. What `decide` does not do is judge it against
+    a per-task ceiling: the run has finished, and an over_budget Release or
+    Escalate would relabel the row over the outcome being written. The stall
+    timer still bounds a hold whose writes never land.
     """
 
     task: int
@@ -72,6 +101,8 @@ class AgentState:
     cost_usd: float = 0.0
     model: str | None = None
     transcript_bytes: int = 0
+    paused: bool = False
+    holding: bool = False
 
 
 #: `AgentState.model` when a transcript named more than one model carrying
@@ -203,6 +234,13 @@ class AgentSpec:
     kind: str
     model_flag: str
     args: tuple[str, ...]
+    #: Kind `chain` only: the binary fleet runs, `~` already expanded. Chain
+    #: is not launched by herdr, so it has no model flag (`model_flag` is ""
+    #: for it) and chooses its own models.
+    command: str | None = None
+    #: This kind's per-task spending ceiling, replacing `[budget] per_task_usd`
+    #: for every role routed to it. None means the global ceiling applies.
+    per_task_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -223,6 +261,28 @@ class Policy:
     per_task_usd: float
     fleet_usd: float
     integration_branch: str
+    #: (agent kind, per-task ceiling) for every kind that sets its own; see
+    #: `ceiling_for`. A chain run is a whole build, not one stage, so the
+    #: global per-stage ceiling would release every one of them.
+    ceilings: tuple[tuple[str, float], ...] = ()
+    #: From fleet.toml's [chain] table. Here rather than read from the config
+    #: because decide() sees only the Policy.
+    chain_default_area: str | None = None
+    chain_max_age_days: int = 7
+
+    def ceiling_for(self, role: str | None) -> float:
+        """The per-task ceiling for an agent running `role`: its kind's own
+        ceiling when that kind sets one, else the global `per_task_usd`.
+
+        Keyed by kind, not role, because the ceiling is a property of how the
+        agent is run. None (a task whose role the policy cannot name) and a
+        role with no Agent row both get the global ceiling."""
+        if role is None:
+            return self.per_task_usd
+        declared = self.agent_for(role)
+        if declared is None:
+            return self.per_task_usd
+        return dict(self.ceilings).get(declared[0], self.per_task_usd)
 
     def route_for(self, klass: str | None) -> tuple[str, ...]:
         return dict(self.routes).get(klass or "", ())
@@ -237,6 +297,23 @@ class Policy:
     @property
     def area_names(self) -> frozenset[str]:
         return frozenset(area for _, area in self.areas)
+
+
+def effective_caps(policy: Policy, task: Task) -> tuple[int, int, int]:
+    """(attempts, fix passes, rebases) this task may spend.
+
+    Each policy cap times `1 + task.answers`: an owner's answer to an escalated
+    task buys it a whole new allowance, not one more try. Multiplied rather
+    than added so the cap still scales with policy -- a fleet.toml that allows
+    three attempts allows three more per answer. The counters themselves never
+    reset, so the cap always binds again.
+    """
+    scale = 1 + task.answers
+    return (
+        policy.max_attempts * scale,
+        policy.max_fix_passes * scale,
+        policy.max_rebases * scale,
+    )
 
 
 # ---------------------------------------------------------------- intents
@@ -307,6 +384,7 @@ class Rebase:
 class Escalate:
     task: int
     reason: str
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -375,8 +453,32 @@ class Drain:
     reason: str
 
 
+@dataclass(frozen=True)
+class Adopt:
+    """Hand an agent-reported issue to the chain route as a `bug`.
+
+    The issue has no fleet state label, so it would otherwise wait in triage
+    for a human. `expand` writes READY, `class:bug`, auto-ok and the target's
+    `[chain] default_area`; the next tick dispatches it like any READY task.
+    No area field: the area is the policy's, not the issue's, and `decide`
+    emits this only when the policy has one.
+    """
+
+    task: int
+
+
 Intent = (
-    Dispatch | Continue | Release | Rebase | Escalate | Unblock | Advance | Retire | Close | Drain
+    Dispatch
+    | Continue
+    | Release
+    | Rebase
+    | Escalate
+    | Unblock
+    | Advance
+    | Retire
+    | Close
+    | Drain
+    | Adopt
 )
 
 
@@ -413,8 +515,17 @@ class StopAgent:
 
 
 @dataclass(frozen=True)
+class Comment:
+    """One issue comment. Applied before the state label that makes it matter, so a
+    reader that sees `fleet:human` also sees why."""
+
+    task: int
+    body: str
+
+
+@dataclass(frozen=True)
 class CloseIssue:
     task: int
 
 
-Effect = SetLabels | Assign | StartAgent | StopAgent | CloseIssue
+Effect = SetLabels | Assign | StartAgent | StopAgent | CloseIssue | Comment

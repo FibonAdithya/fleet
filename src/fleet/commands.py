@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
+from fleet import git as git_module
 from fleet import labels
 from fleet import policy as policy_module
 from fleet.config import FleetConfig
+from fleet.decide import chain_route_enabled
 from fleet.gh import GhClient
 from fleet.ledger import read_one
+from fleet.model import Policy
 from fleet.packet import build_handoff, render
 from fleet.schemas import validate
 
@@ -37,13 +42,16 @@ ROLE_MAY_HAND_TO: dict[str, frozenset[str]] = {
     "planner": frozenset({"review"}),
     "integrator": frozenset({"done", "claimed"}),
     "scout": frozenset(),
+    # chain runs the whole build itself; its hand-off goes to review, and its
+    # approved verdict (it is in VERDICT_ROLES) moves the task to integrating.
+    "chain": frozenset({"review"}),
 }
 
 # Only a reviewing role writes a verdict. `invariant-reviewer` is in because
 # invariant-reviewer.md ends "Emit `approved` only if all five are `ok`" -- it
 # emits a verdict, on a narrower question. Every other role is the same
 # integrity hole ROLE_MAY_HAND_TO closes, arriving by the other door.
-VERDICT_ROLES = frozenset({"reviewer", "invariant-reviewer"})
+VERDICT_ROLES = frozenset({"reviewer", "invariant-reviewer", "chain"})
 
 
 def _move_state(gh: GhClient, issue: int, state: str, add: list[str] | None = None) -> None:
@@ -74,7 +82,10 @@ def _post(cfg: FleetConfig, gh: GhClient, packet: dict, state: str) -> dict:
     # the move Task 7's binding in decide._advance exists to prevent. `_post`
     # is reached only through build_handoff's callers (do_handoff, do_block,
     # do_escalate), so this never touches a verdict.
-    packet["attempt"] = max(read_one(gh.get_issue(issue)).attempts, 1)
+    # The target's own areas, not labels.AREAS: a target whose ownership map
+    # differs would otherwise refuse every handoff on an unknown area.
+    areas = policy_module.area_names(cfg)
+    packet["attempt"] = max(read_one(gh.get_issue(issue), areas=areas).attempts, 1)
     validate(cfg, "handoff", packet)
     gh.comment(issue, render(packet))
     _move_state(gh, issue, state)
@@ -126,7 +137,9 @@ def do_escalate(
     return _post(cfg, gh, packet, "human")
 
 
-def _verdict_target(verdict: str, fix_passes: int, max_fix_passes: int) -> tuple[str, list[str]]:
+def _verdict_target(
+    verdict: str, fix_passes: int, max_fix_passes: int, answers: int = 0
+) -> tuple[str, list[str]]:
     """Where a verdict sends a task, and which counter label rides along.
 
     Spec §5 ruling 4: approved -> INTEGRATING; `changes_required` -> another
@@ -143,10 +156,13 @@ def _verdict_target(verdict: str, fix_passes: int, max_fix_passes: int) -> tuple
     pass costs no attempt, so CLAIMED here would break the rule this function
     exists to enforce. READY leaves DISPATCH to pick it up with `attempt`
     unchanged and leaves no window where a task is claimed by nobody.
+
+    The cap is `max_fix_passes * (1 + answers)`, the fix-pass third of
+    `model.effective_caps`: an owner's answer buys another allowance.
     """
     if verdict == "approved":
         return "integrating", []
-    if fix_passes >= max_fix_passes:
+    if fix_passes >= max_fix_passes * (1 + answers):
         return "human", []
     return "ready", [labels.fix_pass_label(fix_passes + 1)]
 
@@ -187,7 +203,7 @@ def do_verdict(
     # the same vocabulary through the same parser, so they cannot disagree about
     # what state a task is in or how many fix passes it has spent. It also
     # raises GhError for an issue that does not exist.
-    current = read_one(gh.get_issue(task))
+    current = read_one(gh.get_issue(task), areas=policy_module.area_names(cfg))
     if current.state != "review":
         # A verdict is REVIEW's exit, not a general relabelling tool. Without
         # this, `fleet verdict --verdict approved` on a task still CLAIMED walks
@@ -208,7 +224,17 @@ def do_verdict(
     if packet_was_sufficient is not None:
         payload["packet_was_sufficient"] = packet_was_sufficient
     validate(cfg, "verdict", payload)
-    state, extra = _verdict_target(verdict, current.fix_passes, cfg.max_fix_passes)
+    state, extra = _verdict_target(
+        verdict, current.fix_passes, cfg.max_fix_passes, answers=current.answers
+    )
+    # A fix pass past `max_fix_passes` exists only on an answered task, and its
+    # label is outside the seeded vocabulary: gh refuses an unknown label by
+    # failing the whole edit, so create it first. `_move_state` writes it
+    # directly, not through HerdrExecutor.apply, which ensures its own.
+    seeded = {labels.fix_pass_label(n) for n in range(1, cfg.max_fix_passes + 1)}
+    for label in extra:
+        if label not in seeded:
+            gh.ensure_label(label)
     gh.comment(task, render(payload))
     _move_state(gh, task, state, extra)
     return payload, state
@@ -229,11 +255,53 @@ DISCOVERY_BODY = """Found while working #{parent}. Filed by an agent, not triage
 _To be written by a scout during triage._
 """
 
+CHAIN_DISCOVERY_BODY = """Found while working #{parent}. Filed by an agent to run
+unattended on the chain route.
+
+## Evidence
+
+{evidence}
+"""
+
+
+#: The classes `fleet discover` files: what an agent finds (`bug`) and what a
+#: planner splits an epic into (`patch`, `build`).
+DISCOVER_CLASSES = ("patch", "build", "bug")
+
+# What ChainExecutor's `Spec: (\S+)` reads back: one path, no whitespace.
+_SPEC_PATH = re.compile(r"\S+")
+
 
 def do_discover(
-    cfg: FleetConfig, gh: GhClient, *, parent: int, title: str, area: str, evidence: str
+    cfg: FleetConfig,
+    gh: GhClient,
+    *,
+    parent: int,
+    title: str,
+    area: str,
+    evidence: str,
+    klass: str = "bug",
+    spec: str | None = None,
+    policy: Policy | None = None,
 ) -> int:
-    """File a discovery in TRIAGE. Never READY, never auto-ok."""
+    """File a discovery. A `bug` or `build` whose class the target routes to
+    chain is filed READY and auto-ok, to run unattended; anything else --
+    a `patch` above all, or a class not routed to chain -- lands in TRIAGE for
+    a human or scout, as every discovery used to.
+
+    A `build` names its spec, which must already be committed on
+    `origin/<integration_branch>` because that is the branch chain builds
+    from; its body's first line is `Spec: <path>`, the line ChainExecutor
+    reads. `spec` is refused for every other class.
+
+    `policy` is loaded from `cfg` when not given."""
+    if klass not in DISCOVER_CLASSES:
+        raise ValueError(f"discover files class {', '.join(DISCOVER_CLASSES)}, not {klass!r}")
+    if klass == "build":
+        if spec is None or not _SPEC_PATH.fullmatch(spec):
+            raise ValueError("a build discovery needs --spec, one path with no spaces")
+    elif spec is not None:
+        raise ValueError(f"--spec is only for a build; a {klass} has no spec to build")
     # Strip first: search_titles is a substring scan over UNSTRIPPED stored
     # titles, so " foo" would not match a stored "foo" and the exact-match guard
     # below would never run.
@@ -250,6 +318,15 @@ def do_discover(
             f"{area!r} is not an area in {cfg.ownership}; choose from {', '.join(sorted(known))}"
         )
     area_label = labels.area_label(area)
+    if spec is not None:
+        ref = f"origin/{cfg.integration_branch}"
+        if not git_module.exists_on(cfg.root, ref, spec):
+            raise ValueError(
+                f"spec {spec!r} is not committed on {ref}; chain builds from there, "
+                "so commit and push it first"
+            )
+    if policy is None:
+        policy = policy_module.load(cfg)
     gh.get_issue(parent)
     # search_titles is a substring scan, so a short title collides with unrelated
     # issues -- "t" matches "...explicit k". Narrow with it, then require an exact
@@ -275,8 +352,14 @@ def do_discover(
     # repo's label set. gh refuses an unknown label and creates no issue at all.
     parentage = f"discovered-by:{parent}"
     gh.ensure_label(parentage)
-    return gh.create_issue(
-        title,
-        DISCOVERY_BODY.format(parent=parent, evidence=evidence),
-        [labels.state_label("triage"), area_label, parentage],
-    )
+    class_label = labels.class_label(klass)
+    if klass != "patch" and chain_route_enabled(policy, klass):
+        names = [labels.state_label("ready"), class_label, labels.AUTO_OK, area_label, parentage]
+        template = CHAIN_DISCOVERY_BODY
+    else:
+        names = [labels.state_label("triage"), area_label, parentage, class_label]
+        template = DISCOVERY_BODY
+    body = template.format(parent=parent, evidence=evidence)
+    if spec is not None:
+        body = f"Spec: {spec}\n\n{body}"
+    return gh.create_issue(title, body, names)

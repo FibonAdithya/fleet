@@ -15,7 +15,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from fleet import labels as labels_module
+from fleet.config import CHAIN_KIND
 from fleet.model import (
+    Adopt,
     Advance,
     AgentState,
     Close,
@@ -32,6 +34,7 @@ from fleet.model import (
     Retire,
     Task,
     Unblock,
+    effective_caps,
 )
 
 # Intents whose expansion stops the agent, so that agent's cost is final.
@@ -165,12 +168,19 @@ def _observe(prev: FleetState, agents: list[AgentState], now: datetime) -> dict[
     agents. A snapshot that momentarily omits an agent -- a herdr query racing a
     pane restart -- would otherwise reset that task's stall timer to zero, and a
     stall that keeps flickering is never detected at all.
+
+    A paused agent (a chain run waiting out a usage limit) refreshes `since` on
+    every tick it is seen paused, though nothing moved: waiting is not stalling,
+    and an hour's pause under `stall_minutes = 10` would otherwise be released.
+    Refreshing rather than skipping the stall check is what makes the timer
+    count from the end of the pause instead of from before it.
     """
     out = dict(prev.seen)
     for agent in agents:
         old = out.get(agent.task)
         if (
             old is None
+            or agent.paused
             or old.change_seq != agent.change_seq
             or old.transcript_bytes != agent.transcript_bytes
         ):
@@ -183,9 +193,11 @@ def _observe(prev: FleetState, agents: list[AgentState], now: datetime) -> dict[
 def _fail(task: Task, reason: str, policy: Policy) -> Intent:
     """One more attempt, or a human. The cap is checked before the release, not
     after: releasing first and counting later is the shape that produces a third
-    attempt, which is one of the four hard fails."""
+    attempt, which is one of the four hard fails. The cap is the effective one:
+    an owner's answer raises it (`model.effective_caps`)."""
     attempt = task.attempts + 1
-    if attempt > policy.max_attempts:
+    max_attempts, _, _ = effective_caps(policy, task)
+    if attempt > max_attempts:
         return Escalate(task=task.number, reason="attempts_exhausted")
     return Release(task=task.number, reason=reason, attempt=attempt)
 
@@ -374,7 +386,8 @@ def _reap(
             # packet while an agent is actively working: a stale packet is a
             # fact about issue-comment history, not about what the current
             # agent is doing right now.
-            if task.rebases + 1 > policy.max_rebases:
+            _, _, max_rebases = effective_caps(policy, task)
+            if task.rebases + 1 > max_rebases:
                 intents.append(Escalate(task=task.number, reason="rebases_exhausted"))
             else:
                 intents.append(Rebase(task=task.number, rebase=task.rebases + 1))
@@ -416,7 +429,11 @@ def _reap(
                 # directly -- a reviewer judges the implementer's work and
                 # runs long enough to burn real money at a rate nobody chose.
                 intents.append(Escalate(task=task.number, reason="model_mismatch"))
-            elif agent.cost_usd > policy.per_task_usd:
+            elif agent.holding:
+                # A finished chain run whose outcome is being written: its cost
+                # is final, so no ceiling applies (see `AgentState.holding`).
+                pass
+            elif agent.cost_usd > (ceiling := policy.ceiling_for(_role_for(task, policy))):
                 # Task 3 left this branch with no cost check at all, so a
                 # reviewer that was healthy, moving and far over its ceiling got
                 # no intent and ran until the whole FLEET ceiling drained.
@@ -424,14 +441,27 @@ def _reap(
                 # relabels to READY and throws away a review that happened.
                 # Status first, cost second -- a finished stage is already paid
                 # for, and the `done` branch above returns before this.
-                intents.append(Escalate(task=task.number, reason="over_budget"))
+                intents.append(
+                    Escalate(
+                        task=task.number,
+                        reason="over_budget",
+                        detail=f"spent {agent.cost_usd:.2f} of {ceiling:.2f}",
+                    )
+                )
             continue
         if agent is None:
             # Ledger drift, and spec §5's table states this row unconditionally:
             # herdr's state is the tiebreaker. Escalating at the attempt cap
             # instead would burn a task to NEEDS_HUMAN for a daemon restart --
             # the one event FleetState is disposable precisely to survive.
-            intents.append(Release(task=task.number, reason="no_agent", attempt=task.attempts + 1))
+            #
+            # Held at the effective cap: a start that fails every tick
+            # (HerdrExecutor._begin records the error and starts nothing)
+            # repeats this release every tick, and an unheld counter would mint
+            # a new repo label each time -- attempt-3, attempt-4, all night.
+            max_attempts, _, _ = effective_caps(policy, task)
+            attempt = min(task.attempts + 1, max_attempts)
+            intents.append(Release(task=task.number, reason="no_agent", attempt=attempt))
             continue
         if agent.status == "done":
             advanced = _advance(task)
@@ -468,8 +498,8 @@ def _reap(
             continue
         # Cost is checked only for a live agent. A finished agent a cent over
         # budget still advances its packet rather than discarding work already
-        # paid for.
-        if agent.cost_usd > policy.per_task_usd:
+        # paid for -- and a held chain run has finished, too.
+        if not agent.holding and agent.cost_usd > policy.ceiling_for(_role_for(task, policy)):
             intents.append(_fail(task, "over_budget", policy))
     # An orphaned agent: its task sits on a row in READY, DONE or BLOCKED, or
     # has no ledger row at all. The per-row loop above only ever visits rows,
@@ -490,6 +520,60 @@ def _reap(
             continue
         intents.append(Retire(task=agent.task))
     return intents
+
+
+#: The class an adopted issue is filed as. `build` needs a spec, which an
+#: agent-reported issue does not carry.
+_ADOPT_CLASS = "bug"
+
+
+def chain_route_enabled(policy: Policy, klass: str) -> bool:
+    """A class runs on the chain route when its route's first role is of agent
+    kind `chain`. One definition for ADOPT and for `fleet discover`, so the two
+    cannot disagree about whether a `bug` will run unattended."""
+    route = policy.route_for(klass)
+    if not route:
+        return False
+    declared = policy.agent_for(route[0])
+    return declared is not None and declared[0] == CHAIN_KIND
+
+
+def _adopt(ledger: list[Task], policy: Policy, now: datetime) -> list[Intent]:
+    """Issues the owner's own agent reported go to the chain route as bugs.
+
+    Every condition is something an issue that should wait for a human fails:
+    - `agent_reported` and `by_owner`: the label alone is not enough, because
+      anyone can open an issue on a public repo and add it.
+    - `has_state_label is False`: a row labelled `fleet:triage` reads as triage
+      just as an unlabelled one does, and is a human's choice to triage it.
+    - `created_at` within `chain_max_age_days`: an old one sat untouched for a
+      reason. No `created_at` is no age, and is not adopted.
+    - `chain_default_area` set and `bug` routed to chain: with no area the
+      adopted task would hold none, and area exclusion could not run it.
+    - no class or area other than the ones Adopt writes: a second `class:` or
+      `area:` label makes `ledger.read_one` refuse the whole ledger. Such a row
+      is skipped without a record, because it already carries a human's or an
+      agent's own class or area and so is no longer a bare report to adopt.
+
+    No per-day cap. Every adopted issue gets the same area, so area exclusion
+    already runs them one at a time.
+    """
+    area = policy.chain_default_area
+    if area is None or not chain_route_enabled(policy, _ADOPT_CLASS):
+        return []
+    oldest = now - timedelta(days=policy.chain_max_age_days)
+    return [
+        Adopt(task=t.number)
+        for t in ledger
+        if t.is_open
+        and t.agent_reported
+        and t.by_owner
+        and not t.has_state_label
+        and t.created_at is not None
+        and t.created_at >= oldest
+        and t.klass in (None, _ADOPT_CLASS)
+        and t.area in (None, area)
+    ]
 
 
 def _unblock(ledger: list[Task], all_rows: list[Task]) -> list[Intent]:
@@ -727,6 +811,7 @@ def decide(
     # until something does. DISPATCH and UNBLOCK must not act on a closed row,
     # so the filter cannot stay one blanket call shared by all three phases.
     intents += _reap(ledger, policy, agents, observations, now, dict(prev.dispatched))
+    intents += _adopt(open_ledger, policy, now)
     intents += _unblock(open_ledger, ledger)
     intents += _unroutable(open_ledger, policy)
     intents += _dispatch(open_ledger, policy, agents, prev.spent_usd)

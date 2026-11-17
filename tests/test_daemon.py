@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import signal
 import threading
 from datetime import UTC, datetime, timedelta
@@ -31,14 +32,15 @@ CLAIMED = ["fleet:claimed", "fleet:attempt-1", "area:eval", "class:patch", "flee
 
 
 @pytest.fixture()
-def cfg():
+def cfg(tmp_path):
     """The vendored fixture policy layer, read-only.
 
     conftest's `cfg` builds a tmp repo with schemas and no policy tables, so
     `policy.load` cannot read it and `build_prompt` has no role prompt to open --
     and every dispatch this module makes goes through both.
     """
-    return load_config(FIXTURE_POLICY)
+    # answers_dir defaults to the real home, which build_prompt reads.
+    return dataclasses.replace(load_config(FIXTURE_POLICY), answers_dir=tmp_path / "answers")
 
 
 def _daemon(cfg, tmp_path, gh=None, herdr=None, run_id="r1"):
@@ -637,6 +639,8 @@ def test_the_daemon_holds_no_authoritative_state(cfg, tmp_path):
         "executor",
         "runlog",
         "run_id",
+        # Read from `gh` at start, like the executor's owner; not state.
+        "login",
         "tick_number",
         "snapshot",
         "state",

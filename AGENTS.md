@@ -54,8 +54,11 @@ each is easy to break while believing you are making progress.
    has no command that sets an assignee or applies `fleet:claimed`. One writer
    is what makes two agents unable to claim the same task without any lock;
    adding a way for an agent to claim, or to apply `fleet:auto-ok` to its own
-   task, reopens the race the design removed. The rule is in the design spec's
-   section 5 and the allocator is `src/fleet/decide.py::decide`.
+   task, reopens the race the design removed. The one exception is the owner's
+   decision of 2026-11-17 (see "What requires a human"): `fleet discover` may
+   file a chain-routed `bug` or `build` as a new issue with `fleet:ready` and
+   `fleet:auto-ok`, never as the filer's own task. The rule is in the design
+   spec's section 5 and the allocator is `src/fleet/decide.py::decide`.
 
 2. **The role-to-target table is closed, and a verdict is REVIEW's only exit.**
    `src/fleet/commands.py::ROLE_MAY_HAND_TO` says which states each role may
@@ -136,7 +139,9 @@ Do not decide these yourself. Raise them and stop.
 - Changing the handoff or verdict packet schema, or the version ids in
   `src/fleet/packet.py::SCHEMA_IDS`. Real issues carry comments in the current
   shape and the reader must keep parsing them.
-- Widening `ROLE_MAY_HAND_TO` or `VERDICT_ROLES` (invariant 2).
+- Widening `ROLE_MAY_HAND_TO` or `VERDICT_ROLES` (invariant 2). The owner
+  approved one widening on 2026-11-17: the `chain` role, which may hand to
+  `review` only and may write a verdict.
 - Changing a default budget, attempt cap, fix-pass cap, rebase cap or the drain
   fraction (`src/fleet/decide.py::_DRAIN_FRACTION`). These bound what an
   unattended night can spend or repeat.
@@ -148,13 +153,33 @@ Do not decide these yourself. Raise them and stop.
   applies to this repository too.
 - Merging to `main`. Promotion is human by design.
 
+The owner approved these changes on 2026-11-17, for the chain route (design
+spec: the hermes-harness repository's
+docs/ai/specs/2026-11-17-fleet-chain-coordination-design.md, "Owner decisions"
+6-8). They are done; do not extend them without asking.
+
+- The `build` and `bug` classes in `src/fleet/labels.py::CLASSES`.
+- The `chain` role in `src/fleet/commands.py::ROLE_MAY_HAND_TO` (to `review`
+  only) and in `src/fleet/commands.py::VERDICT_ROLES`, and `chain` in the
+  handoff schema's `from.role` enum.
+- An owner answer raises the attempt, fix-pass and rebase caps: the box labels
+  the issue `fleet:answered-N` and each cap is multiplied by `1 + N`.
+- Decision 8: `fleet discover` files a chain-routed `bug` or `build` as
+  `fleet:ready` plus `fleet:auto-ok` (a new issue, never the filer's own
+  task), and the daemon adopts an open `agent-reported` issue that has no state
+  label, was opened by the gh login, is no older than `[chain] max_age_days`,
+  and sits on a target whose `bug` class routes to chain with `[chain]
+  default_area` set.
+
 To report a bug in this project, file an issue with the `agent-reported`
 label:
 
     gh issue create --label agent-reported --title "..." --body "..."
 
 The label is what routes the issue to a person. An issue without it notifies
-nobody.
+nobody. On a target whose `bug` class routes to chain and that sets `[chain]
+default_area`, an `agent-reported` issue opened by the gh login runs unattended
+instead (see `docs/runbook.md#the-chain-route`).
 
 ## Where to look
 

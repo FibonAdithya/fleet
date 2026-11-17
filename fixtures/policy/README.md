@@ -13,6 +13,10 @@ silently tracks a live working tree is not a fixture.
 
 Captured at `fleet-fixture` commit `7377f9e`.
 
+These files were hand-edited on 2026-11-17 for the chain role (handoff schema
+`from.role` enum, `build`/`bug` classes and routes, `chain.md`, `[agents.chain]`);
+they no longer match `fleet-fixture` at that commit.
+
 ## Why this exists
 
 `tests/conftest.py` used to read `~/TIG/fleet-fixture/.agents/schemas` directly.

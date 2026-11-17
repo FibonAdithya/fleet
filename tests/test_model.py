@@ -150,6 +150,7 @@ def test_no_intent_or_effect_exists_that_nothing_emits():
         "Retire",
         "Close",
         "Drain",
+        "Adopt",
     }
     assert {t.__name__ for t in get_args(Effect)} == {
         "SetLabels",
@@ -157,6 +158,7 @@ def test_no_intent_or_effect_exists_that_nothing_emits():
         "StartAgent",
         "StopAgent",
         "CloseIssue",
+        "Comment",
     }
 
 
@@ -201,3 +203,11 @@ def test_a_snapshots_rows_are_copied_on_the_way_out():
     snapshot = _snapshot()
     snapshot.to_json()["rows"][0]["state"] = "done"
     assert snapshot.rows[0]["state"] == "claimed"
+
+
+def test_answered_label_rejects_zero():
+    from fleet.labels import answered_label
+
+    assert answered_label(2) == "fleet:answered-2"
+    with pytest.raises(ValueError):
+        answered_label(0)

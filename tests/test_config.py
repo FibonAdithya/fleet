@@ -262,3 +262,124 @@ def test_a_non_table_agents_entry_is_refused_by_name(tmp_path):
     (tmp_path / "fleet.toml").write_text(BASE + '\n[agents]\nclaude = "claude"\n')
     with pytest.raises(ConfigError, match=r"\[agents\.claude\]"):
         load_config(tmp_path)
+
+
+def test_chain_agent_needs_command(tmp_path):
+    """Kind `chain` is started by running its own binary, not by herdr with a
+    model flag, so `command` is what it cannot do without. Catches a chain
+    entry that loads with no command and fails only when the first build task
+    is routed to it."""
+    (tmp_path / "fleet.toml").write_text(BASE + "\n[agents.chain]\nper_task_usd = 40.0\n")
+    with pytest.raises(ConfigError, match=r"\[agents\.chain\].*command"):
+        load_config(tmp_path)
+
+
+def test_chain_agent_needs_no_model_flag_and_expands_its_command(tmp_path):
+    """The model_flag requirement is for kinds herdr launches; chain picks its
+    own models. Catches applying the model_flag refusal to every kind, and an
+    unexpanded `~` that would be passed to exec as a literal directory."""
+    (tmp_path / "fleet.toml").write_text(
+        BASE + '\n[agents.chain]\ncommand = "~/bin/chain"\nper_task_usd = 40.0\n'
+    )
+    spec = load_config(tmp_path).agents["chain"]
+    assert spec.command == str(Path("~/bin/chain").expanduser())
+    assert "~" not in spec.command
+    assert spec.per_task_usd == 40.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1.0", '"40"', "true", "nan", "inf", "-inf"])
+def test_chain_agent_per_task_usd_must_be_positive(tmp_path, value):
+    """Zero is not 'no limit' here any more than it is in [budget]: it puts
+    every chain run over budget on its first tick. Catches a missing or
+    `>= 0` check, a string or bool slipping through as a number, and a
+    non-finite value: TOML allows nan and inf, `cost > nan` is always False,
+    and `cost > inf` never fires, so either is no ceiling at all."""
+    (tmp_path / "fleet.toml").write_text(
+        BASE + f'\n[agents.chain]\ncommand = "/usr/bin/chain"\nper_task_usd = {value}\n'
+    )
+    with pytest.raises(ConfigError, match="per_task_usd"):
+        load_config(tmp_path)
+
+
+def test_a_non_chain_agent_still_needs_a_model_flag(tmp_path):
+    """Catches exempting every kind that has a `command` from model_flag,
+    rather than exactly kind `chain`."""
+    (tmp_path / "fleet.toml").write_text(
+        BASE + '\n[agents.codex]\ncommand = "/usr/bin/codex"\nargs = []\n'
+    )
+    with pytest.raises(ConfigError, match="model_flag"):
+        load_config(tmp_path)
+
+
+def test_answers_dir_default(tmp_path):
+    """The box writes answers under ~/.local/state/fleet/answers by default;
+    a different default here would read an empty directory forever."""
+    (tmp_path / "fleet.toml").write_text(BASE)
+    cfg = load_config(tmp_path)
+    assert cfg.answers_dir == Path("~/.local/state/fleet/answers").expanduser()
+
+
+def test_answers_dir_is_read_from_daemon_table_and_expanded(tmp_path):
+    (tmp_path / "fleet.toml").write_text(BASE + '\n[daemon]\nanswers = "~/elsewhere/answers"\n')
+    cfg = load_config(tmp_path)
+    assert cfg.answers_dir == Path("~/elsewhere/answers").expanduser()
+    assert "~" not in str(cfg.answers_dir)
+
+
+def test_chain_table_defaults(tmp_path):
+    """No [chain] table: no default area (so nothing is adopted) and a
+    seven-day age limit. Catches a default area invented here."""
+    (tmp_path / "fleet.toml").write_text(BASE)
+    cfg = load_config(tmp_path)
+    assert cfg.chain_default_area is None
+    assert cfg.chain_max_age_days == 7
+
+
+def test_chain_table_is_read(tmp_path):
+    (tmp_path / "fleet.toml").write_text(
+        BASE + '\n[chain]\ndefault_area = "eval"\nmax_age_days = 3\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.chain_default_area == "eval"
+    assert cfg.chain_max_age_days == 3
+
+
+@pytest.mark.parametrize("value", ["0", "-2", '"7"', "true", "1.5"])
+def test_chain_max_age_days_must_be_a_positive_integer(tmp_path, value):
+    """Catches `int(...)` coercion, which reads "7" and 1.5 without complaint,
+    and a zero that would age out every issue the moment it was filed."""
+    (tmp_path / "fleet.toml").write_text(BASE + f"\n[chain]\nmax_age_days = {value}\n")
+    with pytest.raises(ConfigError, match="max_age_days"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize("key", ["per_task_usd", "fleet_usd"])
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_a_non_finite_global_budget_is_refused(tmp_path, key, value):
+    """`nan <= 0` is False, so `_positive` used to accept it, and every
+    comparison against a nan ceiling is False: the drain and the per-task
+    ceiling never fire. inf is the same hole stated plainly."""
+    values = {"per_task_usd": "2.0", "fleet_usd": "25.0", key: value}
+    (tmp_path / "fleet.toml").write_text(
+        BUDGET_TOML.format(values["per_task_usd"], values["fleet_usd"])
+    )
+    with pytest.raises(ConfigError, match=key):
+        load_config(tmp_path)
+
+
+def test_chain_command_keeps_relative_prefix(tmp_path):
+    """`Path("./bin/chain")` normalises to `bin/chain`, which exec then looks
+    up on PATH instead of relative to the working directory. Catches
+    round-tripping the command through Path."""
+    (tmp_path / "fleet.toml").write_text(BASE + '\n[agents.chain]\ncommand = "./bin/chain"\n')
+    assert load_config(tmp_path).agents["chain"].command == "./bin/chain"
+
+
+def test_chain_agent_refuses_a_model_flag(tmp_path):
+    """Chain picks its own models, so a model_flag would be a setting that
+    does nothing while reading as if it did. Catches accepting and ignoring it."""
+    (tmp_path / "fleet.toml").write_text(
+        BASE + '\n[agents.chain]\ncommand = "/usr/bin/chain"\nmodel_flag = "--model"\n'
+    )
+    with pytest.raises(ConfigError, match=r"\[agents\.chain\].*model_flag"):
+        load_config(tmp_path)

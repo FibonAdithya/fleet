@@ -10,12 +10,15 @@ commands._post lost project-b#22 before it was changed to add first.
 
 from __future__ import annotations
 
+from fleet import escalation
 from fleet import labels as labels_module
 from fleet.model import (
+    Adopt,
     Advance,
     Assign,
     Close,
     CloseIssue,
+    Comment,
     Continue,
     Dispatch,
     Drain,
@@ -50,15 +53,18 @@ def _to_state(task: int, state: str, extra: tuple[str, ...] = ()) -> SetLabels:
     )
 
 
-def _attempt_label(attempt: int, policy: Policy) -> str:
-    """Clamped at max_attempts. labels.static_vocabulary is sized from that
-    number, so attempt-(cap+1) is a label gh has never heard of -- and gh
-    refuses an unknown label by failing the whole edit and changing nothing.
+def _attempt_label(attempt: int) -> str:
+    """Never clamped. An owner's answer raises the attempt cap past
+    `max_attempts` (model.effective_caps), so attempt-(cap+1) is a legitimate
+    label, and clamping it writes attempt-2 for attempt 3: `task.attempts` stays
+    2 and the cap never binds. A label outside labels.static_vocabulary is
+    created by HerdrExecutor.apply before it is added, because gh refuses an
+    unknown label by failing the whole edit and changing nothing.
 
-    Clamped at the top only. An attempt of 0 raises out of labels.attempt_label,
-    because a zero attempt is the silent-reset defect this counter used to have,
-    not a number to round up."""
-    return labels_module.attempt_label(min(attempt, policy.max_attempts))
+    An attempt of 0 raises out of labels.attempt_label, because a zero attempt
+    is the silent-reset defect this counter used to have, not a number to round
+    up."""
+    return labels_module.attempt_label(attempt)
 
 
 def expand(intent: Intent, policy: Policy) -> list[Effect]:
@@ -70,7 +76,7 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         # to learn the one `gh` is authenticated as. HerdrExecutor writes
         # ownership when it starts the agent -- see herdr_executor.apply.
         return [
-            _to_state(intent.task, "claimed", (_attempt_label(intent.attempt, policy),)),
+            _to_state(intent.task, "claimed", (_attempt_label(intent.attempt),)),
             StartAgent(task=intent.task, role=intent.role, base=intent.base),
         ]
 
@@ -84,7 +90,7 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         return [
             StopAgent(task=intent.task),
             Assign(task=intent.task, owner=None),
-            _to_state(intent.task, "ready", (_attempt_label(intent.attempt, policy),)),
+            _to_state(intent.task, "ready", (_attempt_label(intent.attempt),)),
         ]
 
     if isinstance(intent, Rebase):
@@ -97,7 +103,8 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
             _to_state(
                 intent.task,
                 "ready",
-                (labels_module.rebase_label(min(intent.rebase, policy.max_rebases)),),
+                # Not clamped, for the reason `_attempt_label` is not.
+                (labels_module.rebase_label(intent.rebase),),
             ),
         ]
 
@@ -105,11 +112,30 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         return [
             StopAgent(task=intent.task),
             Assign(task=intent.task, owner=None),
+            Comment(task=intent.task, body=escalation.render(intent.reason, intent.detail)),
             _to_state(intent.task, "human"),
         ]
 
     if isinstance(intent, Unblock):
         return [_to_state(intent.task, "ready")]
+
+    if isinstance(intent, Adopt):
+        # Every label here is in labels.static_vocabulary, so none needs
+        # creating. `agent-reported` is left on: it is the box's, and the
+        # record of where the issue came from.
+        if policy.chain_default_area is None:
+            raise ValueError(f"cannot adopt task {intent.task}: no [chain] default_area")
+        return [
+            _to_state(
+                intent.task,
+                "ready",
+                (
+                    labels_module.class_label("bug"),
+                    labels_module.AUTO_OK,
+                    labels_module.area_label(policy.chain_default_area),
+                ),
+            )
+        ]
 
     if isinstance(intent, Retire):
         # StopAgent for the same reason Advance carries one: an agent left in the

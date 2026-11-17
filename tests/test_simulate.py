@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from conftest import FIXTURE_POLICY
-from fleet.model import Advance, CloseIssue, Continue, Dispatch, Rebase, Release, Retire
+from fleet.model import Advance, CloseIssue, Continue, Dispatch, Escalate, Rebase, Release, Retire
 from fleet.runlog import RunLog
 from fleet.runlog import read as read_runlog
 from fleet.simulate import ScenarioError, _apply_to_rows, load_scenario, render_intent, run
@@ -501,3 +501,17 @@ def test_a_relabel_to_a_state_with_no_label_is_refused():
     }
     with pytest.raises(ScenarioError, match="unknown state"):
         run(bad, ROOT)
+
+
+def test_render_intent_omits_escalate_detail():
+    assert render_intent(Escalate(5, "over_budget", "x")) == "Escalate(5, over_budget)"
+
+
+def test_a_rendered_adopt_is_a_recognized_intent_shape():
+    """`_shape` refuses any name absent from `_INTENTS`, so a scenario could not
+    `expect:` an Adopt without it there."""
+    from fleet.model import Adopt
+    from fleet.simulate import _shape
+
+    assert render_intent(Adopt(task=9)) == "Adopt(9)"
+    assert _shape(render_intent(Adopt(task=9))) == ("Adopt", ("9",))

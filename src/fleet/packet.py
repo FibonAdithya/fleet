@@ -105,8 +105,24 @@ def parse_latest(comments: list[str], kind: str) -> dict | None:
     must match `kind` -- matching on the marker alone lets a comment carrying
     both a handoff and a verdict return the wrong one.
     """
+    found = _latest(comments, kind)
+    return found[1] if found is not None else None
+
+
+def latest_index(comments: list[str], kind: str) -> int | None:
+    """The index in `comments` of the payload `parse_latest` returns, or None.
+
+    The reader reads the comments after it: an allocator escalation or an
+    owner's answer written after a packet makes it stale (`reader.current_packet`).
+    """
+    found = _latest(comments, kind)
+    return found[0] if found is not None else None
+
+
+def _latest(comments: list[str], kind: str) -> tuple[int, dict] | None:
     marker = MARKERS[kind]
-    for body in reversed(comments):
+    for index in range(len(comments) - 1, -1, -1):
+        body = comments[index]
         if marker not in body:
             continue
         for block in reversed(_BLOCK.findall(body)):
@@ -114,6 +130,8 @@ def parse_latest(comments: list[str], kind: str) -> dict | None:
                 payload = json.loads(block)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(payload, dict):
+                continue
             if payload.get("schema") == SCHEMA_IDS[kind]:
-                return payload
+                return index, payload
     return None

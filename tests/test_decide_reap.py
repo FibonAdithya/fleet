@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 from datetime import UTC, datetime, timedelta
 
-from fleet.decide import decide
+from fleet.decide import _advance, decide
 from fleet.model import (
     Advance,
     AgentState,
@@ -182,13 +182,65 @@ def test_a_second_failure_escalates_rather_than_making_a_third_attempt():
     assert only(intents, Release) == []
 
 
+def test_answered_task_gets_a_third_attempt():
+    """An owner answer raises the attempt cap to max_attempts * (1 + answers).
+    Catches `_fail` still comparing against the bare policy cap, which escalates
+    an answered task straight back to the owner without trying the answer."""
+    agents = [AgentState(task=1, status="dirty", change_seq=10)]
+    task = claimed(attempts=2, answers=1)
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Release(task=1, reason="dirty_exit", attempt=3) in intents
+    assert only(intents, Escalate) == []
+
+
+def test_answered_task_attempt_at_new_cap_is_released():
+    """The boundary of the raised cap: attempt 4 of 4 is allowed. Catches `>=`
+    for `>`, and `max_attempts + answers` (cap 3) for `max_attempts * (1 + answers)`."""
+    agents = [AgentState(task=1, status="dirty", change_seq=10)]
+    task = claimed(attempts=3, answers=1)
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Release(task=1, reason="dirty_exit", attempt=4) in intents
+    assert only(intents, Escalate) == []
+
+
+def test_answered_task_escalates_after_its_new_allowance():
+    """The raised cap still binds. Catches an answer that lifts the cap entirely."""
+    agents = [AgentState(task=1, status="dirty", change_seq=10)]
+    task = claimed(attempts=4, answers=1)
+    intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
+    assert Escalate(task=1, reason="attempts_exhausted") in intents
+    assert only(intents, Release) == []
+
+
+def test_old_attempt_packet_does_not_advance_after_answer():
+    """Regression guard: a packet is bound to the task's current attempt, not to
+    the cap. An answered task on attempt 3 must not advance on attempt 1's
+    packet. Catches a change that compares the packet's attempt to the cap."""
+    stale = {"to": "review", "attempt": 1, "from": {"role": "implementer"}}
+    task = claimed(attempts=3, answers=1, packet=stale)
+    assert _advance(task) == []
+    fresh = {"to": "review", "attempt": 3, "from": {"role": "implementer"}}
+    current = claimed(attempts=3, answers=1, packet=fresh)
+    assert _advance(current) == [Advance(task=1, to="review")]
+
+
 def test_a_claimed_task_with_no_live_agent_is_released_even_at_the_attempt_cap():
     """Ledger drift; spec §5 states this row unconditionally. Catches applying
     the attempt cap to it, which burns a task to NEEDS_HUMAN for a daemon
-    restart -- the one event FleetState is disposable in order to survive."""
+    restart -- the one event FleetState is disposable in order to survive.
+    The attempt is held at the effective cap so a drift that repeats every tick
+    creates no new labels; it is still released, never escalated."""
     intents, _ = decide(FleetState(), [claimed(attempts=2)], POLICY, [], T0)
-    assert Release(task=1, reason="no_agent", attempt=3) in intents
+    assert Release(task=1, reason="no_agent", attempt=2) in intents
     assert only(intents, Escalate) == []
+
+
+def test_answered_task_drift_gets_the_raised_cap():
+    """The drift release is held at the effective cap, not the policy's: an
+    answered task on attempt 2 of 4 drifts to attempt 3. Catches the hold using
+    `policy.max_attempts` directly."""
+    intents, _ = decide(FleetState(), [claimed(attempts=2, answers=1)], POLICY, [], T0)
+    assert intents == [Release(task=1, reason="no_agent", attempt=3)]
 
 
 def test_over_per_task_budget_releases():
@@ -535,7 +587,7 @@ def test_a_working_agent_over_the_per_task_ceiling_on_a_continuation_escalates()
     task = claimed(number=5, state="review")
     agents = [AgentState(task=5, status="working", change_seq=4, cost_usd=2.5)]
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
-    assert intents == [Escalate(task=5, reason="over_budget")]
+    assert intents == [Escalate(task=5, reason="over_budget", detail="spent 2.50 of 2.00")]
 
 
 def test_a_continuation_agent_exactly_at_the_ceiling_is_left_alone():
@@ -577,6 +629,25 @@ def test_a_handback_past_the_cap_escalates():
     forever, burning the fleet's budget on one task all night."""
     task = claimed(number=4, state="claimed", attempts=1, rebases=1, packet=HANDBACK)
     intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert intents == [Escalate(task=4, reason="rebases_exhausted")]
+
+
+def test_answers_raise_rebase_cap():
+    """Two answers on a one-rebase cap allow rebase 3. Catches the rebase cap
+    ignoring answers, and answers treated as a flag rather than a count."""
+    task = claimed(number=4, state="claimed", attempts=1, rebases=2, answers=2, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [task], POLICY, [], T0)
+    assert intents == [Rebase(task=4, rebase=3)]
+
+
+def test_answered_rebase_loop_escalates():
+    """The raised rebase cap still ends. With max_rebases=1 and one answer the
+    cap is 2: rebase 2 is allowed, a third handback escalates."""
+    at_one = claimed(number=4, state="claimed", attempts=1, rebases=1, answers=1, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [at_one], POLICY, [], T0)
+    assert intents == [Rebase(task=4, rebase=2)]
+    at_two = claimed(number=4, state="claimed", attempts=1, rebases=2, answers=1, packet=HANDBACK)
+    intents, _ = decide(FleetState(), [at_two], POLICY, [], T0)
     assert intents == [Escalate(task=4, reason="rebases_exhausted")]
 
 
@@ -890,6 +961,10 @@ def test_a_handback_from_a_previous_attempt_is_not_a_rebase():
     did not make, hit `max_rebases`, and went to NEEDS_HUMAN naming
     `rebases_exhausted` for work that never happened. `_advance` implements
     exactly this check on exactly this shape; this path did not.
+
+    The drift release's attempt is held at the effective cap (2 here) so a
+    drift that repeats every tick creates no new labels; it is still a
+    release, never an escalation.
     """
     stale = claimed(
         number=4,
@@ -899,7 +974,7 @@ def test_a_handback_from_a_previous_attempt_is_not_a_rebase():
     )
     intents, _ = decide(FleetState(), [stale], POLICY, [], T0)
     assert only(intents, Escalate) == []
-    assert intents == [Release(task=4, reason="no_agent", attempt=3)]
+    assert intents == [Release(task=4, reason="no_agent", attempt=2)]
 
 
 def test_a_handback_with_no_attempt_at_all_is_not_a_rebase():
@@ -1035,3 +1110,131 @@ def test_a_working_agent_whose_sequence_and_transcript_both_hold_is_stalled():
     agents = [AgentState(task=1, status="working", change_seq=10, transcript_bytes=100)]
     intents, _ = decide(prev, [claimed()], POLICY, agents, T0 + timedelta(minutes=10))
     assert Release(task=1, reason="stalled", attempt=2) in intents
+
+
+def _chain_policy():
+    return dataclasses.replace(
+        POLICY,
+        routes=(*POLICY.routes, ("build", ("chain",))),
+        agents=(("chain", "chain", "chain"),),
+        ceilings=(("chain", 40.0),),
+    )
+
+
+def test_chain_agent_under_own_ceiling_not_over_budget():
+    """A chain run spends 30 against a global ceiling of 2 and its own of 40.
+    Catches the over-budget check still reading `policy.per_task_usd`."""
+    task = dataclasses.replace(claimed(), klass="build")
+    agents = [AgentState(task=1, status="working", change_seq=10, cost_usd=30.0)]
+    intents, _ = decide(FleetState(), [task], _chain_policy(), agents, T0)
+    assert only(intents, Release) == []
+    assert only(intents, Escalate) == []
+
+
+def test_chain_agent_over_own_ceiling():
+    task = dataclasses.replace(claimed(), klass="build")
+    agents = [AgentState(task=1, status="working", change_seq=10, cost_usd=41.0)]
+    intents, _ = decide(FleetState(), [task], _chain_policy(), agents, T0)
+    assert Release(task=1, reason="over_budget", attempt=2) in intents
+
+
+def test_later_stage_over_budget_uses_the_roles_ceiling():
+    """The REVIEW-stage branch, which escalates rather than releases. A reviewer
+    on a kind with a 5.0 ceiling at cost 3 is under it; at 6 it escalates and
+    the detail names the ceiling it was measured against."""
+    policy = dataclasses.replace(
+        POLICY,
+        agents=(("reviewer", "codex", "m"),),
+        ceilings=(("codex", 5.0),),
+    )
+    task = claimed(state="review")
+    under = [AgentState(task=1, status="working", change_seq=10, cost_usd=3.0)]
+    intents, _ = decide(FleetState(), [task], policy, under, T0)
+    assert only(intents, Escalate) == []
+    over = [AgentState(task=1, status="working", change_seq=10, cost_usd=6.0)]
+    intents, _ = decide(FleetState(), [task], policy, over, T0)
+    assert Escalate(task=1, reason="over_budget", detail="spent 6.00 of 5.00") in intents
+
+
+def _hold(state, task, policy, minutes, paused):
+    """Tick once a minute for `minutes` with a chain agent whose `change_seq`
+    never moves, collecting every intent."""
+    seen = []
+    agents = [AgentState(task=1, status="working", change_seq=3, paused=paused)]
+    for minute in range(1, minutes + 1):
+        intents, state = decide(state, [task], policy, agents, T0 + timedelta(minutes=minute))
+        seen.extend(intents)
+    return seen, state
+
+
+def test_paused_chain_run_is_not_stalled():
+    """A chain run paused on a usage limit makes no progress for an hour, and
+    under stall_minutes = 10 must not be released for it. Catches an `_observe`
+    that ignores `paused`."""
+    task = dataclasses.replace(claimed(), klass="build")
+    prev = FleetState(seen=((1, Observation(change_seq=3, since=T0)),))
+    intents, _ = _hold(prev, task, _chain_policy(), 60, paused=True)
+    assert only(intents, Release) == []
+    assert only(intents, Escalate) == []
+
+
+def test_unpaused_chain_run_unchanged_for_an_hour_is_stalled():
+    """The control: the same hour without `paused` is a stall. Catches an
+    `_observe` that refreshes the timer for every chain agent."""
+    task = dataclasses.replace(claimed(), klass="build")
+    prev = FleetState(seen=((1, Observation(change_seq=3, since=T0)),))
+    intents, _ = _hold(prev, task, _chain_policy(), 60, paused=False)
+    assert Release(task=1, reason="stalled", attempt=2) in intents
+
+
+def test_stall_timer_restarts_when_a_pause_ends():
+    """Paused for an hour, then running with the same `change_seq`: the stall
+    timer counts from the last paused tick, not from before the pause. Catches a
+    REAP that merely skips paused agents while `since` stays at T0, which
+    releases the run on the first tick after it resumes."""
+    task = dataclasses.replace(claimed(), klass="build")
+    prev = FleetState(seen=((1, Observation(change_seq=3, since=T0)),))
+    _, state = _hold(prev, task, _chain_policy(), 60, paused=True)
+    running = [AgentState(task=1, status="working", change_seq=3)]
+    intents, state = decide(
+        state, [task], _chain_policy(), running, T0 + timedelta(minutes=69, seconds=59)
+    )
+    assert only(intents, Release) == []
+    intents, _ = decide(state, [task], _chain_policy(), running, T0 + timedelta(minutes=70))
+    assert Release(task=1, reason="stalled", attempt=2) in intents
+
+
+# --- a held chain outcome --------------------------------------------------------
+#
+# A chain run whose outcome fleet is still writing is reported `holding`: its
+# cost is final and real, so the drain counts it and a reap charges it, but no
+# per-task ceiling applies to a run that has already finished.
+
+
+def test_a_held_agent_over_its_ceiling_is_not_released_or_escalated():
+    """The claimed path's `_fail(over_budget)` and the later-stage path's
+    over_budget Escalate would both relabel the row over the outcome being
+    written."""
+    for state in ("claimed", "review", "integrating"):
+        agents = [AgentState(task=1, status="working", change_seq=10, cost_usd=50.0, holding=True)]
+        intents, _ = decide(FleetState(), [claimed(state=state)], POLICY, agents, T0)
+        assert [i for i in intents if getattr(i, "task", None) == 1] == [], state
+
+
+def test_a_held_agent_still_counts_toward_the_drain():
+    """`committed = spent + every live cost`: a held run's dollars are spent,
+    so a fleet at the drain line dispatches nothing new."""
+    held = AgentState(task=1, status="working", change_seq=10, cost_usd=18.0, holding=True)
+    ready = Task(number=2, title="t", state="ready", area="docs", klass="patch", auto_ok=True)
+    intents, _ = decide(FleetState(spent_usd=5.0), [claimed(), ready], POLICY, [held], T0)
+    assert only(intents, Dispatch) == []
+
+
+def test_a_held_agent_the_stall_timer_releases_is_charged():
+    """The stall timer still bounds a hold whose writes never land, and the
+    release charges the run's whole cost."""
+    held = AgentState(task=1, status="working", change_seq=10, cost_usd=18.0, holding=True)
+    seen = Observation(change_seq=10, since=T0 - timedelta(minutes=11))
+    intents, state = decide(FleetState(seen=((1, seen),)), [claimed()], POLICY, [held], T0)
+    assert Release(task=1, reason="stalled", attempt=2) in intents
+    assert state.spent_usd == 18.0

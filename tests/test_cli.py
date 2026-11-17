@@ -10,7 +10,9 @@ import pytest
 from click.testing import CliRunner
 
 from conftest import FIXTURE_POLICY, git
+from fleet import chain_executor
 from fleet.cli import ReadOnlyGh, _context, _git_facts, main
+from fleet.composite_executor import CompositeExecutor
 from fleet.config import load_config
 from fleet.daemon import Daemon
 from fleet.gh import FakeGh
@@ -129,7 +131,10 @@ def test_plan_always_wraps_the_client_in_read_only(monkeypatch, cfg):
     that the help says so."""
     monkeypatch.chdir(cfg.root)
     seen = {}
-    monkeypatch.setattr("fleet.cli.do_plan", lambda cfg_, gh, now: seen.setdefault("gh", gh) and [])
+    monkeypatch.setattr(
+        "fleet.cli.do_plan", lambda cfg_, gh, now, **kw: seen.setdefault("gh", gh) and []
+    )
+    monkeypatch.setattr("fleet.cli._gh_login", lambda: "FibonAdithya")
     result = CliRunner().invoke(main, ["plan"])
     assert result.exit_code == 0, result.output
     assert isinstance(seen["gh"], ReadOnlyGh)
@@ -162,6 +167,7 @@ def test_run_once_builds_its_collaborators_and_ticks_exactly_once(monkeypatch, t
         socket_path=tmp_path / "fleet.sock",
         runlog_path=tmp_path / "run.jsonl",
         worktree_root=tmp_path / "worktrees",
+        answers_dir=tmp_path / "answers",
     )
 
     calls = []
@@ -204,6 +210,7 @@ def _run_cfg(tmp_path):
         socket_path=tmp_path / "fleet.sock",
         runlog_path=tmp_path / "run.jsonl",
         worktree_root=tmp_path / "worktrees",
+        answers_dir=tmp_path / "answers",
     )
 
 
@@ -219,6 +226,12 @@ def _fake_backends(monkeypatch, cfg, gh, herdr):
     monkeypatch.setattr("fleet.cli.RealGh", lambda slug: gh)
     monkeypatch.setattr("fleet.cli.RealHerdr", lambda **kwargs: herdr)
     monkeypatch.setattr("fleet.cli._gh_login", lambda: "FibonAdithya")
+    # The fixture policy routes build and bug to chain, so `fleet run` builds a
+    # ChainExecutor. Answered as a `chain` that is not installed, so no test
+    # runs a real one found on PATH.
+    monkeypatch.setattr(
+        "fleet.chain_executor.run_cli", lambda argv: (127, "", f"{argv[0]}: not installed")
+    )
 
 
 def _run_id_of(output: str) -> str:
@@ -261,6 +274,31 @@ def test_a_restarted_fleet_run_resumes_the_night_s_spend(monkeypatch, tmp_path):
     # The line an operator reads at 2am: this process knows what the last one
     # spent. `$0.00` here is the defect, and it is silent without this.
     assert "spent=$7.50" in second.output
+
+
+def test_fleet_run_adopts_the_owners_agent_reported_issue(monkeypatch, tmp_path):
+    """The daemon has to know whose issues are the owner's: `fleet run` passes
+    `gh`'s login to the Daemon, which passes it to the ledger read. Without that
+    wiring no row reads `by_owner` and ADOPT never fires outside its unit tests.
+    A row by anyone else is left in triage."""
+    cfg = dataclasses.replace(_run_cfg(tmp_path), chain_default_area="eval")
+    gh, herdr = FakeGh(), FakeHerdr(worktree_root=cfg.worktree_root)
+    _fake_backends(monkeypatch, cfg, gh, herdr)
+    gh.ensure_label("agent-reported")
+    mine = gh.create_issue("lid rounds early", "b", ["agent-reported"])
+    theirs = gh.create_issue("lid rounds late", "b", ["agent-reported"], author="someone-else")
+
+    result = CliRunner().invoke(main, ["run", "--once"])
+
+    assert result.exit_code == 0, result.output
+    assert set(gh.get_issue(mine)["labels"]) == {
+        "agent-reported",
+        "fleet:ready",
+        "class:bug",
+        "fleet:auto-ok",
+        "area:eval",
+    }
+    assert gh.get_issue(theirs)["labels"] == ["agent-reported"]
 
 
 def test_run_new_run_mints_a_fresh_id_and_starts_at_zero(monkeypatch, tmp_path):
@@ -354,3 +392,56 @@ def test_discover_refuses_an_area_the_target_repo_does_not_have(env, cfg):
     )
     assert result.exit_code == 2
     assert "not an area" in result.output and "allocator" in result.output
+
+
+def test_run_hands_the_daemon_a_composite_with_chain(monkeypatch, tmp_path):
+    """`fleet run` is the one command that builds a ChainExecutor, and it must
+    build it with the real `run_cli` looked up at call time (so the stand-in
+    from `_fake_backends` is what it holds) and herdr's failures deque."""
+    cfg = _run_cfg(tmp_path)
+    _fake_backends(monkeypatch, cfg, FakeGh(), FakeHerdr(worktree_root=cfg.worktree_root))
+    seen = {}
+
+    def fake_tick(self, now):
+        seen["executor"] = self.executor
+        self.snapshot = FleetSnapshot(
+            run_id=self.run_id,
+            tick=1,
+            at=now.isoformat(),
+            rows=(),
+            spent_usd=0.0,
+            fleet_usd=self.policy.fleet_usd,
+            free_slots=self.policy.slots,
+            held_areas=(),
+        )
+        return self.snapshot
+
+    monkeypatch.setattr(Daemon, "tick", fake_tick)
+    result = CliRunner().invoke(main, ["run", "--once"])
+    assert result.exit_code == 0, result.output
+    executor = seen["executor"]
+    assert isinstance(executor, CompositeExecutor)
+    assert executor.chain is not None
+    assert executor.chain.run_cli is chain_executor.run_cli
+    assert executor.chain.run_cli(["chain", "status"])[0] == 127
+    assert executor.chain.failures is executor.herdr.failures
+
+
+def test_discover_passes_class_and_spec_through(monkeypatch, cfg):
+    """`--class` defaults to bug and `--spec` reaches do_discover; any other
+    class is refused by click before anything is filed."""
+    seen = []
+    monkeypatch.chdir(cfg.root)
+    monkeypatch.setattr("fleet.cli.do_discover", lambda *a, **kw: (seen.append(kw), 7)[1])
+    base = ["discover", "--from", "1", "--title", "t", "--area", "eval", "--evidence", "x:1"]
+
+    assert CliRunner().invoke(main, base).exit_code == 0
+    spec = ["--class", "build", "--spec", "docs/ai/specs/x.md"]
+    assert CliRunner().invoke(main, [*base, *spec]).exit_code == 0
+    refused = CliRunner().invoke(main, [*base, "--class", "spec"])
+
+    assert [(kw["klass"], kw["spec"]) for kw in seen] == [
+        ("bug", None),
+        ("build", "docs/ai/specs/x.md"),
+    ]
+    assert refused.exit_code == 2

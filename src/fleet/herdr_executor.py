@@ -12,7 +12,10 @@ import logging
 import re
 from collections import deque
 
+from fleet import labels as labels_module
 from fleet import packet as packet_module
+from fleet import policy as policy_module
+from fleet.chain_executor import answers_path
 from fleet.config import FleetConfig
 from fleet.gh import GhClient
 from fleet.herdr import AGENT_ABSENT_CODES, Herdr, HerdrError
@@ -20,6 +23,7 @@ from fleet.model import (
     AgentState,
     Assign,
     CloseIssue,
+    Comment,
     Effect,
     SetLabels,
     StartAgent,
@@ -38,6 +42,10 @@ _SLUG_FALLBACK = "task"
 # a herdr that fails every removal would otherwise append once per task per
 # tick, all night, into a list nothing ever drains.
 _FAILURE_LIMIT = 64
+# The answers file is written by another system and read as untrusted input.
+# chain refuses an answers file over this many bytes, so the prompt does too.
+_ANSWERS_MAX_BYTES = 65536
+_ANSWERS_HEADING = "# Owner answers (from Telegram)"
 
 
 def slug_of(title: str) -> str:
@@ -60,6 +68,43 @@ def slug_of(title: str) -> str:
     return slug or _SLUG_FALLBACK
 
 
+def _fenced(text: str) -> str:
+    """`text` inside a code fence longer than any backtick run in it, so an
+    answer cannot close its own fence or pass for a prompt part of its own."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def _answers_part(cfg: FleetConfig, task: int) -> str | None:
+    """The prompt part for the owner's answers to `task`, or None when there is
+    no answers file. A file that cannot be read as a JSON list of objects with a
+    string `text` (or is over the size limit) yields a part saying so; it never
+    raises, since the prompt must still build."""
+    path = answers_path(cfg, task)
+    if not path.is_file():
+        return None
+    unreadable = f"{_ANSWERS_HEADING}\n\nThe owner's answers file could not be read."
+    try:
+        if path.stat().st_size > _ANSWERS_MAX_BYTES:
+            return unreadable
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return unreadable
+    if not isinstance(data, list):
+        return unreadable
+    texts: list[str] = []
+    for item in data:
+        text = item.get("text") if isinstance(item, dict) else None
+        if not isinstance(text, str):
+            return unreadable
+        texts.append(text)
+    if not texts:
+        return None
+    listing = "\n\n".join(f"{n}.\n{_fenced(text)}" for n, text in enumerate(texts, 1))
+    return f"{_ANSWERS_HEADING}\n\n{listing}"
+
+
 def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
     """Role prompt + issue body + latest handoff packet + latest verdict +
     AGENTS.md. Nothing else.
@@ -76,6 +121,10 @@ def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
     2026-09-25T11-23-12Z on project-b sent three fix-pass implementers back
     with no findings (each handed the same head straight back) and an integrator
     to escalate asking whether an approved verdict existed.
+
+    The owner's answers are the second addition: the file is the box's record of
+    what the owner said on Telegram, and without it a native role is the only
+    kind that would not see an answer. Each is fenced as untrusted text.
 
     A missing role prompt raises. An agent handed an empty role does something
     plausible and wrong, and a blank prompt buries the policy error that caused
@@ -95,6 +144,9 @@ def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
         role_prompt,
         f"# Issue #{task}: {issue.get('title', '')}\n\n{issue.get('body', '')}",
     ]
+    answers = _answers_part(cfg, task)
+    if answers is not None:
+        parts.append(answers)
     if latest is not None:
         parts.append("# Handoff packet\n\n```json\n" + json.dumps(latest, indent=2) + "\n```")
     if verdict is not None:
@@ -126,6 +178,10 @@ class HerdrExecutor:
         #: disagree with it. The bound is what makes a herdr that fails every
         #: removal survivable if a tick ever dies before the drain.
         self.failures: deque[str] = deque(maxlen=_FAILURE_LIMIT)
+        #: The seeded label set, built on first use; see `_ensure_runtime_labels`.
+        self._vocabulary: set[str] | None = None
+        #: Runtime labels this process has already created.
+        self._ensured: set[str] = set()
 
     def agents(self) -> list[AgentState]:
         return self.herdr.agents()
@@ -146,10 +202,13 @@ class HerdrExecutor:
                 # `remove` precisely so this order is safe; reversed, a failure
                 # between the two calls strands the task with no state label at
                 # all, invisible to every label query.
+                self._ensure_runtime_labels(effect.add)
                 self.gh.add_labels(effect.task, list(effect.add))
                 self.gh.remove_labels(effect.task, list(effect.remove))
             elif isinstance(effect, Assign):
                 self.gh.assign(effect.task, effect.owner)
+            elif isinstance(effect, Comment):
+                self.gh.comment(effect.task, effect.body)
             elif isinstance(effect, CloseIssue):
                 self.gh.close_issue(effect.task)
             elif isinstance(effect, StartAgent):
@@ -158,6 +217,30 @@ class HerdrExecutor:
                 self._stop(effect.task)
             else:
                 raise ValueError(f"cannot apply {effect!r}")
+
+    def _ensure_runtime_labels(self, names: tuple[str, ...]) -> None:
+        """Create each label outside the seeded vocabulary, once per process.
+
+        An owner's answer raises a task's caps past the policy's
+        (`model.effective_caps`), so `fleet:attempt-3` on a two-attempt policy is
+        a legitimate label the seed never created. gh refuses an unknown label by
+        failing the whole edit and changing nothing, so without this the answered
+        task's release never lands. The vocabulary is built from the same config
+        counters and ownership areas the seed uses, read once; `ensure_label`
+        tolerates a label that already exists, so a restart that ensures one
+        again is harmless.
+        """
+        if self._vocabulary is None:
+            self._vocabulary = labels_module.static_vocabulary(
+                self.cfg.max_attempts,
+                self.cfg.max_fix_passes,
+                self.cfg.max_rebases,
+                policy_module.area_names(self.cfg),
+            )
+        for name in names:
+            if name not in self._vocabulary and name not in self._ensured:
+                self.gh.ensure_label(name)
+                self._ensured.add(name)
 
     def _begin(self, effect: StartAgent) -> None:
         """Start the agent. A herdr failure is recorded, not raised.

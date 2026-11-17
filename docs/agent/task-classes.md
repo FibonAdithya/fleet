@@ -6,6 +6,8 @@
 | `spec` | planner | a spec and child issues | yes |
 | `investigation` | implementer, forbidden from writing `src/` | findings comment | yes |
 | `integration` | integrator | `integration` advanced | yes |
+| `build` | chain → integrator | merged commit | yes |
+| `bug` | chain → integrator | merged commit | yes |
 
 ## Where work may run
 
@@ -29,3 +31,4 @@ class may run unattended on `tig-server`.
 | `planner` | `claude` | `claude-sonnet-5` |
 | `scout` | `claude` | `claude-sonnet-5` |
 | `invariant-reviewer` | `claude` | `claude-sonnet-5` |
+| `chain` | `chain` | `chain` |

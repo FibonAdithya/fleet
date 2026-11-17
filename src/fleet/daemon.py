@@ -128,8 +128,13 @@ class Daemon:
         executor,
         runlog: RunLog,
         run_id: str,
+        *,
+        login: str | None = None,
     ) -> None:
         self.cfg = cfg
+        # The account `gh` runs as. The ledger read marks the issues it wrote as
+        # the owner's, which ADOPT requires; None adopts nothing.
+        self.login = login
         self.policy = policy
         self.gh = gh
         self.executor = executor
@@ -165,7 +170,7 @@ class Daemon:
         budget, rather than the reverse.
         """
         self.tick_number += 1
-        ledger = read_ledger(self.gh, self.policy.area_names)
+        ledger = read_ledger(self.gh, self.policy.area_names, login=self.login)
         agents = self.executor.agents()
         # After the read, never before. `RealHerdr.unpriced` reports what the
         # LAST snapshot could not price, so asking first answers for the

@@ -1,0 +1,43 @@
+name: chain-build-integrates
+proves: >-
+  harness: a `build` task routed `chain -> integrator` reaches the integrator.
+  The chain stage is one agent of kind chain; the `relabel` key stands in for
+  ChainExecutor's own ledger writes (the handoff to review and the approved
+  verdict that moves the row to fleet:integrating), which land while its run
+  still reports working. The clean exit that follows is reaped with Retire and
+  not released -- the row has left fleet:claimed, so it is a finished stage,
+  not ledger drift -- and the integrator is continued on the next tick, because
+  dispatch skips a task whose agent is still listed. The same order holds for
+  the real ChainExecutor, which reports a finished run `done` only once the
+  issue has left fleet:claimed, so its cost is charged by that Retire.
+seed:
+  policy: fixtures/policy/fleet-fixture
+  issues:
+    - {number: 5, title: "build the reporting epic", state: OPEN, assignees: [],
+       labels: ["fleet:ready", "fleet:auto-ok", "area:eval", "class:build"]}
+ticks:
+  # The build route's first stage is the chain role.
+  - outcomes: {}
+    expect:
+      - "Dispatch(5, chain, 1)"
+  # chain wrote its handoff and verdict: the row reads fleet:integrating while
+  # the run is still listed working. A working agent on a row that left
+  # claimed is neither drift nor a stall, so nothing is released.
+  - relabel: {5: integrating}
+    outcomes: {}
+    expect: []
+  # The run is reported finished. It is reaped, and its slot comes back.
+  - outcomes: {5: clean_exit}
+    packets: {5: {to: review, attempt: 1}}
+    expect:
+      - "Retire(5)"
+  # No agent on an integrating row: the integrator is started.
+  - outcomes: {}
+    expect:
+      - "Continue(5, integrator)"
+  # The integrator merges and hands off to done; the issue closes.
+  - relabel: {5: done}
+    outcomes: {5: clean_exit}
+    packets: {5: {to: done, attempt: 1}}
+    expect:
+      - "Close(5)"

@@ -11,12 +11,14 @@ from pathlib import Path
 
 import click
 
-from fleet import git, statesocket
+from fleet import chain_executor, git, statesocket
 from fleet import policy as policy_module
 from fleet import runlog as runlog_module
 from fleet import status as status_module
+from fleet.chain_executor import ChainExecutor
 from fleet.commands import do_block, do_discover, do_escalate, do_handoff, do_verdict
-from fleet.config import load_config
+from fleet.composite_executor import CompositeExecutor
+from fleet.config import CHAIN_KIND, load_config
 from fleet.daemon import Daemon, stop_on_signals
 from fleet.decide import decide
 from fleet.gh import RealGh
@@ -76,7 +78,7 @@ class ReadOnlyGh:
         return refuse
 
 
-def do_plan(cfg, gh, now: datetime) -> list[str]:
+def do_plan(cfg, gh, now: datetime, login: str | None = None) -> list[str]:
     """One tick of decide() against a live ledger, rendered.
 
     Read through `reader.read_ledger`, the daemon's own ledger read, and not
@@ -99,7 +101,9 @@ def do_plan(cfg, gh, now: datetime) -> list[str]:
     reachable by no test that does not talk to GitHub.
     """
     policy = policy_module.load(cfg)
-    tasks = read_ledger(gh, policy.area_names)
+    # `login` as the daemon passes it: without it no row is the owner's, and
+    # an Adopt the next tick makes would never show here.
+    tasks = read_ledger(gh, policy.area_names, login=login)
     intents, _ = decide(FleetState(), tasks, policy, [], now)
     lines: list[str] = []
     if any(task.state == "claimed" for task in tasks):
@@ -241,11 +245,24 @@ def escalate(task, question, considered, did, checks, commands):
 @click.option("--title", required=True)
 @click.option("--area", required=True, help="An area from the target repository's ownership map.")
 @click.option("--evidence", required=True, help="file:line and what is wrong there.")
-def discover(parent, title, area, evidence):
+@click.option(
+    "--class",
+    "klass",
+    type=click.Choice(["patch", "build", "bug"]),
+    default="bug",
+    show_default=True,
+    help="bug for a defect you found; a planner's child is patch or build.",
+)
+@click.option(
+    "--spec",
+    default=None,
+    help="build only: the spec's path, committed on the integration branch.",
+)
+def discover(parent, title, area, evidence, klass, spec):
     """File an unrelated defect for someone else. Then carry on with your task."""
     # The only command that records no role: do_discover ignores identity, and a
-    # discovery lands in TRIAGE whoever files it. Requiring FLEET_ROLE here would
-    # refuse a human triaging by hand and gate nothing.
+    # discovery's labels follow its --class, whoever files it. Requiring
+    # FLEET_ROLE here would refuse a human triaging by hand and gate nothing.
     cfg, gh, _ = _context(role_required=False)
     known = policy_module.area_names(cfg)
     if area not in known:
@@ -253,8 +270,20 @@ def discover(parent, title, area, evidence):
             f"{area!r} is not an area in {cfg.ownership}; choose from {', '.join(sorted(known))}",
             param_hint="--area",
         )
-    number = do_discover(cfg, gh, parent=parent, title=title, area=area, evidence=evidence)
-    click.echo(f"filed #{number} in triage (discovered by #{parent})")
+    try:
+        number = do_discover(
+            cfg,
+            gh,
+            parent=parent,
+            title=title,
+            area=area,
+            evidence=evidence,
+            klass=klass,
+            spec=spec,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"filed #{number} as {klass} (discovered by #{parent})")
 
 
 @main.command()
@@ -315,7 +344,7 @@ def plan():
     # have seen that. The command previews; the wrapper is what makes "writes
     # nothing" a property of the code path rather than of having read it.
     gh = ReadOnlyGh(RealGh(cfg.repo_slug))
-    for line in do_plan(cfg, gh, datetime.now(UTC)):
+    for line in do_plan(cfg, gh, datetime.now(UTC), login=_gh_login()):
         click.echo(line)
 
 
@@ -390,10 +419,14 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
         routing={role: (kind, model) for role, kind, model in policy.agents},
     )
     owner = _gh_login()
-    executor = HerdrExecutor(herdr, gh, cfg, owner=owner)
+    # Looked up here, not bound as a default: a test replaces the module's
+    # `run_cli` so that no test runs a real `chain` found on PATH.
+    executor = build_executor(
+        cfg, policy, gh, HerdrExecutor(herdr, gh, cfg, owner=owner), chain_executor.run_cli
+    )
     run_id, origin = resolve_run_id(cfg.runlog_path, run_id, new_run, datetime.now(UTC))
     log = RunLog(cfg.runlog_path, run_id=run_id)
-    daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id)
+    daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id, login=owner)
 
     stop = threading.Event()
     # PULL-based: the socket calls back into the daemon's own last snapshot on
@@ -424,6 +457,41 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
     finally:
         stop.set()
         thread.join(timeout=2)
+
+
+def build_executor(cfg, policy, gh, herdr: HerdrExecutor, run_cli) -> CompositeExecutor:
+    """The daemon's executor: herdr's, plus a ChainExecutor when any route
+    names a role of kind `chain`.
+
+    Only `fleet run` calls this. `ChainExecutor.agents()` writes a finished
+    run's packets to the ledger, so it must never be built on a read-only path
+    (`fleet plan`, `fleet status`, the simulator).
+
+    The task map sits next to the run log, in the daemon's state directory:
+    one map per target repository, as the run log is.
+
+    With no chain route, a task map that still names runs (the routes changed
+    while runs were mapped) is recorded once: nothing will stop or report
+    those runs, and they may still be spending.
+    """
+    state_path = cfg.runlog_path.parent / "chain-runs.json"
+    routed = {role for _, stages in policy.routes for role in stages}
+    if any(kind == CHAIN_KIND for role, kind, _ in policy.agents if role in routed):
+        chain = ChainExecutor(cfg, gh, cfg.agents[CHAIN_KIND].command, run_cli, state_path)
+        return CompositeExecutor(herdr, chain, policy)
+    composite = CompositeExecutor(herdr, None, policy)
+    try:
+        runs, _ = chain_executor.load_state(state_path)
+    except chain_executor.ChainStateError as exc:
+        composite.failures.append(f"no route runs chain, and {exc}")
+        return composite
+    if runs:
+        named = ", ".join(f"task {task}: {run_id}" for task, run_id in sorted(runs.items()))
+        composite.failures.append(
+            f"no route runs chain, but {state_path} maps runs ({named}); fleet will "
+            "neither stop nor report them -- check `chain status` and abort them by hand"
+        )
+    return composite
 
 
 @main.command()

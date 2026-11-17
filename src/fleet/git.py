@@ -53,3 +53,15 @@ def branch_name(root: Path, *, allow_detached: bool = False) -> str:
         # resolving to the wrong branch, which "HEAD" would.
         return f"detached at {head_sha(root)}"
     return name
+
+
+def exists_on(root: Path, ref: str, path: str) -> bool:
+    """Whether `path` is a file committed at `ref`. A blob, not just any
+    object: `cat-file -e` also accepts a directory (a tree), which no caller
+    can read as a file. A git failure of any kind, a missing ref included,
+    reads as absent: every caller refuses on absent, so an unreadable repo
+    refuses rather than proceeds."""
+    try:
+        return _git(root, "cat-file", "-t", f"{ref}:{path}") == "blob"
+    except RuntimeError:
+        return False

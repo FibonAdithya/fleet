@@ -10,7 +10,7 @@ STATES = ("triage", "ready", "claimed", "review", "integrating", "blocked", "hum
 # repository's real areas are the Area column of its ownership.md
 # (policy.area_names); nothing validates against this tuple when a policy exists.
 AREAS = ("eval", "train", "models", "data", "configs", "docs")
-CLASSES = ("patch", "spec", "investigation", "integration")
+CLASSES = ("patch", "spec", "investigation", "integration", "build", "bug")
 
 # What an area name must look like to be a label gh and humans can both type.
 AREA_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -59,6 +59,12 @@ def rebase_label(n: int) -> str:
     if n < 1:
         raise ValueError("rebases start at 1")
     return f"fleet:rebase-{n}"
+
+
+def answered_label(n: int) -> str:
+    if n < 1:
+        raise ValueError("answers start at 1")
+    return f"fleet:answered-{n}"
 
 
 def all_state_labels() -> list[str]:

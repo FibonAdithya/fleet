@@ -7,6 +7,7 @@ one was missed kept passing against a stale config.
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,7 +35,8 @@ def cfg(tmp_path):
     # cfg needs a real one; the vendored fixture's is the same file every other
     # policy test already trusts.
     shutil.copyfile(FIXTURE_POLICY / "docs/agent/ownership.md", tmp_path / "o.md")
-    return load_config(tmp_path)
+    # answers_dir defaults to the real home; a test must never read or write it.
+    return dataclasses.replace(load_config(tmp_path), answers_dir=tmp_path / "answers")
 
 
 def git(root: Path, *args: str) -> None:
