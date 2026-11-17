@@ -21,7 +21,7 @@
       "verdict": null,
       "pr": null,
       "branch": "chain/r-g",
-      "base": null,
+      "base": "integration",
       "base_sha": null,
       "head_sha": null,
       "test_command": null
@@ -46,7 +46,7 @@
       "verdict": null,
       "pr": null,
       "branch": "chain/r-f",
-      "base": null,
+      "base": "integration",
       "base_sha": null,
       "head_sha": null,
       "test_command": null
@@ -59,7 +59,7 @@
         "kind": "build"
       },
       "status": "approved",
-      "stage": "done",
+      "stage": "merge",
       "run_spent_usd": 3.5,
       "created_at": 1002.0,
       "updated_at": 1102.0,
@@ -74,7 +74,7 @@
         "url": "https://github.com/acme/widgets/pull/42"
       },
       "branch": "chain/r-e",
-      "base": "main",
+      "base": "integration",
       "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "head_sha": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
       "test_command": "make check"
@@ -86,7 +86,7 @@
         "number": 7,
         "kind": "build"
       },
-      "status": "escalated",
+      "status": "ended",
       "stage": "implement",
       "run_spent_usd": 0.0,
       "created_at": 1003.0,
@@ -106,7 +106,7 @@
       "verdict": null,
       "pr": null,
       "branch": "chain/r-d",
-      "base": null,
+      "base": "integration",
       "base_sha": null,
       "head_sha": null,
       "test_command": null
@@ -131,11 +131,13 @@
       "verdict": {
         "issue_verdict": "not_reproduced",
         "duplicate_of": null,
-        "tried": "ran the repro twice"
+        "tried": [
+          "ran the repro twice"
+        ]
       },
       "pr": null,
       "branch": "chain/r-c",
-      "base": null,
+      "base": "integration",
       "base_sha": null,
       "head_sha": null,
       "test_command": null
@@ -164,7 +166,7 @@
       },
       "pr": null,
       "branch": "chain/r-b",
-      "base": null,
+      "base": "integration",
       "base_sha": null,
       "head_sha": null,
       "test_command": null
@@ -189,7 +191,7 @@
       "verdict": null,
       "pr": null,
       "branch": "chain/r-a",
-      "base": null,
+      "base": "integration",
       "base_sha": null,
       "head_sha": null,
       "test_command": null

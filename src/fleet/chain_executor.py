@@ -602,9 +602,21 @@ class ChainExecutor:
         reads an assigned `fleet:human` issue as taken by the owner.
         """
         task = effect.task
-        # A run already mapped to this task is stopped first: a second run on
-        # one task would spend twice, and the first, unmapped, would never be
-        # reported or stopped again.
+        # chain has no idempotence for a repeated `chain start --fleet` on one
+        # task, and a second run would spend twice. So a mapped run that may
+        # still be going -- live in the last read, or not read at all yet --
+        # is kept and nothing is started. Only a run known to have ended is
+        # forgotten and replaced.
+        run_id = self._runs.get(task)
+        if run_id is not None:
+            status = self._last_status.get(run_id)
+            ended = run_id in self._outcomes or (status is not None and status not in LIVE_STATUSES)
+            if not ended:
+                self._record(
+                    f"task {task}: started no chain run: run {run_id} is mapped and "
+                    f"{'live' if status else 'of unknown status'} ({status}); keeping it"
+                )
+                return
         self._forget(task)
         issue = self.gh.get_issue(task)
         try:
@@ -832,5 +844,18 @@ def _verdict_text(run: ChainRun) -> str:
         if isinstance(number, bool) or not isinstance(number, int):
             raise ValueError(f"chain run {run.id} is a duplicate of {number!r}, not an issue")
         return f"Duplicate of #{number}\n\nchain run {run.id} found this issue already filed."
-    tried = verdict.get("tried") or "chain did not say what it tried"
-    return f"chain run {run.id} could not reproduce this bug.\n\nWhat was tried: {tried}"
+    head = f"chain run {run.id} could not reproduce this bug."
+    tried = _tried_items(verdict.get("tried"))
+    if not tried:
+        return f"{head}\n\nchain did not say what it tried."
+    return f"{head}\n\nWhat was tried:\n" + "\n".join(f"- {item}" for item in tried)
+
+
+def _tried_items(tried: object) -> list[str]:
+    """chain's `verdict.tried`: a list of strings, or one string from an older
+    run. Anything else, and blank entries, read as nothing said."""
+    if isinstance(tried, str):
+        tried = [tried]
+    if not isinstance(tried, list):
+        return []
+    return [item.strip() for item in tried if isinstance(item, str) and item.strip()]

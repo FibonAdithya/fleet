@@ -127,7 +127,7 @@ def test_parse_status_fixture():
         "running",
         "paused",
         "approved",
-        "escalated",
+        "ended",
         "ended",
         "ended",
         "aborted",
@@ -143,6 +143,11 @@ def test_parse_status_fixture():
     assert runs[2].outcome == "approved"
     assert runs[2].pr == {"number": 42, "url": "https://github.com/acme/widgets/pull/42"}
     assert runs[3].escalation["options"] == ["sqlite", "postgres"]
+    # A fleet-mode escalation ends with status `ended`; the outcome says why.
+    assert (runs[3].status, runs[3].outcome) == ("ended", "escalated")
+    assert runs[4].verdict["tried"] == ["ran the repro twice"]
+    assert runs[2].stage == "merge"
+    assert {r.base for r in runs} == {"integration"}
     assert runs[5].verdict["duplicate_of"] == 12
     assert runs[2].test_command == "make check"
 
@@ -270,10 +275,14 @@ def test_start_passes_answers_when_file_exists(ccfg):
     gh = FakeGh()
     _issue_at(gh, 5)
     answers = ccfg.answers_dir / "o__r" / "5.json"
-    cli = ScriptedCli(start=[(0, "r-1\n", "")])
+    cli = ScriptedCli(
+        start=[(0, "r-1\n", ""), (0, "r-2\n", "")],
+        status=[(0, _status(_run("r-1", 5, status="ended")), "")],
+    )
     ex = _executor(ccfg, gh, cli)
     ex.apply([StartAgent(task=5, role="chain", base="integration")])
     assert "--answers" not in cli.calls_to("start")[0]
+    ex.agents()  # the first run has ended, so a second start replaces it
     answers.parent.mkdir(parents=True)
     answers.write_text(json.dumps([{"text": "sqlite", "at": 1.0}]))
     ex.apply([StartAgent(task=5, role="chain", base="integration")])
@@ -430,20 +439,39 @@ def test_failed_abort_is_recorded_and_still_forgets(ccfg):
     assert ex.tasks() == set()
 
 
-def test_start_over_a_live_mapped_run_aborts_it_first(ccfg):
+def test_start_on_live_mapped_run_keeps_it(ccfg):
+    """chain has no idempotence for a repeated `chain start --fleet`: a second
+    StartAgent on a task whose run is live starts nothing, aborts nothing and
+    keeps the mapping, and says so in a failure line."""
     cli = ScriptedCli(
         start=[(0, "r-1\n", ""), (0, "r-2\n", "")],
         status=[(0, _status(_run("r-1", 5)), "")],
-        abort=[(1, "", "chain: busy")],
+        abort=[(0, "ok\n", "")],
     )
     ex = _started(ccfg, cli)
     ex.agents()
     ex.apply([StartAgent(task=5, role="chain", base="integration")])
-    assert cli.calls_to("abort") == [[COMMAND, "abort", "r-1"]]
-    assert len(ex.failures) == 1  # the failed abort
-    assert ex._runs == {5: "r-2"}
-    # Ordering: the abort precedes the second start.
-    assert [argv[1] for argv in cli.calls] == ["start", "status", "abort", "start"]
+    assert len(cli.calls_to("start")) == 1
+    assert cli.calls_to("abort") == []
+    assert ex._runs == {5: "r-1"}
+    assert len(ex.failures) == 1
+    assert "r-1" in ex.failures[0]
+    assert [(a.task, a.status) for a in ex.agents()] == [(5, "working")]
+
+
+def test_start_on_mapped_run_of_unknown_status_keeps_it(ccfg):
+    """Before the first good status read (a restart into a chain outage) the
+    mapped run may be live, so it is kept too."""
+    state_path = ccfg.root / "state" / "chain-runs.json"
+    cli = ScriptedCli(start=[(0, "r-1\n", ""), (0, "r-2\n", "")], status=[(1, "", "boom")])
+    _started(ccfg, cli, state_path=state_path)
+    gh = FakeGh()
+    _issue_at(gh, 5)
+    reborn = _executor(ccfg, gh, cli, state_path=state_path)
+    reborn.apply([StartAgent(task=5, role="chain", base="integration")])
+    assert len(cli.calls_to("start")) == 1
+    assert cli.calls_to("abort") == []
+    assert reborn._runs == {5: "r-1"}
 
 
 def test_start_over_a_terminal_mapped_run_does_not_abort(ccfg):
@@ -1163,3 +1191,85 @@ def test_escalation_posted_but_not_labelled_is_not_posted_again(ccfg):
     ex.agents()
     assert len(_handoffs(gh)) == 1
     assert _state_labels(gh) == ["fleet:human"]
+
+
+def test_fixture_outcomes_drive_the_writes(ccfg):
+    """chain's own contract fixture, read through parse_status, drives the
+    writes. Catches escalation keyed on status `escalated` (a fleet-mode
+    escalation ends `ended`) and `tried` read as one string (it is a list)."""
+    doc = _fixture()
+    by_id = {run["id"]: run for run in doc["runs"]}
+    tasks = {"r-d": 5, "r-c": 6, "r-e": 7}
+    for run in doc["runs"]:
+        # This repository's slug, rewritten here, never in the fixture file.
+        run["fleet_task"]["slug"] = "o/r"
+    for run_id, task in tasks.items():
+        by_id[run_id]["fleet_task"]["number"] = task
+    # The fixture's approved head (`h` * 40) is not hex; the handoff schema
+    # checks, and a real run reports a real SHA.
+    by_id["r-e"]["head_sha"] = HEAD_SHA
+    runs = {run.id: run for run in parse_status(json.dumps(doc))}
+    assert (runs["r-d"].status, runs["r-d"].outcome) == ("ended", "escalated")
+    assert runs["r-c"].verdict["tried"] == ["ran the repro twice"]
+
+    gh = FakeGh()
+    _issue_at(gh, 5, klass="build")
+    _issue_at(gh, 6, klass="bug", body="It crashes.\n")
+    _issue_at(gh, 7, klass="build")
+    cli = ScriptedCli(
+        start=[(0, "r-d\n", ""), (0, "r-c\n", ""), (0, "r-e\n", "")],
+        status=[(0, json.dumps(doc), "")],
+        # r-d escalated before setup: no SHAs of its own.
+        **{"-C": [(0, f"{INTEGRATION_SHA}\n", "")]},
+    )
+    ex = _executor(ccfg, gh, cli, clock=lambda: CLOCK)
+    for task in tasks.values():
+        ex.apply([StartAgent(task=task, role="chain", base="integration")])
+    ex.agents()
+    assert list(ex.failures) == []
+
+    # r-d: status ended, outcome escalated -> the owner's question.
+    assert _state_labels(gh, 5) == ["fleet:human"]
+    found = escalation.latest(_comments(gh, 5))
+    assert found["text"].startswith(runs["r-d"].escalation["text"])
+    # r-c: not reproduced, each tried string a bullet of the closing comment.
+    assert gh.get_issue(6)["state"] == "CLOSED"
+    [comment] = _comments(gh, 6)
+    for tried in runs["r-c"].verdict["tried"]:
+        assert f"- {tried}" in comment.splitlines()
+    # r-e: approved -> handed to review and approved.
+    assert _state_labels(gh, 7) == ["fleet:integrating"]
+    assert len(_handoffs(gh, 7)) == 1
+    assert packet.parse_latest(_comments(gh, 7), "verdict")["verdict"] == "approved"
+
+
+@pytest.mark.parametrize(
+    ("tried", "expected"),
+    [
+        (
+            ["ran the repro twice", "bisected to v1.2"],
+            ["- ran the repro twice", "- bisected to v1.2"],
+        ),
+        ("ran the repro twice", ["- ran the repro twice"]),
+        (["", "  ", 3, "kept"], ["- kept"]),
+    ],
+    ids=["list", "older-string", "blanks-and-non-strings"],
+)
+def test_not_reproduced_lists_what_was_tried(ccfg, tried, expected):
+    run = _bug_verdict("r-c", 5, 4)
+    run["verdict"]["tried"] = tried
+    ex, gh, _ = _finished(ccfg, run)
+    ex.agents()
+    [comment] = _comments(gh)
+    assert [line for line in comment.splitlines() if line.startswith("- ")] == expected
+
+
+@pytest.mark.parametrize("tried", [None, [], "", {"cmd": "x"}, 7], ids=repr)
+def test_not_reproduced_without_tried_says_so(ccfg, tried):
+    run = _bug_verdict("r-c", 5, 4)
+    run["verdict"]["tried"] = tried
+    ex, gh, _ = _finished(ccfg, run)
+    ex.agents()
+    [comment] = _comments(gh)
+    assert "chain did not say what it tried." in comment
+    assert gh.get_issue(5)["state"] == "CLOSED"
