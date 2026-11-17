@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -54,6 +55,16 @@ _FAILURE_LIMIT = 64
 
 #: What `run_cli` answers when the binary cannot be executed at all.
 _EXEC_FAILED = 127
+
+#: Seconds past `paused_until` a run may still read as paused. chain resumes a
+#: paused run on its own next tick after `paused_until`; a run still paused well
+#: after that is stuck, and reporting it paused would hold its slot all night
+#: with the stall timer refreshed every tick.
+PAUSE_GRACE_SECONDS = 600
+
+
+class ChainStateError(Exception):
+    """The task-map file exists but cannot be read as one."""
 
 
 @dataclass(frozen=True)
@@ -94,22 +105,35 @@ class ChainRun:
     test_command: str | None
 
 
+def _typed(raw: dict, key: str, kind: type | tuple[type, ...]):
+    """`raw[key]`, refused with ValueError unless it is `kind`. bool is refused
+    wherever a number is wanted: JSON `true` is an int to Python."""
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, kind):
+        raise ValueError(f"run field {key!r} is {value!r}, not {kind}")
+    return value
+
+
 def _run_of(raw: dict) -> ChainRun:
     task = raw["fleet_task"]
     return ChainRun(
-        id=raw["id"],
+        id=_typed(raw, "id", str),
         fleet_task=(
             None
             if task is None
-            else FleetTask(slug=task["slug"], number=task["number"], kind=task["kind"])
+            else FleetTask(
+                slug=_typed(task, "slug", str),
+                number=_typed(task, "number", int),
+                kind=task["kind"],
+            )
         ),
-        status=raw["status"],
+        status=_typed(raw, "status", str),
         stage=raw["stage"],
-        run_spent_usd=float(raw["run_spent_usd"]),
+        run_spent_usd=float(_typed(raw, "run_spent_usd", (int, float))),
         created_at=raw["created_at"],
         updated_at=raw["updated_at"],
-        progress=int(raw["progress"]),
-        output_bytes=int(raw["output_bytes"]),
+        progress=_typed(raw, "progress", int),
+        output_bytes=_typed(raw, "output_bytes", int),
         paused_until=raw["paused_until"],
         escalation=raw["escalation"],
         outcome=raw["outcome"],
@@ -173,12 +197,16 @@ class ChainExecutor:
         state_path: Path,
         *,
         failures: deque[str] | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.cfg = cfg
         self.gh = gh
         self.command = command
         self.run_cli = run_cli
         self.state_path = state_path
+        #: Epoch seconds, compared with chain's `paused_until`. Injected so the
+        #: tests pin both sides of the pause window without sleeping.
+        self.clock = clock
         #: Failures swallowed rather than raised, newest last and bounded; the
         #: same hand-off buffer as `HerdrExecutor.failures`, and assignable so
         #: one deque can serve both executors.
@@ -196,6 +224,12 @@ class ChainExecutor:
         #: The last good status read, and each run id's status in it.
         self._last_runs: list[ChainRun] = []
         self._last_status: dict[str, str] = {}
+        #: False until a status read succeeds. Before that, `_last_runs` is not
+        #: a reading at all -- see `agents`.
+        self._read_once = False
+        #: Run ids whose `waiting` status has been recorded, so a run that sits
+        #: there records one failure rather than one per tick.
+        self._waiting_reported: set[str] = set()
         self._areas: frozenset[str] | None = None
 
     # -- the Executor seam -------------------------------------------------------
@@ -215,12 +249,26 @@ class ChainExecutor:
 
         A failed or unparsable status call keeps the last good read: treating it
         as every chain agent vanishing at once would release every chain task
-        as ledger drift in one tick.
+        as ledger drift in one tick, and each release's StopAgent would abort a
+        live run.
+
+        Before the first good read since construction (a restart into a chain
+        outage) there is no last good read, so each mapped task is reported
+        working with `change_seq = -1`. A transient failure then aborts nothing,
+        and decide's stall timer still bounds an outage that lasts: the
+        sequence never moves, so after `stall_minutes` the task is released
+        through `_fail` like any other stall.
         """
         runs = self._read_status()
         if runs is not None:
+            self._read_once = True
             self._last_runs = runs
             self._last_status = {run.id: run.status for run in runs}
+        elif not self._read_once:
+            return [
+                AgentState(task=task, status="working", change_seq=-1)
+                for task in sorted(self._runs)
+            ] + self._failed_start_agents()
         by_run = {run_id: task for task, run_id in self._runs.items()}
         out: list[AgentState] = []
         for run in self._last_runs:
@@ -230,11 +278,13 @@ class ChainExecutor:
             if run.fleet_task.slug != self.cfg.repo_slug:
                 continue
             out.append(self._agent_of(task, run))
-        out.extend(
+        return out + self._failed_start_agents()
+
+    def _failed_start_agents(self) -> list[AgentState]:
+        return [
             AgentState(task=task, status="dirty", change_seq=0)
             for task in sorted(self._failed_start)
-        )
-        return out
+        ]
 
     def unpriced(self) -> set[str]:
         """Always empty: chain prices its own runs and reports dollars."""
@@ -254,6 +304,10 @@ class ChainExecutor:
         reads an assigned `fleet:human` issue as taken by the owner.
         """
         task = effect.task
+        # A run already mapped to this task is stopped first: a second run on
+        # one task would spend twice, and the first, unmapped, would never be
+        # reported or stopped again.
+        self._forget(task)
         issue = self.gh.get_issue(task)
         try:
             klass = ledger_module.read_one(issue, areas=self._area_names()).klass
@@ -301,6 +355,14 @@ class ChainExecutor:
         if task in self._failed_start:
             self._failed_start.discard(task)
             return
+        self._forget(task)
+
+    def _forget(self, task: int) -> None:
+        """Abort the task's mapped run unless it is known terminal, then drop
+        the mapping. An abort that fails is recorded, and the mapping still
+        goes: `_stop` explains why a known-terminal run is not aborted, and a
+        run whose status is unknown (no good read yet) is aborted, since it may
+        be live."""
         run_id = self._runs.get(task)
         if run_id is None:
             return
@@ -320,7 +382,8 @@ class ChainExecutor:
         else:
             # `waiting`, or a terminal run (Task 7 turns those into outcomes).
             status = "dirty"
-            if run.status == "waiting":
+            if run.status == "waiting" and run.id not in self._waiting_reported:
+                self._waiting_reported.add(run.id)
                 self._record(
                     f"task {task}: chain run {run.id} is waiting on its owner; "
                     "a fleet-mode run never asks"
@@ -332,8 +395,17 @@ class ChainExecutor:
             cost_usd=run.run_spent_usd,
             model=None,
             transcript_bytes=run.output_bytes,
-            paused=run.status == "paused",
+            paused=self._is_paused(run),
         )
+
+    def _is_paused(self, run: ChainRun) -> bool:
+        """Paused, and not long past the time chain said it would resume. A
+        null `paused_until` is a pause with no end announced."""
+        if run.status != "paused":
+            return False
+        if run.paused_until is None:
+            return True
+        return run.paused_until + PAUSE_GRACE_SECONDS > self.clock()
 
     def _read_status(self) -> list[ChainRun] | None:
         code, out, err = self._call([self.command, "status", "--json"])
@@ -369,11 +441,26 @@ class ChainExecutor:
 
     def _load(self) -> dict[int, str]:
         """The task map. A missing file is an empty map; an unreadable one
-        raises, because guessing would orphan every run it named."""
+        raises ChainStateError naming the file, because an empty map would
+        orphan every run it named, and those runs keep spending."""
         if not self.state_path.exists():
             return {}
-        doc = json.loads(self.state_path.read_text(encoding="utf-8"))
-        return {int(task): str(run_id) for task, run_id in doc["runs"].items()}
+        try:
+            doc = json.loads(self.state_path.read_text(encoding="utf-8"))
+            runs = doc["runs"]
+            if not isinstance(runs, dict):
+                raise TypeError(f"runs is {type(runs).__name__}, not an object")
+            out: dict[int, str] = {}
+            for task, run_id in runs.items():
+                if not isinstance(run_id, str):
+                    raise TypeError(f"run id for task {task!r} is {run_id!r}")
+                out[int(task)] = run_id
+            return out
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ChainStateError(
+                f"chain task map {self.state_path} is unreadable ({exc!r}); "
+                "fix or remove it by hand -- an empty map would orphan live runs"
+            ) from exc
 
     def _save(self) -> None:
         """Write the task map atomically: a temp file in the same directory,
@@ -384,6 +471,10 @@ class ChainExecutor:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(doc, handle, indent=2)
+                # The rename is atomic only over data that reached the disk; a
+                # crash after an unsynced rename can leave an empty file.
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp, self.state_path)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)

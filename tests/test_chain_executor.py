@@ -3,18 +3,47 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import os
+import re
 from collections import deque
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from fleet.chain_executor import ChainExecutor, ChainRun, parse_status
+from fleet import chain_executor
+from fleet.chain_executor import ChainExecutor, ChainRun, ChainStateError, parse_status
+from fleet.decide import decide
 from fleet.gh import FakeGh
-from fleet.model import AgentState, Comment, StartAgent, StopAgent
+from fleet.model import (
+    AgentState,
+    Comment,
+    FleetState,
+    Policy,
+    Release,
+    StartAgent,
+    StopAgent,
+    Task,
+)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures/chain/status-v1.json"
 COMMAND = "./bin/chain"
 SPEC_BODY = "## Goal\n\nBuild the thing.\n\nSpec: docs/ai/specs/x.md\n"
+T0 = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+CHAIN_POLICY = Policy(
+    areas=(("src/eval/**", "eval"),),
+    routes=(("build", ("chain",)),),
+    agents=(("chain", "chain", "chain"),),
+    integration_branch="integration",
+    slots=6,
+    stall_minutes=10,
+    max_attempts=2,
+    max_fix_passes=1,
+    max_rebases=1,
+    per_task_usd=2.0,
+    fleet_usd=25.0,
+    ceilings=(("chain", 40.0),),
+)
 
 
 class ScriptedCli:
@@ -125,6 +154,37 @@ def test_parse_status_rejects_other_schema():
 def test_parse_status_rejects_a_run_missing_a_contract_field():
     doc = _fixture()
     del doc["runs"][0]["progress"]
+    with pytest.raises(ValueError):
+        parse_status(json.dumps(doc))
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("id",), ["r-g"]),
+        (("id",), 7),
+        (("status",), {"s": "running"}),
+        (("fleet_task", "slug"), 1),
+        (("fleet_task", "number"), "7"),
+        (("fleet_task", "number"), True),
+        (("progress",), "3"),
+        (("progress",), 3.5),
+        (("progress",), True),
+        (("output_bytes",), None),
+        (("run_spent_usd",), "1.25"),
+        (("run_spent_usd",), True),
+    ],
+    ids=lambda v: repr(v),
+)
+def test_parse_status_rejects_wrong_field_types(path, value):
+    """A wrong-typed field raises ValueError, which agents() turns into "keep
+    the last good read". A TypeError would escape the tick every time, and an
+    int `id` would silently never match the task map."""
+    doc = _fixture()
+    target = doc["runs"][0]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
     with pytest.raises(ValueError):
         parse_status(json.dumps(doc))
 
@@ -355,6 +415,47 @@ def test_failed_abort_is_recorded_and_still_forgets(ccfg):
     assert ex.tasks() == set()
 
 
+def test_start_over_a_live_mapped_run_aborts_it_first(ccfg):
+    cli = ScriptedCli(
+        start=[(0, "r-1\n", ""), (0, "r-2\n", "")],
+        status=[(0, _status(_run("r-1", 5)), "")],
+        abort=[(1, "", "chain: busy")],
+    )
+    ex = _started(ccfg, cli)
+    ex.agents()
+    ex.apply([StartAgent(task=5, role="chain", base="integration")])
+    assert cli.calls_to("abort") == [[COMMAND, "abort", "r-1"]]
+    assert len(ex.failures) == 1  # the failed abort
+    assert ex._runs == {5: "r-2"}
+    # Ordering: the abort precedes the second start.
+    assert [argv[1] for argv in cli.calls] == ["start", "status", "abort", "start"]
+
+
+def test_start_over_a_terminal_mapped_run_does_not_abort(ccfg):
+    cli = ScriptedCli(
+        start=[(0, "r-1\n", ""), (0, "r-2\n", "")],
+        status=[(0, _status(_run("r-1", 5, status="ended")), "")],
+    )
+    ex = _started(ccfg, cli)
+    ex.agents()
+    ex.apply([StartAgent(task=5, role="chain", base="integration")])
+    assert cli.calls_to("abort") == []
+    assert ex._runs == {5: "r-2"}
+
+
+def test_a_successful_start_clears_a_failed_start(ccfg):
+    gh = FakeGh()
+    _issue_at(gh, 5)
+    cli = ScriptedCli(
+        start=[(1, "", "refused"), (0, "r-2\n", "")],
+        status=[(0, _status(_run("r-2", 5)), "")],
+    )
+    ex = _executor(ccfg, gh, cli)
+    ex.apply([StartAgent(task=5, role="chain", base="integration")])
+    ex.apply([StartAgent(task=5, role="chain", base="integration")])
+    assert [a.status for a in ex.agents()] == ["working"]
+
+
 def test_stop_of_an_unknown_task_does_nothing(ccfg):
     cli = ScriptedCli()
     ex = _executor(ccfg, FakeGh(), cli)
@@ -399,12 +500,47 @@ def test_other_live_statuses_map_to_working(ccfg, status):
 
 
 def test_paused_maps_to_paused_working(ccfg):
-    run = _run("r-f", 5, status="paused", paused_until=5000.0, progress=0)
+    # A null paused_until: no end announced, so no clock is consulted.
+    run = _run("r-f", 5, status="paused", paused_until=None, progress=0)
     cli = ScriptedCli(start=[(0, "r-f\n", "")], status=[(0, _status(run), "")])
     [agent] = _started(ccfg, cli).agents()
     assert agent.status == "working"
     assert agent.paused is True
     assert agent.change_seq == 0
+
+
+def _paused_at(ccfg, paused_until, now):
+    run = _run("r-f", 5, status="paused", paused_until=paused_until)
+    cli = ScriptedCli(start=[(0, "r-f\n", "")], status=[(0, _status(run), "")])
+    gh = FakeGh()
+    _issue_at(gh, 5)
+    ex = _executor(ccfg, gh, cli, clock=lambda: now)
+    ex.apply([StartAgent(task=5, role="chain", base="integration")])
+    [agent] = ex.agents()
+    return agent
+
+
+def test_a_pause_within_its_window_is_paused(ccfg):
+    # 600 s of grace past paused_until: still paused one second before it ends.
+    assert _paused_at(ccfg, 5000.0, 5599.0).paused is True
+    assert _paused_at(ccfg, None, 1e12).paused is True
+
+
+def test_a_pause_long_past_its_end_is_not_paused(ccfg):
+    """A run stuck `paused` forever would otherwise hold its slot all night:
+    once paused_until + 600 s has passed, the stall timer runs again."""
+    agent = _paused_at(ccfg, 5000.0, 5600.0)
+    assert (agent.status, agent.paused) == ("working", False)
+
+
+def test_waiting_failure_is_recorded_once_per_run(ccfg):
+    cli = ScriptedCli(
+        start=[(0, "r-g\n", "")], status=[(0, _status(_run("r-g", 5, "waiting")), "")]
+    )
+    ex = _started(ccfg, cli)
+    for _ in range(5):
+        ex.agents()
+    assert len(ex.failures) == 1
 
 
 def test_waiting_maps_to_dirty_and_records_a_failure(ccfg):
@@ -428,6 +564,36 @@ def test_task_map_survives_restart(ccfg):
     reborn = _executor(ccfg, FakeGh(), cli, state_path=state_path)
     assert reborn.tasks() == {5}
     assert [a.task for a in reborn.agents()] == [5]
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "{", "{}", "[]", '{"runs": []}', '{"runs": {"x": "r-g"}}', '{"runs": {"5": 7}}'],
+    ids=["empty", "truncated", "no-runs", "list", "runs-list", "bad-key", "bad-id"],
+)
+def test_corrupt_state_file_raises_naming_the_path(ccfg, content):
+    """Loud, not empty: an empty map would orphan runs that keep spending."""
+    state_path = ccfg.root / "state" / "chain-runs.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(content)
+    with pytest.raises(ChainStateError, match=re.escape(str(state_path))):
+        _executor(ccfg, FakeGh(), ScriptedCli(), state_path=state_path)
+
+
+def test_save_fsyncs_before_rename(ccfg, monkeypatch):
+    """The rename is atomic only over data that reached the disk."""
+    order: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(
+        chain_executor.os, "fsync", lambda fd: (order.append("fsync"), real_fsync(fd))[1]
+    )
+    monkeypatch.setattr(
+        chain_executor.os,
+        "replace",
+        lambda a, b: (order.append("replace"), real_replace(a, b))[1],
+    )
+    _started(ccfg, ScriptedCli(start=[(0, "r-g\n", "")]))
+    assert order == ["fsync", "replace"]
 
 
 def test_stop_is_durable_across_restart(ccfg):
@@ -457,11 +623,43 @@ def test_status_failure_keeps_last_known_agents(ccfg):
     assert len(cli.calls_to("status")) == 3
 
 
-def test_status_failure_before_any_good_read_reports_nothing(ccfg):
+def test_status_failure_before_any_good_read_keeps_mapped_tasks_working(ccfg):
+    """After a restart the task map is loaded but no status has been read. A
+    chain outage then must not read as every chain agent gone: decide would
+    release each as ledger drift and the StopAgent would abort every live run."""
+    state_path = ccfg.root / "state" / "chain-runs.json"
     cli = ScriptedCli(start=[(0, "r-g\n", "")], status=[(1, "", "boom")])
-    ex = _started(ccfg, cli)
+    _started(ccfg, cli, state_path=state_path)
+    reborn = _executor(ccfg, FakeGh(), cli, state_path=state_path)
+    agents = reborn.agents()
+    assert agents == [
+        AgentState(task=5, status="working", change_seq=-1, cost_usd=0.0, transcript_bytes=0)
+    ]
+    assert len(reborn.failures) == 1
+    task = Task(
+        number=5,
+        title="t",
+        state="claimed",
+        area="eval",
+        klass="build",
+        auto_ok=True,
+        attempts=1,
+    )
+    intents, _ = decide(FleetState(), [task], CHAIN_POLICY, agents, T0)
+    assert [i for i in intents if isinstance(i, Release)] == []
+    assert cli.calls_to("abort") == []
+
+
+def test_a_good_read_after_an_outage_replaces_the_placeholder(ccfg):
+    """Once a status read succeeds, a mapped run it does not list is absent
+    again: the placeholder covers only the gap before the first good read."""
+    cli = ScriptedCli(start=[(0, "r-g\n", "")], status=[(1, "", "boom"), (0, _status(), "")])
+    ex = _executor(ccfg, FakeGh(), cli)
+    ex._runs[5] = "r-g"  # as loaded from a state file
+    assert [a.change_seq for a in ex.agents()] == [-1]
     assert ex.agents() == []
-    assert len(ex.failures) == 1
+    cli.script["status"] = [(1, "", "boom")]
+    assert ex.agents() == []  # the last good read, not the placeholder
 
 
 def test_other_repos_runs_ignored(ccfg):
