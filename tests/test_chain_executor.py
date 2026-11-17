@@ -647,17 +647,17 @@ def test_other_live_statuses_map_to_working(ccfg, status):
 
 
 def test_paused_maps_to_paused_working(ccfg):
-    # A null paused_until: no end announced, so no clock is consulted.
-    run = _run("r-f", 5, status="paused", paused_until=None, progress=0)
-    cli = ScriptedCli(start=[(0, "r-f\n", "")], status=[(0, _status(run), "")])
-    [agent] = _started(ccfg, cli).agents()
+    agent = _paused_at(ccfg, 5000.0, 4000.0)
     assert agent.status == "working"
     assert agent.paused is True
-    assert agent.change_seq == 0
+    # chaind's heartbeat is not movement for a paused run: past its grace, the
+    # stall timer must run on a run that chaind keeps saving but never resumes.
+    later = _paused_at(ccfg, 5000.0, 4000.0, updated_at=3000.0)
+    assert later.change_seq == agent.change_seq
 
 
-def _paused_at(ccfg, paused_until, now):
-    run = _run("r-f", 5, status="paused", paused_until=paused_until)
+def _paused_at(ccfg, paused_until, now, updated_at=1101.0):
+    run = _run("r-f", 5, status="paused", paused_until=paused_until, updated_at=updated_at)
     cli = ScriptedCli(start=[(0, "r-f\n", "")], status=[(0, _status(run), "")])
     gh = FakeGh()
     _issue_at(gh, 5)
@@ -670,7 +670,16 @@ def _paused_at(ccfg, paused_until, now):
 def test_a_pause_within_its_window_is_paused(ccfg):
     # 600 s of grace past paused_until: still paused one second before it ends.
     assert _paused_at(ccfg, 5000.0, 5599.0).paused is True
-    assert _paused_at(ccfg, None, 1e12).paused is True
+
+
+def test_a_pause_with_no_end_gets_the_same_grace_from_its_last_save(ccfg):
+    """chain always sets `paused_until` when it pauses a run and resumes one
+    with none on its next tick, so a null one that lasts means chaind stopped
+    saving the run. Counted from `updated_at` with the same grace, it ends
+    rather than holding the slot all night."""
+    assert _paused_at(ccfg, None, 1101.0 + 599.0, updated_at=1101.0).paused is True
+    agent = _paused_at(ccfg, None, 1101.0 + 600.0, updated_at=1101.0)
+    assert (agent.status, agent.paused) == ("working", False)
 
 
 def test_a_pause_long_past_its_end_is_not_paused(ccfg):

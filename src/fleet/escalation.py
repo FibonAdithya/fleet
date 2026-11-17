@@ -79,7 +79,7 @@ def latest(comments: list[str]) -> dict | None:
         body = comments[index]
         reason = _marker_reason(body)
         if reason is not None:
-            return {"index": index, "reason": reason, "text": body.split("\n", 1)[-1].strip()}
+            return {"index": index, "reason": reason, "text": body.partition("\n")[2].strip()}
         found = _human_packet(body)
         if found is not None:
             parts = [str(found.get("question", "")), str(found.get("considered", ""))]

@@ -114,3 +114,13 @@ def test_latest_quoted_marker_inside_packet_is_the_packet():
 def test_latest_crlf_marker():
     got = latest([render("stalled").replace("\n", "\r\n")])
     assert got is not None and got["reason"] == "stalled"
+
+
+def test_latest_marker_only_comment_has_no_text():
+    """A comment that is the marker line alone, with no newline, has no text:
+    the marker is not the reason's sentence."""
+    marker = render("stalled").split("\n", 1)[0]
+    got = latest([marker])
+    assert got == {"index": 0, "reason": "stalled", "text": ""}
+    assert latest([marker + "\n"])["text"] == ""
+    assert latest([marker + "\nwhy"])["text"] == "why"

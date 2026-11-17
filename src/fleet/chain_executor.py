@@ -936,13 +936,17 @@ class ChainExecutor:
         )
 
     def _is_paused(self, run: ChainRun) -> bool:
-        """Paused, and not long past the time chain said it would resume. A
-        null `paused_until` is a pause with no end announced."""
+        """Paused, and not long past the time chain said it would resume.
+
+        A null `paused_until` is a pause with no end announced. chain always
+        sets one when it pauses a run, and resumes a paused run that has none
+        on its next tick, so one that stays null means chaind has stopped
+        saving the run: the same grace is counted from its last save
+        (`updated_at`), not forever."""
         if run.status != "paused":
             return False
-        if run.paused_until is None:
-            return True
-        return run.paused_until + PAUSE_GRACE_SECONDS > self.clock()
+        until = run.updated_at if run.paused_until is None else run.paused_until
+        return until + PAUSE_GRACE_SECONDS > self.clock()
 
     def _read_status(self) -> list[ChainRun] | None:
         code, out, err = self._call([self.command, "status", "--json"])
