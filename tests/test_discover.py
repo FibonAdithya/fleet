@@ -258,6 +258,9 @@ def test_discover_build_needs_spec_on_integration(cfg, gh):
         _discover(cfg, gh, klass="build", spec="docs/ai/specs/local-only.md")
     with pytest.raises(ValueError, match="spec"):
         _discover(cfg, gh, klass="build", spec=None)
+    # A directory on the branch is a tree, not a spec chain can read.
+    with pytest.raises(ValueError, match="origin/integration"):
+        _discover(cfg, gh, klass="build", spec="docs/ai/specs")
     assert len(gh.list_issues("all")) == before
     assert "discovered-by:1" not in gh.ensured_labels
 
@@ -284,3 +287,20 @@ def test_discover_spec_refused_for_bug(cfg, gh):
 def test_discover_refuses_a_class_it_cannot_file(cfg, gh):
     with pytest.raises(ValueError, match="class"):
         _discover(cfg, gh, klass="integration")
+
+
+def test_a_chain_discovery_says_it_runs_unattended(cfg, gh):
+    """An issue filed ready and auto-ok must not tell its reader it awaits a
+    scout's triage. The evidence is kept."""
+    body = gh.get_issue(_discover(cfg, gh))["body"]
+    assert "chain route" in body and "unattended" in body
+    assert "triage" not in body
+    assert "src/eval/lid.py:44 rounds" in body
+    assert "#1" in body
+
+
+def test_a_triage_discovery_keeps_the_triage_body(herdr_cfg, gh):
+    body = gh.get_issue(_discover(herdr_cfg, gh))["body"]
+    assert "not triaged" in body
+    assert "written by a scout during triage" in body
+    assert "src/eval/lid.py:44 rounds" in body

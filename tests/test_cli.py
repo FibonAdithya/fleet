@@ -131,7 +131,10 @@ def test_plan_always_wraps_the_client_in_read_only(monkeypatch, cfg):
     that the help says so."""
     monkeypatch.chdir(cfg.root)
     seen = {}
-    monkeypatch.setattr("fleet.cli.do_plan", lambda cfg_, gh, now: seen.setdefault("gh", gh) and [])
+    monkeypatch.setattr(
+        "fleet.cli.do_plan", lambda cfg_, gh, now, **kw: seen.setdefault("gh", gh) and []
+    )
+    monkeypatch.setattr("fleet.cli._gh_login", lambda: "FibonAdithya")
     result = CliRunner().invoke(main, ["plan"])
     assert result.exit_code == 0, result.output
     assert isinstance(seen["gh"], ReadOnlyGh)

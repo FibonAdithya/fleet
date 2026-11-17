@@ -80,12 +80,13 @@ def test_no_adopt_other_author():
 
 
 def test_no_adopt_older_than_max_age():
-    """An old agent-reported issue sat untouched for a reason. One second past
-    `chain_max_age_days` is refused and one second inside it is adopted, so
-    flipping `>` and `>=` or ignoring the age both fail. An issue with no
-    createdAt (a captured row from before the field was fetched) is never
-    adopted."""
+    """An old agent-reported issue sat untouched for a reason. "No older than
+    `chain_max_age_days`" is inclusive: exactly the limit is adopted and one
+    second past it is refused, so flipping `>=` to `>` fails the first case and
+    ignoring the age fails the second. An issue with no createdAt (a captured
+    row from before the field was fetched) is never adopted."""
     limit = timedelta(days=CHAIN_POLICY.chain_max_age_days)
+    assert adopted([reported(created_at=T0 - limit)]) == [Adopt(task=9)]
     assert adopted([reported(created_at=T0 - limit - timedelta(seconds=1))]) == []
     assert adopted([reported(created_at=T0 - limit + timedelta(seconds=1))]) == [Adopt(task=9)]
     assert adopted([reported(created_at=None)]) == []

@@ -547,7 +547,9 @@ def _adopt(ledger: list[Task], policy: Policy, now: datetime) -> list[Intent]:
     - `chain_default_area` set and `bug` routed to chain: with no area the
       adopted task would hold none, and area exclusion could not run it.
     - no class or area other than the ones Adopt writes: a second `class:` or
-      `area:` label makes `ledger.read_one` refuse the whole ledger.
+      `area:` label makes `ledger.read_one` refuse the whole ledger. Such a row
+      is skipped without a record, because it already carries a human's or an
+      agent's own class or area and so is no longer a bare report to adopt.
 
     No per-day cap. Every adopted issue gets the same area, so area exclusion
     already runs them one at a time.

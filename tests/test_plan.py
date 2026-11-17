@@ -208,3 +208,27 @@ def test_plan_says_it_is_read_only_in_its_help():
     result = CliRunner().invoke(main, ["plan", "--help"])
     assert result.exit_code == 0
     assert "writes nothing" in result.output
+
+
+def test_the_plan_previews_an_adoption_with_the_owners_login(policy_cfg, monkeypatch):
+    """`fleet plan` claims to give the answer the next tick would. The daemon
+    reads the ledger with gh's login, so the preview must too: without it no row
+    is the owner's and an Adopt the daemon will make never shows."""
+    import dataclasses
+
+    cfg = dataclasses.replace(policy_cfg, chain_default_area="eval")
+    gh = FakeGh()
+    gh.ensure_label("agent-reported")
+    number = gh.create_issue("lid rounds early", "b", ["agent-reported"])
+
+    assert do_plan(cfg, ReadOnlyGh(gh), datetime.now(UTC), login="FibonAdithya") == [
+        f"Adopt({number})"
+    ]
+    assert do_plan(cfg, ReadOnlyGh(gh), datetime.now(UTC)) == ["no action"]
+
+    monkeypatch.setattr("fleet.cli.load_config", lambda: cfg)
+    monkeypatch.setattr("fleet.cli.RealGh", lambda slug: gh)
+    monkeypatch.setattr("fleet.cli._gh_login", lambda: "FibonAdithya")
+    result = CliRunner().invoke(main, ["plan"])
+    assert result.exit_code == 0, result.output
+    assert f"Adopt({number})" in result.output

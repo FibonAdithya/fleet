@@ -252,6 +252,14 @@ DISCOVERY_BODY = """Found while working #{parent}. Filed by an agent, not triage
 _To be written by a scout during triage._
 """
 
+CHAIN_DISCOVERY_BODY = """Found while working #{parent}. Filed by an agent to run
+unattended on the chain route.
+
+## Evidence
+
+{evidence}
+"""
+
 
 #: The classes `fleet discover` files: what an agent finds (`bug`) and what a
 #: planner splits an epic into (`patch`, `build`).
@@ -341,12 +349,14 @@ def do_discover(
     # repo's label set. gh refuses an unknown label and creates no issue at all.
     parentage = f"discovered-by:{parent}"
     gh.ensure_label(parentage)
-    body = DISCOVERY_BODY.format(parent=parent, evidence=evidence)
-    if spec is not None:
-        body = f"Spec: {spec}\n\n{body}"
     class_label = labels.class_label(klass)
     if klass != "patch" and chain_route_enabled(policy, klass):
         names = [labels.state_label("ready"), class_label, labels.AUTO_OK, area_label, parentage]
+        template = CHAIN_DISCOVERY_BODY
     else:
         names = [labels.state_label("triage"), area_label, parentage, class_label]
+        template = DISCOVERY_BODY
+    body = template.format(parent=parent, evidence=evidence)
+    if spec is not None:
+        body = f"Spec: {spec}\n\n{body}"
     return gh.create_issue(title, body, names)

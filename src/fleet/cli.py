@@ -78,7 +78,7 @@ class ReadOnlyGh:
         return refuse
 
 
-def do_plan(cfg, gh, now: datetime) -> list[str]:
+def do_plan(cfg, gh, now: datetime, login: str | None = None) -> list[str]:
     """One tick of decide() against a live ledger, rendered.
 
     Read through `reader.read_ledger`, the daemon's own ledger read, and not
@@ -101,7 +101,9 @@ def do_plan(cfg, gh, now: datetime) -> list[str]:
     reachable by no test that does not talk to GitHub.
     """
     policy = policy_module.load(cfg)
-    tasks = read_ledger(gh, policy.area_names)
+    # `login` as the daemon passes it: without it no row is the owner's, and
+    # an Adopt the next tick makes would never show here.
+    tasks = read_ledger(gh, policy.area_names, login=login)
     intents, _ = decide(FleetState(), tasks, policy, [], now)
     lines: list[str] = []
     if any(task.state == "claimed" for task in tasks):
@@ -342,7 +344,7 @@ def plan():
     # have seen that. The command previews; the wrapper is what makes "writes
     # nothing" a property of the code path rather than of having read it.
     gh = ReadOnlyGh(RealGh(cfg.repo_slug))
-    for line in do_plan(cfg, gh, datetime.now(UTC)):
+    for line in do_plan(cfg, gh, datetime.now(UTC), login=_gh_login()):
         click.echo(line)
 
 
