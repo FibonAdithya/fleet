@@ -82,6 +82,20 @@ _TIMED_OUT = 124
 #: with the stall timer refreshed every tick.
 PAUSE_GRACE_SECONDS = 600
 
+#: A live run's `change_seq` is `progress` times this, plus chaind's heartbeat
+#: (`updated_at`) in milliseconds, which stays below it until the year 2286.
+#: chain runs a stage as `claude -p --output-format json`, which writes nothing
+#: until the session exits, so `progress` and `output_bytes` stay flat for the
+#: whole of a session that can run for hours; chaind re-saves every live run on
+#: every tick, so `updated_at` is what moves. A dead chaind freezes it, and the
+#: stall timer then releases the task as it would any agent that stopped.
+_HEARTBEAT_SCALE = 10**13
+
+#: The statuses whose heartbeat counts as movement: a session, a test command,
+#: or a run waiting for a slot. A `paused` run is refreshed through
+#: `AgentState.paused` until its grace runs out, and a `waiting` one is dirty.
+_HEARTBEAT_STATUSES = _WORKING
+
 #: The ledger writes each outcome makes, in order. Each is recorded in the state
 #: file as it lands, so a retry after a partial failure (or a restart) resumes
 #: at the step that failed instead of posting a second handoff.
@@ -240,7 +254,7 @@ def _run_of(raw: dict) -> ChainRun:
         stage=raw["stage"],
         run_spent_usd=_spend_of(raw),
         created_at=raw["created_at"],
-        updated_at=raw["updated_at"],
+        updated_at=_finite(raw, "updated_at"),
         progress=_typed(raw, "progress", int),
         output_bytes=_typed(raw, "output_bytes", int),
         paused_until=None if raw["paused_until"] is None else _finite(raw, "paused_until"),
@@ -268,6 +282,14 @@ def _spend_of(raw: dict) -> float:
     if spent < 0:
         raise ValueError(f"run_spent_usd is {spent!r}, below zero")
     return spent
+
+
+def _sequence(progress: int, heartbeat: float | None = None) -> int:
+    """`progress` as the high part, the heartbeat's milliseconds as the low
+    part: more progress is always a larger sequence, and so is a later
+    heartbeat at the same progress."""
+    beat = 0 if heartbeat is None else int(heartbeat * 1000)
+    return progress * _HEARTBEAT_SCALE + min(max(beat, 0), _HEARTBEAT_SCALE - 1)
 
 
 def parse_status(text: str) -> list[ChainRun]:
@@ -467,7 +489,10 @@ class ChainExecutor:
         return AgentState(
             task=task,
             status="working",
-            change_seq=progress + 1,
+            # One progress step past the run's last, with no heartbeat: larger
+            # than any live report of the run (see `_sequence`), so the stall
+            # timer restarts on the write tick and then bounds the hold.
+            change_seq=_sequence(progress + 1),
             cost_usd=0.0,
             model=None,
             transcript_bytes=size,
@@ -851,7 +876,9 @@ class ChainExecutor:
         return AgentState(
             task=task,
             status=status,
-            change_seq=run.progress,
+            change_seq=_sequence(
+                run.progress, run.updated_at if run.status in _HEARTBEAT_STATUSES else None
+            ),
             cost_usd=run.run_spent_usd,
             model=None,
             transcript_bytes=run.output_bytes,

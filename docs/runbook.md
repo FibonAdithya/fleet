@@ -469,6 +469,14 @@ escalations are written through `commands.do_escalate` as a `fleet.handoff.v1`
 packet to `human`, with no marker line. `fleet.escalation.latest` reads either
 kind.
 
+A chain run's stall timer reads chaind's heartbeat. chain runs a stage as one
+`claude -p` session that writes nothing until it exits, so chain's `progress`
+and `output_bytes` stay flat for the whole of a session, which can run for
+hours. chaind saves every live run on each of its ticks, which moves the run's
+`updated_at`. For a `queued`, `running` or `verifying` run the executor counts a
+move in either as progress. If chaind stops, `updated_at` stops moving and the
+task is released after `stall_minutes`, as for any agent that stopped.
+
 A running chain run's cost counts toward the fleet budget while it runs: the
 executor reports chain's `run_spent_usd` as the agent's cost, and the allocator
 adds every live agent's cost to the night's spend before it dispatches anything

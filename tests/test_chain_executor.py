@@ -193,6 +193,9 @@ def test_parse_status_rejects_a_run_missing_a_contract_field():
         (("paused_until",), {"at": 5000}),
         (("paused_until",), True),
         (("paused_until",), float("nan")),
+        (("updated_at",), None),
+        (("updated_at",), "1100"),
+        (("updated_at",), float("inf")),
         (("fleet_task", "kind"), "patch"),
         (("fleet_task", "kind"), None),
     ],
@@ -523,18 +526,93 @@ def test_running_run_maps_to_working(ccfg):
     run = _run("r-g", 5, progress=3, output_bytes=1234, run_spent_usd=1.25)
     cli = ScriptedCli(start=[(0, "r-g\n", "")], status=[(0, _status(run), "")])
     ex = _started(ccfg, cli)
-    assert ex.agents() == [
-        AgentState(
-            task=5,
-            status="working",
-            change_seq=3,
-            cost_usd=1.25,
-            model=None,
-            transcript_bytes=1234,
-            paused=False,
-        )
-    ]
+    [agent] = ex.agents()
+    assert dataclasses.replace(agent, change_seq=0) == AgentState(
+        task=5,
+        status="working",
+        change_seq=0,
+        cost_usd=1.25,
+        model=None,
+        transcript_bytes=1234,
+        paused=False,
+    )
     assert cli.calls_to("status")[-1] == [COMMAND, "status", "--json"]
+
+
+def _live_ticks(ccfg, updated_at, minutes: int = 31):
+    """Tick a running run once a minute through the real agents() and decide().
+
+    Its progress and output_bytes never move, as for a real stage session:
+    chain runs `claude -p --output-format json`, which writes nothing until the
+    session exits. `updated_at(minute)` is what chaind's heartbeat says."""
+    cli = ScriptedCli(start=[(0, "r-g\n", "")])
+    ex = _started(ccfg, cli)
+    state = FleetState()
+    ticks = []
+    for minute in range(minutes):
+        run = _run("r-g", 5, progress=19, output_bytes=47712, updated_at=updated_at(minute))
+        cli.script["status"] = [(0, _status(run), "")]
+        agents = ex.agents()
+        intents, state = decide(
+            state, [_ledger_task("claimed")], CHAIN_POLICY, agents, T0 + timedelta(minutes=minute)
+        )
+        ticks.append((agents, intents, state))
+    return ticks
+
+
+def test_a_running_session_with_flat_progress_is_not_stalled(ccfg):
+    """chaind saves every live run on every tick, so `updated_at` advances for
+    as long as a stage session runs, however long that is (sessions of 602 to
+    2913 s were measured). progress and output_bytes alone stay flat for the
+    whole session, and a 10-minute stall timer read off them alone aborted
+    the run at t+10m."""
+    ticks = _live_ticks(ccfg, lambda minute: 1_794_929_420.0 + 60.0 * minute)
+    assert _intents_for(ticks) == []
+    assert all(agent.status == "working" for agents, _, _ in ticks for agent in agents)
+
+
+def test_a_run_whose_heartbeat_freezes_is_released_after_stall_minutes(ccfg):
+    """A dead chaind stops saving runs, so `updated_at` freezes: fleet's stall
+    timer still releases the task, at stall_minutes and not before."""
+    ticks = _live_ticks(ccfg, lambda minute: 1_794_929_420.0)
+    released = [
+        (minute, i)
+        for minute, (_, intents, _) in enumerate(ticks)
+        for i in intents
+        if isinstance(i, (Release, Escalate)) and i.task == 5
+    ]
+    assert released[0] == (10, Release(task=5, reason="stalled", attempt=2))
+
+
+def test_progress_still_moves_the_sequence(ccfg):
+    """The heartbeat is the low part of the sequence: a run whose progress
+    moves while `updated_at` does not (one read, then the next) still reads as
+    moving, and more progress is always a larger sequence."""
+    cli = ScriptedCli(start=[(0, "r-g\n", "")])
+    ex = _started(ccfg, cli)
+    seqs = []
+    for progress, updated_at in [(3, 1500.0), (4, 1100.0), (4, 1100.0)]:
+        run = _run("r-g", 5, progress=progress, updated_at=updated_at)
+        cli.script["status"] = [(0, _status(run), "")]
+        [agent] = ex.agents()
+        seqs.append(agent.change_seq)
+    assert seqs[0] < seqs[1] == seqs[2]
+
+
+def test_held_sequence_is_past_the_last_live_one(ccfg):
+    """The write tick's held report must read as movement against the last live
+    report, or the stall timer is not restarted and the write tick's stale
+    ledger releases the task over the label just written."""
+    cli = ScriptedCli(start=[(0, "r-e\n", "")])
+    ex = _started(ccfg, cli)
+    live = _run("r-e", 5, progress=7, updated_at=1_794_929_420.0)
+    cli.script["status"] = [(0, _status(live), "")]
+    [running] = ex.agents()
+    ended = _approved("r-e", 5, progress=7, updated_at=1_794_929_480.0)
+    cli.script["status"] = [(0, _status(ended), "")]
+    [held] = ex.agents()
+    assert held.status == "working"
+    assert held.change_seq > running.change_seq
 
 
 @pytest.mark.parametrize("status", ["queued", "verifying"])
