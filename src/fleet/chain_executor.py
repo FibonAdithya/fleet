@@ -98,7 +98,7 @@ _TRANSIENT = (GhError, OSError)
 #: A git SHA as the handoff and verdict schemas accept one.
 _SHA = re.compile(r"[0-9a-f]{7,40}")
 
-#: The hidden first line of a not-reproduced or duplicate closing comment, so
+#: The hidden last line of a not-reproduced or duplicate closing comment, so
 #: a retry can tell that its comment already landed.
 _OUTCOME_MARKER = "<!-- fleet:chain-outcome run={run_id} -->"
 
@@ -577,8 +577,10 @@ class ChainExecutor:
             # A comment that landed but was never recorded (a crash before
             # `_save`) carries this run's marker: do not post it again.
             comments = self.gh.get_issue(task).get("comments", [])
-            if not any(body.split("\n", 1)[0] == marker for body in comments):
-                self.gh.comment(task, f"{marker}\n{_verdict_text(run)}")
+            if not any(marker in body.splitlines() for body in comments):
+                # Last, so the body starts with the verdict: GitHub's
+                # duplicate marking and a human both read the start.
+                self.gh.comment(task, f"{_verdict_text(run)}\n{marker}")
         elif step == "done":
             commands._move_state(self.gh, task, "done")
         elif step == "close":

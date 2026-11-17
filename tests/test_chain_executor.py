@@ -891,9 +891,8 @@ def test_duplicate_closes_naming_the_duplicate(ccfg):
     assert gh.get_issue(5)["state"] == "CLOSED"
     assert _state_labels(gh) == ["fleet:done"]
     [comment] = _comments(gh)
-    marker, first = comment.splitlines()[:2]
-    assert marker == "<!-- fleet:chain-outcome run=r-b -->"
-    assert first.startswith("Duplicate of #12")
+    assert comment.startswith("Duplicate of #12")
+    assert comment.splitlines()[-1] == "<!-- fleet:chain-outcome run=r-b -->"
 
 
 @pytest.mark.parametrize("status", ["aborted", "ended"])
@@ -1410,5 +1409,5 @@ def test_closing_comment_not_reposted_after_crash_before_save(ccfg):
     reborn = _executor(ccfg, gh, cli, state_path=state_path, clock=lambda: CLOCK)
     reborn.agents()
     assert len(_comments(gh)) == 1
-    assert _comments(gh)[0].splitlines()[0] == "<!-- fleet:chain-outcome run=r-c -->"
+    assert _comments(gh)[0].splitlines()[-1] == "<!-- fleet:chain-outcome run=r-c -->"
     assert gh.get_issue(5)["state"] == "CLOSED"
