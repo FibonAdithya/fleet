@@ -414,7 +414,7 @@ def test_chain_kind_model_cell_must_be_chain(tmp_path):
     """A model name in the chain row would read as a declaration fleet checks,
     and it checks nothing for this kind. Catches accepting any model cell."""
     cfg = _config_with_chain_role(tmp_path, model="claude-opus-5")
-    with pytest.raises(PolicyError, match="chain"):
+    with pytest.raises(PolicyError, match="Model cell"):
         policy_module.load(cfg)
 
 

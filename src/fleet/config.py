@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,11 +38,16 @@ def _positive(value: float, key: str) -> float:
     escalated. A rule whose purpose is a spending bound must not turn a typo
     into unlimited spend, so the value is refused here and the rule in decide()
     has one meaning.
+
+    Non-finite values are refused for the same reason. TOML allows `nan` and
+    `inf`; `nan <= 0` is False, so the zero check alone let it through, and
+    every comparison against a nan ceiling is False -- no ceiling at all.
     """
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ConfigError(
-            f"[budget] {key} must be greater than zero, got {value!r}. "
-            "Zero is not 'no limit': it disables the ceiling this key exists to set."
+            f"[budget] {key} must be a finite number greater than zero, got {value!r}. "
+            "Zero, nan and inf are not 'no limit': each disables the ceiling this "
+            "key exists to set."
         )
     return value
 
@@ -165,13 +172,20 @@ def _args(kind: str, table: dict) -> tuple[str, ...]:
 def _agent_ceiling(kind: str, table: dict) -> float | None:
     """Optional per-kind task ceiling. Refused at zero or below for the reason
     `_positive` gives, and refused as a string or bool: TOML `true` is an int
-    to Python, and `"40"` would pass a float() coercion silently."""
+    to Python, and `"40"` would pass a float() coercion silently. Non-finite
+    values are refused as `_positive` refuses them: `cost > nan` is always
+    False, so a nan ceiling is no ceiling."""
     if "per_task_usd" not in table:
         return None
     value = table["per_task_usd"]
-    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         raise ConfigError(
-            f"[agents.{kind}] per_task_usd must be a number greater than zero, "
+            f"[agents.{kind}] per_task_usd must be a finite number greater than zero, "
             f"got {value!r}. Zero is not 'no limit': it puts every run of this "
             "kind over budget on its first tick."
         )
@@ -180,7 +194,17 @@ def _agent_ceiling(kind: str, table: dict) -> float | None:
 
 def _chain_agent(table: dict) -> AgentSpec:
     """Kind `chain` runs its own binary rather than a CLI herdr starts with a
-    model flag, so `command` is required and `model_flag` is not."""
+    model flag, so `command` is required and `model_flag` is refused: chain
+    picks its own models, and a flag here would be a setting that does nothing.
+
+    `command` stays the string as written apart from `~` expansion. Passing it
+    through `Path()` would turn `./bin/chain` into `bin/chain`, which exec then
+    looks up on PATH instead of relative to the working directory."""
+    if "model_flag" in table:
+        raise ConfigError(
+            f"[agents.{CHAIN_KIND}] has a model_flag. Kind {CHAIN_KIND!r} picks its "
+            "own models and is never started with one; remove the key."
+        )
     command = table.get("command")
     if not isinstance(command, str) or not command:
         raise ConfigError(
@@ -190,9 +214,9 @@ def _chain_agent(table: dict) -> AgentSpec:
         )
     return AgentSpec(
         kind=CHAIN_KIND,
-        model_flag=str(table.get("model_flag", "")),
+        model_flag="",
         args=_args(CHAIN_KIND, table),
-        command=str(Path(command).expanduser()),
+        command=os.path.expanduser(command),
         per_task_usd=_agent_ceiling(CHAIN_KIND, table),
     )
 
