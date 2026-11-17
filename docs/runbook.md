@@ -386,6 +386,94 @@ so a fresh repository needs them created first, as
 vocabulary. The labels do not carry over from
 `FibonAdithya/fleet`, so a fork needs them created.
 
+## The chain route
+
+A target can send its `build` and `bug` classes to chain, a separate tool that
+takes a task to an approved pull request on its own. fleet starts and watches
+chain runs and writes the results to the ledger; it never reads chain's own
+store. The route is the target's `task-classes.md` (a class whose first role has
+agent kind `chain`, as in `fixtures/policy/fleet-fixture/docs/agent/task-classes.md`);
+`fleet run` builds the chain executor only when some route names such a role
+(`src/fleet/cli.py::build_executor`).
+
+### fleet.toml
+
+    [agents.chain]
+    command = "chain"
+    per_task_usd = 40.0
+
+    [chain]
+    default_area = "docs"
+    max_age_days = 7
+
+- `[agents.chain]`: `command` is required (the chain binary); `model_flag` is
+  refused. `per_task_usd` is the cost ceiling per chain task. The shipped 40.0
+  is ESTIMATE (unverified); measured chain runs cost $3.31-$18.67.
+- `[chain] default_area`: the area name an adopted `bug` issue is filed under.
+  Unset, nothing is adopted. `policy.load` refuses a name that is not an area
+  of the ownership map.
+- `[chain] max_age_days`: how old an `agent-reported` issue may be and still be
+  adopted. Default 7; a whole number, at least 1.
+- `[daemon] answers`: where the box writes the owner's answers. Default
+  `~/.local/state/fleet/answers`. The file for a task is
+  `<answers_dir>/<owner>__<name>/<number>.json`, a JSON list of
+  `{"text": str, "at": float}`. The box writes it; fleet only reads it, and
+  shows the answers to a native role in its prompt. The box also labels the
+  issue `fleet:answered-N`, and each attempt, fix-pass and rebase cap is then
+  multiplied by `1 + N`.
+
+### How a task gets there
+
+- A `build` issue names its spec on a line that is exactly `Spec: <path>`.
+- `fleet discover --class bug|build` on a chain-routed class files the new
+  issue `fleet:ready` and `fleet:auto-ok`, so it runs unattended. A `patch`, or
+  a class not routed to chain, stays in `fleet:triage`. A `build` discovery
+  needs `--spec`, committed on the integration branch.
+- The daemon adopts an open `agent-reported` issue as a `bug` when it has no
+  state label, was opened by the gh login, is no older than `max_age_days`, and
+  `bug` routes to chain with `default_area` set. An issue that already carries
+  another class or area label is never adopted. `src/fleet/decide.py::_adopt`
+  has the full conditions.
+
+### State file
+
+The executor keeps a task-map file, chain-runs.json, next to the run log: which chain run is
+which task, and which of a finished run's ledger writes have landed, so a
+restart neither loses a live run nor writes an outcome twice. If the file
+exists but cannot be read, `fleet run` stops with `ChainStateError` naming it.
+Fix it by hand or remove it, but check `chain status` first: an empty map would
+orphan live runs that keep spending.
+
+### How outcomes map
+
+| chain's outcome | fleet writes |
+|---|---|
+| `approved` | a handoff to `review`, then an approved verdict, so the task moves to `integrating` |
+| `escalated` | an escalation to `fleet:human` carrying chain's question, with the issue left unassigned |
+| `not_reproduced`, `duplicate` | a comment, `fleet:done`, and the issue closed |
+| anything else (aborted, ended without an outcome, `waiting`) | the agent reads as dirty; the task is retried within its caps |
+| an outcome fleet cannot record | an escalation written by fleet, naming the run |
+
+An escalation comment starts with the exact line
+`<!-- fleet:escalation reason=<reason> -->`. A run's cost counts toward the
+night when its outcome is reaped, not while it runs.
+
+### Failure lines
+
+These appear in the daemon's failure record and `fleet status`:
+
+- `chain run <id> is <status> but fleet has no record of starting it`: a live run
+  for this repository that no task maps to, usually a start that timed out. Its
+  spend is not counted. Stop it with the `chain abort <id>` command the line
+  gives.
+- `no route runs chain, but <path> maps runs (...)`: the route was removed while
+  runs were mapped. fleet will neither stop nor report them; check
+  `chain status` and abort them by hand.
+- `chain run <id> is waiting on its owner`: a fleet-mode run never asks; the
+  task reads dirty.
+- `chain status exited ...` or `output unreadable`: the last good status is
+  kept, so nothing is released on one bad read.
+
 ## Known warts
 
 - **Rejected commands print a Python traceback** rather than a clean

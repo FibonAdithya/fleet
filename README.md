@@ -127,6 +127,13 @@ review on a laptop. fleet runs many issues in parallel against one repository,
 on the box. chain is part of
 [agent-habits-kit](https://github.com/FibonAdithya/agent-habits-kit).
 
+The two work together. A target can route its `build` and `bug` classes to a
+`chain` agent: fleet claims the issue, starts a chain run for it with
+`chain start --fleet`, watches it through `chain status --json`, and turns the
+run's outcome into the same handoff, verdict and escalation comments a fleet
+stage writes. fleet never reads chain's store. Setup, outcomes and failure
+lines are in [the chain route](docs/runbook.md#the-chain-route).
+
 ## Checks
 
     make check
