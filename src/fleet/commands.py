@@ -37,13 +37,16 @@ ROLE_MAY_HAND_TO: dict[str, frozenset[str]] = {
     "planner": frozenset({"review"}),
     "integrator": frozenset({"done", "claimed"}),
     "scout": frozenset(),
+    # chain runs the whole build itself; its hand-off goes to review, and its
+    # approved verdict (it is in VERDICT_ROLES) moves the task to integrating.
+    "chain": frozenset({"review"}),
 }
 
 # Only a reviewing role writes a verdict. `invariant-reviewer` is in because
 # invariant-reviewer.md ends "Emit `approved` only if all five are `ok`" -- it
 # emits a verdict, on a narrower question. Every other role is the same
 # integrity hole ROLE_MAY_HAND_TO closes, arriving by the other door.
-VERDICT_ROLES = frozenset({"reviewer", "invariant-reviewer"})
+VERDICT_ROLES = frozenset({"reviewer", "invariant-reviewer", "chain"})
 
 
 def _move_state(gh: GhClient, issue: int, state: str, add: list[str] | None = None) -> None:

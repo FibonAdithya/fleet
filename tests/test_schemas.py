@@ -154,3 +154,8 @@ def test_a_malformed_schema_file_raises_ours_not_jsonschemas(cfg):
     (cfg.schemas_dir / "handoff.schema.json").write_text('{"type": 17}')
     with pytest.raises(SchemaError, match="malformed schema"):
         validate(cfg, "handoff", VALID)
+
+
+def test_schema_accepts_chain_role(cfg):
+    ok = {**VALID, "from": {**VALID["from"], "role": "chain"}}
+    validate(cfg, "handoff", ok)

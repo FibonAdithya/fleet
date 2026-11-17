@@ -456,3 +456,32 @@ def test_the_role_table_agrees_with_the_handoff_schema(cfg):
     targets = set(schema["properties"]["to"]["enum"])
     assert set(ROLE_MAY_HAND_TO) == roles
     assert set().union(*ROLE_MAY_HAND_TO.values()) <= targets
+
+
+def test_chain_may_hand_to_review_only(cfg, gh):
+    """Catches a table that lets chain hand straight to integrating (skipping
+    the review the approved verdict stands in for) and one that omits chain."""
+    assert ROLE_MAY_HAND_TO["chain"] == frozenset({"review"})
+    chain = {**BASE, "role": "chain"}
+    with pytest.raises(ValueError):
+        do_handoff(cfg, gh, task=1, to="integrating", **chain)
+    assert gh.get_issue(1)["comments"] == []
+    do_handoff(cfg, gh, task=1, to="review", **chain)
+    assert parse_latest(gh.get_issue(1)["comments"], "handoff")["from"]["role"] == "chain"
+    assert "fleet:review" in gh.get_issue(1)["labels"]
+
+
+def test_chain_may_write_verdict(cfg, in_review):
+    """Catches a VERDICT_ROLES without chain, and a verdict schema that rejects
+    the `chain-<run id>` reviewer name."""
+    _, landed = do_verdict(
+        cfg,
+        in_review,
+        task=1,
+        verdict="approved",
+        findings=[],
+        checks_rerun="make check: pass",
+        **{**VERDICT, "role": "chain", "reviewer": "chain-20261117-ab12"},
+    )
+    assert landed == "integrating"
+    assert "fleet:integrating" in in_review.get_issue(1)["labels"]

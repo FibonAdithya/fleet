@@ -40,7 +40,7 @@ CLASSES = """# Task classes
 """
 
 ROLES = frozenset(
-    {"implementer", "integrator", "invariant-reviewer", "planner", "reviewer", "scout"}
+    {"chain", "implementer", "integrator", "invariant-reviewer", "planner", "reviewer", "scout"}
 )
 
 
@@ -388,6 +388,17 @@ def _config_with_chain_role(
     (root / ".agents/roles/chain.md").write_text("x")
     classes = root / "docs/agent/task-classes.md"
     text = classes.read_text()
+    # The vendored fixture now carries the chain role, the build/bug routes and
+    # the chain agent row itself; strip them so this helper controls each one.
+    for fixture_row in (
+        "| `build` | chain → integrator | merged commit | yes |\n",
+        "| `bug` | chain → integrator | merged commit | yes |\n",
+        "| `chain` | `chain` | `chain` |\n",
+    ):
+        assert fixture_row in text, (
+            "fixture shape changed; this helper's precondition no longer holds"
+        )
+        text = text.replace(fixture_row, "")
     text = text.replace(
         "| `integration` | integrator | `integration` advanced | yes |\n",
         "| `integration` | integrator | `integration` advanced | yes |\n"
@@ -483,3 +494,10 @@ def test_ceiling_for_other_role_is_global():
     assert policy.ceiling_for("implementer") == 2.0
     assert policy.ceiling_for(None) == 2.0
     assert policy.ceiling_for("nobody") == 2.0
+
+
+def test_fixture_policy_routes_build_and_bug():
+    policy = load(load_config(FIXTURE_POLICY))
+    assert policy.route_for("build") == ("chain", "integrator")
+    assert policy.route_for("bug") == ("chain", "integrator")
+    assert dict((r, (a, m)) for r, a, m in policy.agents)["chain"] == ("chain", "chain")
