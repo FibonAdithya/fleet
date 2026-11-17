@@ -114,6 +114,8 @@ def parse_latest(comments: list[str], kind: str) -> dict | None:
                 payload = json.loads(block)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(payload, dict):
+                continue
             if payload.get("schema") == SCHEMA_IDS[kind]:
                 return payload
     return None

@@ -190,3 +190,23 @@ def test_the_conditional_fields_cannot_ride_on_an_ordinary_packet(extra):
 def test_a_packet_cannot_block_its_own_task():
     with pytest.raises(ValueError, match="itself"):
         build_handoff(task=4, to="blocked", blocked_on=4, **FIELDS)
+
+
+def test_parse_latest_skips_non_object_block():
+    p = build_handoff(
+        task=21,
+        to="review",
+        role="implementer",
+        agent="a",
+        run="r",
+        base_sha="a",
+        head_sha="b",
+        branch="b",
+        did="d",
+        checks="c",
+        commands=["make check"],
+    )
+    marker = MARKERS["handoff"]
+    body = f"{render(p)}\n```json\n[1]\n```"
+    assert parse_latest([body], "handoff") == p
+    assert parse_latest([f"{marker}\n```json\n[1]\n```"], "handoff") is None

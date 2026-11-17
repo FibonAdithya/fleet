@@ -42,7 +42,7 @@ def test_render_starts_with_marker():
 def test_every_decide_reason_has_text():
     found = re.findall(r'Escalate\([^)]*?"([a-z_]+)"', DECIDE.read_text())
     assert found
-    assert set(found) <= set(REASON_TEXT)
+    assert set(found) == set(REASON_TEXT)
 
 
 def test_latest_prefers_newest():
@@ -71,3 +71,46 @@ def test_escalate_detail_in_comment():
     body = next(e for e in effects if isinstance(e, Comment)).body
     assert REASON_TEXT["over_budget"] in body
     assert "spent 41.20 of 40.00" in body
+
+
+def _handoff_to(state: str) -> str:
+    return packet.render(
+        packet.build_handoff(
+            task=5,
+            to=state,
+            role="implementer",
+            agent="a1",
+            run="r1",
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            branch="b",
+            did="did",
+            checks="ok",
+            commands=["make check"],
+        )
+    )
+
+
+def test_latest_ignores_non_object_packet():
+    assert latest(["<!-- fleet.handoff.v1 -->\n```json\n[1]\n```"]) is None
+
+
+def test_latest_ignores_packet_to_other_state():
+    assert latest([_handoff_to("review")]) is None
+
+
+def test_latest_ignores_marker_mentioned_mid_body():
+    body = f"see the earlier note\n{render('stalled')}\nthanks"
+    assert latest([body]) is None
+
+
+def test_latest_quoted_marker_inside_packet_is_the_packet():
+    body = _human_packet() + "\n" + render("stalled")
+    got = latest([body])
+    assert got is not None and got["reason"] == "handoff"
+    assert got["text"].startswith("Which API should it use?")
+
+
+def test_latest_crlf_marker():
+    got = latest([render("stalled").replace("\n", "\r\n")])
+    assert got is not None and got["reason"] == "stalled"
