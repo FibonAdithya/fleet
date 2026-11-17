@@ -10,8 +10,11 @@ Routing:
   kind `chain` to `ChainExecutor`, every other kind to `HerdrExecutor`.
 * `StopAgent` goes to `ChainExecutor` when it owns the task (a mapped run or a
   failed start, `ChainExecutor.tasks`), else to `HerdrExecutor`. By owner and
-  not by role, because a stop names no role, and an agent left over from before
-  a route changed is stopped by whichever executor started it.
+  not by role, because a stop names no role. While both executors exist, an
+  agent left over from before a route changed is stopped by whichever one
+  started it. With no chain route there is no ChainExecutor, and mapped chain
+  runs are neither stopped nor reported; `cli.build_executor` records that
+  once at startup.
 * Every other effect (labels, comments, assignees, closes) goes to
   `HerdrExecutor.apply`, once. `ChainExecutor.apply` refuses them.
 

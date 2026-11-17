@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import inspect
 import json
 import os
 import re
@@ -1226,7 +1227,19 @@ def test_fixture_outcomes_drive_the_writes(ccfg):
     for task in tasks.values():
         ex.apply([StartAgent(task=task, role="chain", base="integration")])
     ex.agents()
-    assert list(ex.failures) == []
+    # The fixture's live runs this test did not start (rewritten to this slug
+    # above) are reported as unmapped, and nothing else fails.
+    unmapped = sorted(run.id for run in runs.values() if run.status in chain_executor.LIVE_STATUSES)
+    assert unmapped
+    assert (
+        sorted(
+            line.split("chain run ", 1)[1].split()[0]
+            for line in ex.failures
+            if "no record of starting it" in line
+        )
+        == unmapped
+    )
+    assert [line for line in ex.failures if "no record of starting it" not in line] == []
 
     # r-d: status ended, outcome escalated -> the owner's question.
     assert _state_labels(gh, 5) == ["fleet:human"]
@@ -1436,9 +1449,50 @@ def test_run_cli_timeout_is_a_failed_call_not_an_exception():
 
 
 def test_run_cli_bounds_every_call():
-    """The bound the daemon uses is the module constant, and it is finite: a
+    """The bound every call gets is the module constant, and it is finite: a
     wedged `chain status` would otherwise hang every tick that follows."""
-    assert chain_executor.CLI_TIMEOUT_SECONDS == 120
+    timeout = inspect.signature(chain_executor.run_cli).parameters["timeout"].default
+    assert timeout == chain_executor.CLI_TIMEOUT_SECONDS == 120
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_run_cli_survives_bytes_that_are_not_utf8(stream):
+    """One bad byte from chain must not raise out of the tick: a
+    UnicodeDecodeError there fails every tick, herdr's tasks included."""
+    argv = [sys.executable, "-c", f"import sys; sys.{stream}.buffer.write(b'ok\\xff\\n')"]
+    code, out, err = chain_executor.run_cli(argv)
+    assert code == 0
+    assert {"stdout": out, "stderr": err}[stream] == "ok\ufffd\n"
+
+
+def test_a_run_cli_that_raises_valueerror_is_a_failed_call(ccfg, tmp_path):
+    def undecodable(argv):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    chain = ChainExecutor(ccfg, FakeGh(), COMMAND, undecodable, tmp_path / "s.json")
+    assert chain.agents() == []
+    assert any("invalid start byte" in line for line in chain.failures)
+
+
+def test_a_live_unmapped_run_of_this_repo_is_recorded_once(ccfg):
+    """A start that timed out after chain created its run leaves a run fleet
+    never mapped. It is not adopted, but it is said, with the abort command,
+    once: its spend is not counted anywhere in fleet."""
+    status = _status(
+        _run("r-lost", 7),
+        _run("r-other", 8, slug="someone/else"),
+        _run("r-ended", 9, status="ended"),
+    )
+    chain = _executor(ccfg, FakeGh(), ScriptedCli(status=[(0, status, "")]))
+    assert chain.agents() == []
+    assert chain.agents() == []
+    lost = [line for line in chain.failures if "r-lost" in line]
+    assert len(lost) == 1
+    assert "task 7" in lost[0]
+    assert f"{COMMAND} abort r-lost" in lost[0]
+    assert not any("r-other" in line or "r-ended" in line for line in chain.failures)
+    assert chain.tasks() == set()
+    assert chain.run_cli.calls_to("abort") == []
 
 
 def test_a_missing_binary_through_the_real_run_cli_is_recorded(ccfg, tmp_path):

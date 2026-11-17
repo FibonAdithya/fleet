@@ -442,18 +442,29 @@ def build_executor(cfg, policy, gh, herdr: HerdrExecutor, run_cli) -> CompositeE
 
     The task map sits next to the run log, in the daemon's state directory:
     one map per target repository, as the run log is.
+
+    With no chain route, a task map that still names runs (the routes changed
+    while runs were mapped) is recorded once: nothing will stop or report
+    those runs, and they may still be spending.
     """
+    state_path = cfg.runlog_path.parent / "chain-runs.json"
     routed = {role for _, stages in policy.routes for role in stages}
-    chain = None
     if any(kind == CHAIN_KIND for role, kind, _ in policy.agents if role in routed):
-        chain = ChainExecutor(
-            cfg,
-            gh,
-            cfg.agents[CHAIN_KIND].command,
-            run_cli,
-            cfg.runlog_path.parent / "chain-runs.json",
+        chain = ChainExecutor(cfg, gh, cfg.agents[CHAIN_KIND].command, run_cli, state_path)
+        return CompositeExecutor(herdr, chain, policy)
+    composite = CompositeExecutor(herdr, None, policy)
+    try:
+        runs, _ = chain_executor.load_state(state_path)
+    except chain_executor.ChainStateError as exc:
+        composite.failures.append(f"no route runs chain, and {exc}")
+        return composite
+    if runs:
+        named = ", ".join(f"task {task}: {run_id}" for task, run_id in sorted(runs.items()))
+        composite.failures.append(
+            f"no route runs chain, but {state_path} maps runs ({named}); fleet will "
+            "neither stop nor report them -- check `chain status` and abort them by hand"
         )
-    return CompositeExecutor(herdr, chain, policy)
+    return composite
 
 
 @main.command()

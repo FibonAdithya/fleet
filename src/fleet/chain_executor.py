@@ -117,13 +117,23 @@ def run_cli(argv: list[str], timeout: float = CLI_TIMEOUT_SECONDS) -> tuple[int,
     A call that runs past `timeout` is killed and answered as a failed call,
     never raised: a timed-out `status` then keeps the last good read, and a
     timed-out `start` is a failed start. A start that timed out after chain
-    created its run leaves that run unmapped: fleet never saw its id, and
-    `chain status` lists it under its `fleet_task` for a human to abort. A
-    binary that cannot be executed still raises OSError; `ChainExecutor._call`
-    answers that one.
+    created its run leaves that run unmapped: fleet never saw its id.
+    `ChainExecutor.agents` records such a run once, with the abort command,
+    and does not adopt it.
+
+    Decoded as UTF-8 with replacement: a strict decode raises on one bad byte,
+    and that would fail every tick, herdr's tasks included. A binary that
+    cannot be executed still raises OSError; `ChainExecutor._call` answers
+    that one.
     """
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run(
+            argv,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         return (_TIMED_OUT, "", f"{argv[0]} {' '.join(argv[1:2])} timed out after {timeout}s")
     return (done.returncode, done.stdout, done.stderr)
@@ -346,6 +356,9 @@ class ChainExecutor:
         #: Run ids whose `waiting` status has been recorded, so a run that sits
         #: there records one failure rather than one per tick.
         self._waiting_reported: set[str] = set()
+        #: Live runs of this repository that fleet has no mapping for (a start
+        #: that timed out after chain created the run), recorded once each.
+        self._unmapped_reported: set[str] = set()
         self._areas: frozenset[str] | None = None
 
     # -- the Executor seam -------------------------------------------------------
@@ -396,7 +409,10 @@ class ChainExecutor:
         written: set[str] = set()
         for run in self._last_runs:
             task = by_run.get(run.id)
-            if task is None or run.fleet_task is None:
+            if run.fleet_task is None:
+                continue
+            if task is None:
+                self._report_unmapped(run)
                 continue
             if run.fleet_task.slug != self.cfg.repo_slug:
                 continue
@@ -862,13 +878,35 @@ class ChainExecutor:
             self._record(f"chain status output unreadable: {exc}")
             return None
 
+    def _report_unmapped(self, run: ChainRun) -> None:
+        """Record, once, a live run of this repository that no task maps to.
+
+        Not adopted: fleet cannot tell whether a human started it, and adopting
+        it would charge its spend to a task that may already have a run. Its
+        spend is counted nowhere in fleet, so it is said instead.
+        """
+        assert run.fleet_task is not None
+        if run.fleet_task.slug != self.cfg.repo_slug or run.status not in LIVE_STATUSES:
+            return
+        if run.id in self._unmapped_reported:
+            return
+        self._unmapped_reported.add(run.id)
+        self._record(
+            f"task {run.fleet_task.number}: chain run {run.id} is {run.status} but fleet has "
+            f"no record of starting it (a start that timed out?); its spend is not counted. "
+            f"Stop it with `{self.command} abort {run.id}`"
+        )
+
     def _call(self, argv: list[str]) -> tuple[int, str, str]:
-        """`run_cli`, with a binary that cannot be executed answered as a
-        failed call rather than raised out of the tick."""
+        """`run_cli`, with a binary that cannot be executed, or output that
+        cannot be decoded, answered as a failed call rather than raised out of
+        the tick."""
         try:
             return self.run_cli(argv)
         except OSError as exc:
             return (_EXEC_FAILED, "", f"cannot run {argv[0]}: {exc}")
+        except ValueError as exc:
+            return (_EXEC_FAILED, "", f"{argv[0]} output unreadable: {exc}")
 
     def _area_names(self) -> frozenset[str]:
         if self._areas is None:
@@ -884,33 +922,7 @@ class ChainExecutor:
         self.failures.append(message)
 
     def _load(self) -> tuple[dict[int, str], dict[str, Outcome]]:
-        """The task map and the outcome records. A missing file is empty; an
-        unreadable one raises ChainStateError naming the file, because an empty
-        map would orphan every run it named, and those runs keep spending, and
-        empty outcome records would write every finished run's packets again."""
-        if not self.state_path.exists():
-            return {}, {}
-        try:
-            doc = json.loads(self.state_path.read_text(encoding="utf-8"))
-            runs = doc["runs"]
-            if not isinstance(runs, dict):
-                raise TypeError(f"runs is {type(runs).__name__}, not an object")
-            out: dict[int, str] = {}
-            for task, run_id in runs.items():
-                if not isinstance(run_id, str):
-                    raise TypeError(f"run id for task {task!r} is {run_id!r}")
-                out[int(task)] = run_id
-            # Absent in a file written before outcomes were recorded.
-            raw_outcomes = doc.get("outcomes", {})
-            if not isinstance(raw_outcomes, dict):
-                raise TypeError(f"outcomes is {type(raw_outcomes).__name__}, not an object")
-            outcomes = {run_id: _outcome_of(raw) for run_id, raw in raw_outcomes.items()}
-            return out, outcomes
-        except (ValueError, KeyError, TypeError) as exc:
-            raise ChainStateError(
-                f"chain task map {self.state_path} is unreadable ({exc!r}); "
-                "fix or remove it by hand -- an empty map would orphan live runs"
-            ) from exc
+        return load_state(self.state_path)
 
     def _save(self) -> None:
         """Write the task map atomically: a temp file in the same directory,
@@ -942,6 +954,36 @@ class ChainExecutor:
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
+
+
+def load_state(state_path: Path) -> tuple[dict[int, str], dict[str, Outcome]]:
+    """The task map and the outcome records. A missing file is empty; an
+    unreadable one raises ChainStateError naming the file, because an empty
+    map would orphan every run it named, and those runs keep spending, and
+    empty outcome records would write every finished run's packets again."""
+    if not state_path.exists():
+        return {}, {}
+    try:
+        doc = json.loads(state_path.read_text(encoding="utf-8"))
+        runs = doc["runs"]
+        if not isinstance(runs, dict):
+            raise TypeError(f"runs is {type(runs).__name__}, not an object")
+        out: dict[int, str] = {}
+        for task, run_id in runs.items():
+            if not isinstance(run_id, str):
+                raise TypeError(f"run id for task {task!r} is {run_id!r}")
+            out[int(task)] = run_id
+        # Absent in a file written before outcomes were recorded.
+        raw_outcomes = doc.get("outcomes", {})
+        if not isinstance(raw_outcomes, dict):
+            raise TypeError(f"outcomes is {type(raw_outcomes).__name__}, not an object")
+        outcomes = {run_id: _outcome_of(raw) for run_id, raw in raw_outcomes.items()}
+        return out, outcomes
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ChainStateError(
+            f"chain task map {state_path} is unreadable ({exc!r}); "
+            "fix or remove it by hand -- an empty map would orphan live runs"
+        ) from exc
 
 
 def _outcome_of(raw: dict) -> Outcome:

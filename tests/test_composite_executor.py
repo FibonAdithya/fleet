@@ -288,3 +288,34 @@ def test_a_chain_route_builds_a_chain_executor(fcfg):
     assert chain.gh is gh
     assert chain.state_path == fcfg.runlog_path.parent / "chain-runs.json"
     assert chain.failures is herdr_exec.failures
+
+
+def test_a_chain_state_file_with_no_chain_route_is_reported(tmp_path):
+    """Routes changed away from chain while runs were mapped: nothing builds a
+    ChainExecutor, so those runs are neither stopped nor reported. Said once,
+    at startup, with the file and the run ids."""
+    cfg = dataclasses.replace(
+        load_config(_unrouted_chain_policy(tmp_path)), runlog_path=tmp_path / "run.jsonl"
+    )
+    state = tmp_path / "chain-runs.json"
+    state.write_text(json.dumps({"runs": {"5": "run-a", "6": "run-b"}, "outcomes": {}}))
+    herdr_exec = HerdrExecutor(FakeHerdr(), FakeGh(), cfg)
+    composite = cli.build_executor(
+        cfg, policy_module.load(cfg), FakeGh(), herdr_exec, ScriptedCli()
+    )
+    assert composite.chain is None
+    found = [line for line in composite.failures if str(state) in line]
+    assert len(found) == 1
+    assert "run-a" in found[0] and "run-b" in found[0]
+
+
+def test_no_chain_route_and_no_state_file_reports_nothing(tmp_path):
+    cfg = dataclasses.replace(
+        load_config(_unrouted_chain_policy(tmp_path)), runlog_path=tmp_path / "run.jsonl"
+    )
+    (tmp_path / "chain-runs.json").write_text(json.dumps({"runs": {}, "outcomes": {}}))
+    herdr_exec = HerdrExecutor(FakeHerdr(), FakeGh(), cfg)
+    composite = cli.build_executor(
+        cfg, policy_module.load(cfg), FakeGh(), herdr_exec, ScriptedCli()
+    )
+    assert list(composite.failures) == []
