@@ -856,18 +856,6 @@ def test_approved_run_hands_to_review_then_approves(ccfg):
     assert list(ex.failures) == []
 
 
-def test_approved_run_without_a_test_command_still_validates(ccfg):
-    """The handoff schema needs at least one command; a run with no test
-    command says so in `checks` rather than inventing one."""
-    ex, gh, _ = _finished(ccfg, _approved("r-e", 5, test_command=None))
-    ex.agents()
-    handoff = packet.parse_latest(_comments(gh), "handoff")
-    validate(ccfg, "handoff", handoff)
-    assert "no test command" in handoff["evidence"]["checks"]
-    assert "make check" not in handoff["evidence"]["commands"]
-    assert _state_labels(gh) == ["fleet:integrating"]
-
-
 def test_escalated_run_moves_to_human_with_question(ccfg):
     ex, gh, _ = _finished(ccfg, _escalated("r-d", 5))
     ex.agents()
@@ -903,7 +891,9 @@ def test_duplicate_closes_naming_the_duplicate(ccfg):
     assert gh.get_issue(5)["state"] == "CLOSED"
     assert _state_labels(gh) == ["fleet:done"]
     [comment] = _comments(gh)
-    assert comment.startswith("Duplicate of #12")
+    marker, first = comment.splitlines()[:2]
+    assert marker == "<!-- fleet:chain-outcome run=r-b -->"
+    assert first.startswith("Duplicate of #12")
 
 
 @pytest.mark.parametrize("status", ["aborted", "ended"])
@@ -1122,8 +1112,18 @@ def test_outcome_stop_forgets_without_abort_after_restart(ccfg):
         {"r-e": {"outcome": "approved", "steps": [1]}},
         {"r-e": {"outcome": "approved", "steps": [], "cost_usd": "1"}},
         {"r-e": {"outcome": 3, "steps": [], "cost_usd": 1.0, "progress": 1, "output_bytes": 0}},
+        {
+            "r-e": {
+                "outcome": "approved",
+                "steps": [],
+                "cost_usd": 1.0,
+                "progress": 1,
+                "output_bytes": 0,
+                "fallback": 7,
+            }
+        },
     ],
-    ids=["list", "record-list", "steps-str", "step-int", "cost-str", "outcome-int"],
+    ids=["list", "record-list", "steps-str", "step-int", "cost-str", "outcome-int", "fallback-int"],
 )
 def test_corrupt_outcome_records_raise_naming_the_path(ccfg, outcomes):
     state_path = ccfg.root / "state" / "chain-runs.json"
@@ -1272,4 +1272,143 @@ def test_not_reproduced_without_tried_says_so(ccfg, tried):
     ex.agents()
     [comment] = _comments(gh)
     assert "chain did not say what it tried." in comment
+    assert gh.get_issue(5)["state"] == "CLOSED"
+
+
+# --- held cost, permanent failures ----------------------------------------------
+
+
+def _intents_for(ticks, task: int = 5, kinds=(Release, Escalate)):
+    # Not every intent has a task: a fleet over its budget also drains.
+    return [
+        i
+        for _, intents, _ in ticks
+        for i in intents
+        if isinstance(i, kinds) and getattr(i, "task", None) == task
+    ]
+
+
+def test_no_race_when_run_cost_exceeds_chain_ceiling(ccfg):
+    """A run that finished above the chain ceiling (40) is not released as
+    over budget on the write tick over the label it just wrote: the held
+    report carries no cost, and the `done` report that Retire reaps does."""
+    ticks, gh, _ = _race(ccfg, run_spent_usd=50.0)
+    assert _intents_for(ticks) == []
+    assert Retire(task=5) in ticks[1][1]
+    assert ticks[-1][2].spent_usd == 50.0
+    assert _state_labels(gh) == ["fleet:integrating"]
+
+
+def test_flaky_verdict_does_not_escalate_over_budget(ccfg):
+    """The verdict fails once, so on the next tick the ledger reads `review`
+    while the run is still held. Its cost (12.5) against the integrator's
+    ceiling (2.0) would escalate it as over budget if the held report
+    carried it."""
+    run = _approved("r-e", 5, progress=7, output_bytes=900, run_spent_usd=12.5)
+    ex, gh, _ = _finished(ccfg, run, gh=FlakyVerdictGh())
+    stale = Observation(change_seq=7, since=T0 - timedelta(minutes=30), transcript_bytes=900)
+    state = FleetState(seen=((5, stale),))
+    ticks = []
+    for minute, ledger_state in enumerate(["claimed", "review", "integrating"]):
+        agents = ex.agents()
+        intents, state = decide(
+            state,
+            [_ledger_task(ledger_state)],
+            OUTCOME_POLICY,
+            agents,
+            T0 + timedelta(minutes=minute),
+        )
+        ticks.append((agents, intents, state))
+        ex.apply(_stop_effects(intents))
+    assert _intents_for(ticks) == []
+    assert Retire(task=5) in ticks[2][1]
+    assert state.spent_usd == 12.5
+    assert _state_labels(gh) == ["fleet:integrating"]
+    assert len(_handoffs(gh)) == 1
+    assert len(_verdicts(gh)) == 1
+
+
+@pytest.mark.parametrize(
+    ("run", "needs", "failures"),
+    [
+        (
+            _escalated("r-d", 5, escalation={"kind": "needs_owner", "text": "  ", "options": []}),
+            "chain run r-d escalated at stage implement without a question",
+            0,
+        ),
+        (
+            dict(
+                _bug_verdict("r-b", 5, 5),
+                verdict={"issue_verdict": "duplicate", "duplicate_of": None, "tried": None},
+            ),
+            "chain run r-b ended with outcome duplicate, but fleet could not record it",
+            1,
+        ),
+        (
+            _approved("r-e", 5, head_sha="h" * 40),
+            "chain run r-e ended with outcome approved, but fleet could not record it",
+            1,
+        ),
+        (
+            _approved("r-e", 5, test_command=None),
+            "chain run r-e ended with outcome approved, but fleet could not record it",
+            1,
+        ),
+    ],
+    ids=[
+        "blank-escalation-text",
+        "null-duplicate-of",
+        "non-hex-head-sha",
+        "approved-null-test-command",
+    ],
+)
+def test_unrecordable_outcome_escalates_once(ccfg, run, needs, failures):
+    """A step that can never succeed must not loop (stall, release, a new
+    chain run, the result thrown away): fleet escalates naming the run, once,
+    and records the failure once."""
+    ex, gh, cli = _finished(ccfg, run, **{"-C": [(0, f"{INTEGRATION_SHA}\n", "")]})
+    for _ in range(3):
+        ex.agents()
+    assert _state_labels(gh) == ["fleet:human"]
+    found = escalation.latest(_comments(gh))
+    assert found["text"].startswith(needs)
+    escalations = [c for c in _handoffs(gh) if packet.parse_latest([c], "handoff")["to"] == "human"]
+    assert len(escalations) == 1
+    assert len(_handoffs(gh)) == 1
+    validate(ccfg, "handoff", packet.parse_latest(_comments(gh), "handoff"))
+    assert gh.get_issue(5)["assignees"] == []
+    assert len(ex.failures) == failures
+    # The run is held, then done -- never dirty, so `_fail` never retries it.
+    assert ex.agents()[0].status == "done"
+
+
+def test_permanent_failure_after_a_landed_step_keeps_it(ccfg):
+    """Steps that landed stay landed: the handoff is not withdrawn when the
+    verdict cannot be written, and the fallback escalation follows it."""
+
+    class BadVerdictGh(FakeGh):
+        def comment(self, issue, body):
+            if packet.MARKERS["verdict"] in body:
+                raise ValueError("verdict refused")
+            super().comment(issue, body)
+
+    ex, gh, _ = _finished(ccfg, _approved("r-e", 5), gh=BadVerdictGh())
+    ex.agents()
+    ex.agents()
+    handoffs = [packet.parse_latest([c], "handoff")["to"] for c in _handoffs(gh)]
+    assert handoffs == ["review", "human"]
+    assert _state_labels(gh) == ["fleet:human"]
+    assert "verdict refused" in escalation.latest(_comments(gh))["text"]
+
+
+def test_closing_comment_not_reposted_after_crash_before_save(ccfg):
+    state_path = ccfg.root / "state" / "chain-runs.json"
+    ex, gh, cli = _finished(ccfg, _bug_verdict("r-c", 5, 4), state_path=state_path)
+    saved = state_path.read_text()
+    ex.agents()
+    state_path.write_text(saved)  # every save after the start lost
+    reborn = _executor(ccfg, gh, cli, state_path=state_path, clock=lambda: CLOCK)
+    reborn.agents()
+    assert len(_comments(gh)) == 1
+    assert _comments(gh)[0].splitlines()[0] == "<!-- fleet:chain-outcome run=r-c -->"
     assert gh.get_issue(5)["state"] == "CLOSED"

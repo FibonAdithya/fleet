@@ -42,7 +42,6 @@ from fleet.config import FleetConfig
 from fleet.gh import GhClient, GhError
 from fleet.ledger import LedgerError
 from fleet.model import AgentState, Effect, StartAgent, StopAgent
-from fleet.schemas import SchemaError
 
 _LOG = logging.getLogger(__name__)
 
@@ -85,8 +84,23 @@ OUTCOME_STEPS: dict[str, tuple[str, ...]] = {
     "duplicate": ("comment", "done", "close"),
 }
 
-#: What a step can fail with. Anything else is a bug and is raised.
-_WRITE_ERRORS = (GhError, LedgerError, SchemaError, ValueError, OSError)
+#: The writes that replace an outcome fleet could not record: an escalation
+#: naming the run, so the owner sees it rather than a run that loops.
+FALLBACK_STEPS: tuple[str, ...] = ("fallback", "fallback_unassign")
+
+#: A step failure worth retrying next tick: gh or the network, or a binary that
+#: could not run. Every other exception is permanent -- the run's own data
+#: cannot be recorded (a null `duplicate_of`, a SHA the schema refuses) -- and a
+#: retry would only loop until the stall timer released the task and started a
+#: new run, throwing the finished one away.
+_TRANSIENT = (GhError, OSError)
+
+#: A git SHA as the handoff and verdict schemas accept one.
+_SHA = re.compile(r"[0-9a-f]{7,40}")
+
+#: The hidden first line of a not-reproduced or duplicate closing comment, so
+#: a retry can tell that its comment already landed.
+_OUTCOME_MARKER = "<!-- fleet:chain-outcome run={run_id} -->"
 
 
 class ChainStateError(Exception):
@@ -103,10 +117,17 @@ class Outcome:
     cost_usd: float
     progress: int
     output_bytes: int
+    #: Why the outcome could not be recorded, once a step failed permanently;
+    #: from then on the record's writes are FALLBACK_STEPS.
+    fallback: str | None = None
+
+    @property
+    def pending(self) -> tuple[str, ...]:
+        return FALLBACK_STEPS if self.fallback is not None else OUTCOME_STEPS[self.outcome]
 
     @property
     def done(self) -> bool:
-        return all(step in self.steps for step in OUTCOME_STEPS[self.outcome])
+        return all(step in self.steps for step in self.pending)
 
 
 @dataclass(frozen=True)
@@ -386,17 +407,26 @@ class ChainExecutor:
         return record is not None and record.done
 
     def _holding(self, task: int, record: Outcome | None, run: ChainRun | None) -> AgentState:
-        """Working, with a sequence decide has not seen: no stall, no release."""
+        """Working, with a sequence decide has not seen: no stall, no release.
+
+        At zero cost. decide checks a working agent's cost against the ceiling
+        of the role the row is owed, and a held row may already read `review`
+        (a verdict that failed once) or the run may have ended above the chain
+        ceiling: either would escalate or release over the outcome just
+        written. The cost rides on the `done` report instead, which decide's
+        Retire reaps and charges. Accepted: a held run reaped by a stall
+        Release (its writes failing for `stall_minutes`) is charged as 0.
+        """
         if record is not None:
-            progress, cost, size = record.progress, record.cost_usd, record.output_bytes
+            progress, size = record.progress, record.output_bytes
         else:
             assert run is not None
-            progress, cost, size = run.progress, run.run_spent_usd, run.output_bytes
+            progress, size = run.progress, run.output_bytes
         return AgentState(
             task=task,
             status="working",
             change_seq=progress + 1,
-            cost_usd=cost,
+            cost_usd=0.0,
             model=None,
             transcript_bytes=size,
             paused=False,
@@ -425,7 +455,7 @@ class ChainExecutor:
                     task=task,
                     status="done",
                     change_seq=agent.change_seq,
-                    cost_usd=agent.cost_usd,
+                    cost_usd=record.cost_usd,
                     model=None,
                     transcript_bytes=agent.transcript_bytes,
                     paused=False,
@@ -446,19 +476,36 @@ class ChainExecutor:
                 output_bytes=run.output_bytes,
             )
             self._outcomes[run.id] = record
-        for step in OUTCOME_STEPS[record.outcome]:
-            if step in record.steps:
-                continue
-            try:
-                self._write_step(step, task, run)
-            except _WRITE_ERRORS as exc:
-                self._record(f"task {task}: chain run {run.id}: {step} failed: {exc}")
+        while True:
+            for step in record.pending:
+                if step in record.steps:
+                    continue
+                try:
+                    self._write_step(step, task, run, record)
+                except _TRANSIENT as exc:
+                    self._record(f"task {task}: chain run {run.id}: {step} failed: {exc}")
+                    self._save()
+                    return
+                except Exception as exc:  # permanent: see _TRANSIENT
+                    if record.fallback is not None:
+                        # The last resort failed too; retried next tick, and
+                        # bounded by the stall timer like any held run.
+                        self._record(f"task {task}: chain run {run.id}: {step} failed: {exc!r}")
+                        self._save()
+                        return
+                    record.fallback = str(exc) or type(exc).__name__
+                    self._record(
+                        f"task {task}: chain run {run.id}: {step} failed permanently "
+                        f"({exc!r}); escalating instead"
+                    )
+                    self._save()
+                    break  # start over on the fallback steps
+                record.steps.append(step)
                 self._save()
+            else:
                 return
-            record.steps.append(step)
-            self._save()
 
-    def _write_step(self, step: str, task: int, run: ChainRun) -> None:
+    def _write_step(self, step: str, task: int, run: ChainRun, record: Outcome) -> None:
         agent = f"chain-{run.id}"
         # A packet step is a comment and then a label move (`commands._post`).
         # One whose comment landed but whose move failed, or whose success the
@@ -486,21 +533,52 @@ class ChainExecutor:
             )
         elif step == "escalate":
             found = run.escalation or {}
+            text = found.get("text")
+            question = text.strip() if isinstance(text, str) else ""
             commands.do_escalate(
                 self.cfg,
                 self.gh,
                 task=task,
-                question=str(found.get("text") or ""),
+                question=question
+                or f"chain run {run.id} escalated at stage {run.stage} without a question",
                 considered=(f"chain run {run.id} ended at stage {run.stage} ({found.get('kind')})"),
                 role="chain",
                 **self._packet(run),
             )
-        elif step == "unassign":
+        elif step == "fallback":
+            base, head = self._fallback_shas(run)
+            commands.do_escalate(
+                self.cfg,
+                self.gh,
+                task=task,
+                question=(
+                    f"chain run {run.id} ended with outcome {record.outcome}, "
+                    f"but fleet could not record it: {record.fallback}"
+                ),
+                considered=(
+                    f"fleet wrote nothing else for this run; check chain status for run {run.id}"
+                ),
+                role="chain",
+                agent=agent,
+                run=self._now(),
+                base_sha=base,
+                head_sha=head,
+                branch=run.branch or self.cfg.integration_branch,
+                did=f"fleet could not record chain run {run.id}'s outcome",
+                checks="none: fleet recorded no result for this run",
+                commands=[f"{self.command} status --json"],
+            )
+        elif step in ("unassign", "fallback_unassign"):
             # As expand's Escalate does: the box reads an assigned
             # `fleet:human` issue as taken by the owner.
             self.gh.assign(task, None)
         elif step == "comment":
-            self.gh.comment(task, _verdict_text(run))
+            marker = _OUTCOME_MARKER.format(run_id=run.id)
+            # A comment that landed but was never recorded (a crash before
+            # `_save`) carries this run's marker: do not post it again.
+            comments = self.gh.get_issue(task).get("comments", [])
+            if not any(body.split("\n", 1)[0] == marker for body in comments):
+                self.gh.comment(task, f"{marker}\n{_verdict_text(run)}")
         elif step == "done":
             commands._move_state(self.gh, task, "done")
         elif step == "close":
@@ -511,7 +589,12 @@ class ChainExecutor:
     def _landed(self, task: int, step: str, agent: str) -> str | None:
         """The state a packet step moves to, if this run's packet for it is
         already the newest of its kind on the issue; else None."""
-        target = {"handoff": "review", "escalate": "human", "verdict": "integrating"}.get(step)
+        target = {
+            "handoff": "review",
+            "escalate": "human",
+            "fallback": "human",
+            "verdict": "integrating",
+        }.get(step)
         if target is None:
             return None
         comments = self.gh.get_issue(task).get("comments", [])
@@ -531,21 +614,24 @@ class ChainExecutor:
             did = f"chain run {run.id}: plan, audit, implement, review"
         else:
             did = f"chain run {run.id}: escalated at stage {run.stage}"
-        if run.test_command:
-            checks = (
-                "test command passed at the reviewed SHA"
-                if run.outcome == "approved"
-                else "chain escalated before its tests ran to an approval"
-            )
+        if run.outcome == "approved":
+            if not run.test_command:
+                # chain's approval gate always records the test command it ran;
+                # an approval without one is a contract break, not a pass.
+                raise ValueError(f"chain run {run.id} was approved with no test command")
+            checks = "test command passed at the reviewed SHA"
+            cmds = [run.test_command]
+        elif run.test_command:
+            checks = "chain escalated before its tests ran to an approval"
             cmds = [run.test_command]
         else:
-            # The schema wants at least one command; name the run rather than
-            # invent a test command chain did not report.
-            checks = f"chain reported no test command for run {run.id}"
+            # An escalation can come before any test ran. The schema wants one
+            # command: the one that shows the owner this run.
+            checks = f"chain escalated run {run.id} before recording a test command"
             cmds = [f"{self.command} status --json"]
         return {
             "agent": f"chain-{run.id}",
-            "run": datetime.fromtimestamp(self.clock(), UTC).isoformat(),
+            "run": self._now(),
             "base_sha": base,
             "head_sha": head,
             "branch": run.branch or self.cfg.integration_branch,
@@ -564,6 +650,21 @@ class ChainExecutor:
             return sha, sha
         return run.base_sha or head, head
 
+    def _fallback_shas(self, run: ChainRun) -> tuple[str, str]:
+        """As `_shas`, but a SHA the schema would refuse counts as missing:
+        the fallback escalation is the write that has to land."""
+        base = run.base_sha if run.base_sha and _SHA.fullmatch(run.base_sha) else None
+        head = run.head_sha if run.head_sha and _SHA.fullmatch(run.head_sha) else None
+        head = head or base
+        if head is None:
+            sha = self._integration_head()
+            return sha, sha
+        return base or head, head
+
+    def _now(self) -> str:
+        """RFC 3339, from the injected clock."""
+        return datetime.fromtimestamp(self.clock(), UTC).isoformat()
+
     def _integration_head(self) -> str:
         argv = [
             "git",
@@ -575,7 +676,8 @@ class ChainExecutor:
         code, out, err = self._call(argv)
         sha = out.strip()
         if code != 0 or not sha:
-            raise ValueError(f"git rev-parse exited {code}: {err.strip()}")
+            # Transient: the repository, not the run, is what failed.
+            raise OSError(f"git rev-parse exited {code}: {err.strip()}")
         return sha
 
     def _failed_start_agents(self) -> list[AgentState]:
@@ -795,6 +897,7 @@ class ChainExecutor:
                     "cost_usd": record.cost_usd,
                     "progress": record.progress,
                     "output_bytes": record.output_bytes,
+                    "fallback": record.fallback,
                 }
                 for run_id, record in sorted(self._outcomes.items())
             },
@@ -821,8 +924,13 @@ def _outcome_of(raw: dict) -> Outcome:
     if outcome not in OUTCOME_STEPS:
         raise ValueError(f"outcome {outcome!r} is not one fleet writes")
     steps = raw["steps"]
-    if not isinstance(steps, list) or not all(step in OUTCOME_STEPS[outcome] for step in steps):
+    known = OUTCOME_STEPS[outcome] + FALLBACK_STEPS
+    if not isinstance(steps, list) or not all(step in known for step in steps):
         raise ValueError(f"steps {steps!r} are not steps of {outcome!r}")
+    # Absent in a record written before fallbacks existed.
+    fallback = raw.get("fallback")
+    if fallback is not None and not isinstance(fallback, str):
+        raise ValueError(f"fallback is {fallback!r}, not a string")
     spent = _finite(raw, "cost_usd")
     if spent < 0:
         raise ValueError(f"cost_usd is {spent!r}, below zero")
@@ -832,6 +940,7 @@ def _outcome_of(raw: dict) -> Outcome:
         cost_usd=spent,
         progress=_typed(raw, "progress", int),
         output_bytes=_typed(raw, "output_bytes", int),
+        fallback=fallback,
     )
 
 
