@@ -15,6 +15,7 @@ from collections import deque
 from fleet import labels as labels_module
 from fleet import packet as packet_module
 from fleet import policy as policy_module
+from fleet.chain_executor import answers_path
 from fleet.config import FleetConfig
 from fleet.gh import GhClient
 from fleet.herdr import AGENT_ABSENT_CODES, Herdr, HerdrError
@@ -41,6 +42,10 @@ _SLUG_FALLBACK = "task"
 # a herdr that fails every removal would otherwise append once per task per
 # tick, all night, into a list nothing ever drains.
 _FAILURE_LIMIT = 64
+# The answers file is written by another system and read as untrusted input.
+# chain refuses an answers file over this many bytes, so the prompt does too.
+_ANSWERS_MAX_BYTES = 65536
+_ANSWERS_HEADING = "# Owner answers (from Telegram)"
 
 
 def slug_of(title: str) -> str:
@@ -61,6 +66,35 @@ def slug_of(title: str) -> str:
     # `or` and not `if not slug.strip()`: the empty string is the only falsy
     # value this expression can produce, and it is exactly the case meant.
     return slug or _SLUG_FALLBACK
+
+
+def _answers_part(cfg: FleetConfig, task: int) -> str | None:
+    """The prompt part for the owner's answers to `task`, or None when there is
+    no answers file. A file that cannot be read as a JSON list of objects with a
+    string `text` (or is over the size limit) yields a part saying so; it never
+    raises, since the prompt must still build."""
+    path = answers_path(cfg, task)
+    if not path.is_file():
+        return None
+    unreadable = f"{_ANSWERS_HEADING}\n\nThe owner's answers file could not be read."
+    try:
+        if path.stat().st_size > _ANSWERS_MAX_BYTES:
+            return unreadable
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return unreadable
+    if not isinstance(data, list):
+        return unreadable
+    texts: list[str] = []
+    for item in data:
+        text = item.get("text") if isinstance(item, dict) else None
+        if not isinstance(text, str):
+            return unreadable
+        texts.append(text)
+    if not texts:
+        return None
+    listing = "\n\n".join(f"{n}. {text}" for n, text in enumerate(texts, 1))
+    return f"{_ANSWERS_HEADING}\n\n{listing}"
 
 
 def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
@@ -98,6 +132,9 @@ def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
         role_prompt,
         f"# Issue #{task}: {issue.get('title', '')}\n\n{issue.get('body', '')}",
     ]
+    answers = _answers_part(cfg, task)
+    if answers is not None:
+        parts.append(answers)
     if latest is not None:
         parts.append("# Handoff packet\n\n```json\n" + json.dumps(latest, indent=2) + "\n```")
     if verdict is not None:

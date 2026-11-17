@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import get_args
 
 import pytest
 
+from fleet import packet as packet_module
 from fleet.commands import do_handoff
 from fleet.gh import FakeGh, GhError
 from fleet.herdr import FakeHerdr, HerdrError
@@ -411,6 +413,76 @@ def test_the_prompt_is_role_issue_packet_and_agents_md_and_nothing_else(cfg):
     assert "ROLE-PROMPT-MARKER" in prompt
     assert "AGENTS-MARKER" in prompt
     assert "Acceptance criteria" in prompt
+
+
+def _answers_file(cfg, number, content):
+    owner, name = cfg.repo_slug.split("/", 1)
+    path = cfg.answers_dir / f"{owner}__{name}" / f"{number}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content)
+    return path
+
+
+def _prompt_setup(cfg):
+    gh = FakeGh()
+    number = _issue(gh)
+    cfg.roles_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.roles_dir / "implementer.md").write_text("ROLE")
+    gh.comment(number, render({"schema": SCHEMA_IDS["handoff"], "task": number, "did": "WORK"}))
+    return gh, number
+
+
+def test_prompt_includes_answers(cfg):
+    gh, number = _prompt_setup(cfg)
+    answers = [{"text": "use sqlite <b>not</b> pg", "at": 1.0}, {"text": "second\nline", "at": 2.0}]
+    _answers_file(cfg, number, json.dumps(answers))
+    prompt = build_prompt(cfg, gh, number, "implementer")
+    assert "# Owner answers (from Telegram)" in prompt
+    assert "1. use sqlite <b>not</b> pg" in prompt
+    assert "2. second\nline" in prompt
+    assert prompt.index("use sqlite") < prompt.index("second")
+    assert prompt.index("# Issue #") < prompt.index("# Owner answers")
+    assert prompt.index("# Owner answers") < prompt.index("# Handoff packet")
+
+
+def test_prompt_without_answers_unchanged(cfg):
+    gh, number = _prompt_setup(cfg)
+    (cfg.root / "AGENTS.md").write_text("AGENTS-MARKER")
+    issue = gh.get_issue(number)
+    handoff = packet_module.parse_latest(issue["comments"], "handoff")
+    expected = "\n\n---\n\n".join(
+        [
+            "ROLE",
+            f"# Issue #{number}: {issue['title']}\n\n{issue['body']}",
+            "# Handoff packet\n\n```json\n" + json.dumps(handoff, indent=2) + "\n```",
+            "AGENTS-MARKER",
+        ]
+    )
+    assert build_prompt(cfg, gh, number, "implementer") == expected
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not json{",
+        '{"text": "x"}',
+        '[{"at": 1.0}]',
+        '[{"text": 5}]',
+        '["bare string"]',
+        b"\xff\xfe",
+        json.dumps([{"text": "x" * 70000, "at": 1.0}]),
+    ],
+)
+def test_prompt_with_bad_answers_file_still_builds(cfg, content):
+    gh, number = _prompt_setup(cfg)
+    _answers_file(cfg, number, content)
+    prompt = build_prompt(cfg, gh, number, "implementer")
+    assert "# Owner answers (from Telegram)" in prompt
+    assert "could not be read" in prompt
+    assert "# Handoff packet" in prompt
 
 
 def test_the_prompt_carries_the_latest_handoff_packet(cfg):
