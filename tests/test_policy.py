@@ -5,6 +5,7 @@ import pytest
 from conftest import FIXTURE_POLICY
 from fleet import policy as policy_module
 from fleet.config import load_config
+from fleet.model import Policy
 from fleet.policy import (
     PolicyError,
     area_names,
@@ -354,3 +355,131 @@ def test_a_role_missing_from_the_agent_table_is_refused_at_load(tmp_path):
     cfg = load_config(root)
     with pytest.raises(PolicyError, match="implementer"):
         policy_module.load(cfg)
+
+
+_FIXTURE_TOML_HEAD = (
+    '[repo]\nslug = "FibonAdithya/fleet-fixture"\n'
+    'integration_branch = "integration"\n\n'
+    "[policy]\n"
+    'ownership = "docs/agent/ownership.md"\n'
+    'task_classes = "docs/agent/task-classes.md"\n'
+    'roles = ".agents/roles"\nschemas = ".agents/schemas"\n\n'
+    '[agents.claude]\nmodel_flag = "--model"\nargs = []\n\n'
+)
+
+_OPUS_PRICE = (
+    '[prices."claude-opus-5"]\ninput = 5.0\noutput = 25.0\ncache_read = 0.5\ncache_write = 10.0\n'
+)
+
+
+def _config_with_chain_role(
+    tmp_path,
+    model: str = "chain",
+    chain_table: str = '[agents.chain]\ncommand = "/usr/bin/chain"\nper_task_usd = 40.0\n',
+    extra: str = "",
+    prices: str = _OPUS_PRICE,
+):
+    """The vendored fixture plus a `chain` role on kind `chain`, routed from
+    class `build`. No [prices] row for the chain model on purpose."""
+    import shutil
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE_POLICY, root)
+    (root / ".agents/roles/chain.md").write_text("x")
+    classes = root / "docs/agent/task-classes.md"
+    text = classes.read_text()
+    text = text.replace(
+        "| `integration` | integrator | `integration` advanced | yes |\n",
+        "| `integration` | integrator | `integration` advanced | yes |\n"
+        "| `build` | chain | merged PR | yes |\n",
+    )
+    anchor = "| `invariant-reviewer` | `claude` | `claude-opus-5` |\n"
+    assert anchor in text, "fixture shape changed; this helper's precondition no longer holds"
+    text = text.replace(anchor, anchor + f"| `chain` | `chain` | `{model}` |\n")
+    classes.write_text(text)
+    (root / "fleet.toml").write_text(_FIXTURE_TOML_HEAD + chain_table + "\n" + prices + extra)
+    return load_config(root)
+
+
+def test_chain_kind_needs_no_price_row(tmp_path):
+    """Chain prices its own runs; there is no transcript reader for it and no
+    per-token rate. Catches the reader and price checks still applied to kind
+    `chain`, which would make the kind impossible to declare."""
+    loaded = policy_module.load(_config_with_chain_role(tmp_path))
+    assert loaded.agent_for("chain") == ("chain", "chain")
+    assert loaded.route_for("build") == ("chain",)
+
+
+def test_chain_kind_model_cell_must_be_chain(tmp_path):
+    """A model name in the chain row would read as a declaration fleet checks,
+    and it checks nothing for this kind. Catches accepting any model cell."""
+    cfg = _config_with_chain_role(tmp_path, model="claude-opus-5")
+    with pytest.raises(PolicyError, match="chain"):
+        policy_module.load(cfg)
+
+
+def test_chain_kind_still_needs_a_launch_config(tmp_path):
+    """Catches exempting kind `chain` from the [agents.<kind>] check along with
+    the reader and price checks."""
+    cfg = _config_with_chain_role(tmp_path, chain_table="")
+    with pytest.raises(PolicyError, match=r"\[agents\.chain\]"):
+        policy_module.load(cfg)
+
+
+def test_claude_kind_still_needs_price_row(tmp_path):
+    """Unchanged strictness beside a chain row. Catches the chain exemption
+    leaking into every kind."""
+    cfg = _config_with_chain_role(tmp_path, prices="")
+    with pytest.raises(PolicyError, match="claude-opus-5"):
+        policy_module.load(cfg)
+
+
+def test_load_copies_the_chain_ceiling_and_table(tmp_path):
+    """decide() sees only the Policy, so a value that stops at FleetConfig is
+    a value decide() cannot enforce."""
+    cfg = _config_with_chain_role(
+        tmp_path, extra='\n[chain]\ndefault_area = "eval"\nmax_age_days = 3\n'
+    )
+    loaded = policy_module.load(cfg)
+    assert loaded.ceiling_for("chain") == 40.0
+    assert loaded.ceiling_for("implementer") == 2.0
+    assert loaded.chain_default_area == "eval"
+    assert loaded.chain_max_age_days == 3
+
+
+def test_chain_default_area_must_be_an_area(tmp_path):
+    """An adopted issue labelled with an area the ownership map does not have
+    makes ledger.read_one raise on every tick. Catches skipping the check."""
+    cfg = _config_with_chain_role(tmp_path, extra='\n[chain]\ndefault_area = "nowhere"\n')
+    with pytest.raises(PolicyError, match="nowhere"):
+        policy_module.load(cfg)
+
+
+def _ceiling_policy() -> Policy:
+    return Policy(
+        areas=(("src/eval/**", "eval"),),
+        routes=(("patch", ("implementer",)), ("build", ("chain",))),
+        agents=(("implementer", "claude", "m"), ("chain", "chain", "chain")),
+        slots=6,
+        stall_minutes=10,
+        max_attempts=2,
+        max_fix_passes=1,
+        max_rebases=1,
+        per_task_usd=2.0,
+        fleet_usd=25.0,
+        integration_branch="integration",
+        ceilings=(("chain", 40.0),),
+    )
+
+
+def test_ceiling_for_chain_role():
+    assert _ceiling_policy().ceiling_for("chain") == 40.0
+
+
+def test_ceiling_for_other_role_is_global():
+    """Catches a lookup by role name rather than by the role's kind, and a
+    ceiling applied to every role once any kind sets one."""
+    policy = _ceiling_policy()
+    assert policy.ceiling_for("implementer") == 2.0
+    assert policy.ceiling_for(None) == 2.0
+    assert policy.ceiling_for("nobody") == 2.0

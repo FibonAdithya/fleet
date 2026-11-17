@@ -204,6 +204,13 @@ class AgentSpec:
     kind: str
     model_flag: str
     args: tuple[str, ...]
+    #: Kind `chain` only: the binary fleet runs, `~` already expanded. Chain
+    #: is not launched by herdr, so it has no model flag (`model_flag` is ""
+    #: for it) and chooses its own models.
+    command: str | None = None
+    #: This kind's per-task spending ceiling, replacing `[budget] per_task_usd`
+    #: for every role routed to it. None means the global ceiling applies.
+    per_task_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +231,28 @@ class Policy:
     per_task_usd: float
     fleet_usd: float
     integration_branch: str
+    #: (agent kind, per-task ceiling) for every kind that sets its own; see
+    #: `ceiling_for`. A chain run is a whole build, not one stage, so the
+    #: global per-stage ceiling would release every one of them.
+    ceilings: tuple[tuple[str, float], ...] = ()
+    #: From fleet.toml's [chain] table. Here rather than read from the config
+    #: because decide() sees only the Policy.
+    chain_default_area: str | None = None
+    chain_max_age_days: int = 7
+
+    def ceiling_for(self, role: str | None) -> float:
+        """The per-task ceiling for an agent running `role`: its kind's own
+        ceiling when that kind sets one, else the global `per_task_usd`.
+
+        Keyed by kind, not role, because the ceiling is a property of how the
+        agent is run. None (a task whose role the policy cannot name) and a
+        role with no Agent row both get the global ceiling."""
+        if role is None:
+            return self.per_task_usd
+        declared = self.agent_for(role)
+        if declared is None:
+            return self.per_task_usd
+        return dict(self.ceilings).get(declared[0], self.per_task_usd)
 
     def route_for(self, klass: str | None) -> tuple[str, ...]:
         return dict(self.routes).get(klass or "", ())

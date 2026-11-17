@@ -12,6 +12,10 @@ from fleet.model import AgentSpec
 
 DEFAULT_PER_TASK_USD = 2.0
 DEFAULT_FLEET_USD = 25.0
+DEFAULT_ANSWERS_DIR = "~/.local/state/fleet/answers"
+
+#: The agent kind that is a separate build tool, not a CLI herdr launches.
+CHAIN_KIND = "chain"
 
 
 class ConfigNotFound(Exception):
@@ -63,6 +67,15 @@ class FleetConfig:
     runlog_path: Path
     worktree_root: Path
     poll_seconds: int
+    #: Where the box writes owner answers, `<owner>__<name>/<number>.json`.
+    #: Fleet only reads it.
+    answers_dir: Path
+    #: [chain] default_area: the area an adopted `bug` issue is filed under.
+    #: None means nothing is adopted; `policy.load` refuses a name that is not
+    #: an area of the ownership map.
+    chain_default_area: str | None = None
+    #: [chain] max_age_days.
+    chain_max_age_days: int = 7
 
 
 def _prices(raw: dict) -> dict[str, dict[str, float]]:
@@ -119,6 +132,9 @@ def _agents(raw: dict) -> dict[str, AgentSpec]:
                 f"Write it as a `[agents.{kind}]` section with `model_flag` "
                 "(and optionally `args`) under it."
             )
+        if kind == CHAIN_KIND:
+            out[kind] = _chain_agent(table)
+            continue
         flag = table.get("model_flag")
         if not flag:
             raise ConfigError(
@@ -126,19 +142,75 @@ def _agents(raw: dict) -> dict[str, AgentSpec]:
                 "appended as [model_flag, model]; without it the agent runs the "
                 "operator's default model and nothing says so."
             )
-        args = table.get("args", ())
-        if isinstance(args, str) or not isinstance(args, list | tuple):
-            raise ConfigError(
-                f"[agents.{kind}] args must be a list, got {type(args).__name__}. "
-                "A bare string is iterable too, so it would silently explode into "
-                "one flag per character instead of raising here."
-            )
         out[kind] = AgentSpec(
             kind=kind,
             model_flag=str(flag),
-            args=tuple(str(a) for a in args),
+            args=_args(kind, table),
+            per_task_usd=_agent_ceiling(kind, table),
         )
     return out
+
+
+def _args(kind: str, table: dict) -> tuple[str, ...]:
+    args = table.get("args", ())
+    if isinstance(args, str) or not isinstance(args, list | tuple):
+        raise ConfigError(
+            f"[agents.{kind}] args must be a list, got {type(args).__name__}. "
+            "A bare string is iterable too, so it would silently explode into "
+            "one flag per character instead of raising here."
+        )
+    return tuple(str(a) for a in args)
+
+
+def _agent_ceiling(kind: str, table: dict) -> float | None:
+    """Optional per-kind task ceiling. Refused at zero or below for the reason
+    `_positive` gives, and refused as a string or bool: TOML `true` is an int
+    to Python, and `"40"` would pass a float() coercion silently."""
+    if "per_task_usd" not in table:
+        return None
+    value = table["per_task_usd"]
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ConfigError(
+            f"[agents.{kind}] per_task_usd must be a number greater than zero, "
+            f"got {value!r}. Zero is not 'no limit': it puts every run of this "
+            "kind over budget on its first tick."
+        )
+    return float(value)
+
+
+def _chain_agent(table: dict) -> AgentSpec:
+    """Kind `chain` runs its own binary rather than a CLI herdr starts with a
+    model flag, so `command` is required and `model_flag` is not."""
+    command = table.get("command")
+    if not isinstance(command, str) or not command:
+        raise ConfigError(
+            f"[agents.{CHAIN_KIND}] has no command. Kind {CHAIN_KIND!r} is started "
+            "by running that binary; without it every task routed to it fails at "
+            "dispatch instead of here."
+        )
+    return AgentSpec(
+        kind=CHAIN_KIND,
+        model_flag=str(table.get("model_flag", "")),
+        args=_args(CHAIN_KIND, table),
+        command=str(Path(command).expanduser()),
+        per_task_usd=_agent_ceiling(CHAIN_KIND, table),
+    )
+
+
+def _chain_table(raw: object) -> tuple[str | None, int]:
+    """[chain] default_area and max_age_days. Whether default_area names a real
+    area is `policy.load`'s check: only it reads the ownership map."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"[chain] must be a table, got {type(raw).__name__}.")
+    area = raw.get("default_area")
+    if area is not None and (not isinstance(area, str) or not area):
+        raise ConfigError(f"[chain] default_area must be an area name, got {area!r}.")
+    age = raw.get("max_age_days", 7)
+    if isinstance(age, bool) or not isinstance(age, int) or age < 1:
+        raise ConfigError(
+            f"[chain] max_age_days must be a whole number of days, at least 1, got {age!r}."
+        )
+    return area, age
 
 
 def _find_root(start: Path) -> Path:
@@ -154,6 +226,7 @@ def load_config(start: Path | None = None) -> FleetConfig:
     repo, policy, fleet = data["repo"], data["policy"], data.get("fleet", {})
     budget = data.get("budget", {})
     daemon = data.get("daemon", {})
+    chain_area, chain_age = _chain_table(data.get("chain", {}))
     return FleetConfig(
         root=root,
         repo_slug=repo["slug"],
@@ -180,4 +253,7 @@ def load_config(start: Path | None = None) -> FleetConfig:
         # this is more gh calls than M2's single list and secondary rate limits
         # are real -- instrument before lowering it.
         poll_seconds=int(daemon.get("poll_seconds", 60)),
+        answers_dir=Path(daemon.get("answers", DEFAULT_ANSWERS_DIR)).expanduser(),
+        chain_default_area=chain_area,
+        chain_max_age_days=chain_age,
     )

@@ -1110,3 +1110,47 @@ def test_a_working_agent_whose_sequence_and_transcript_both_hold_is_stalled():
     agents = [AgentState(task=1, status="working", change_seq=10, transcript_bytes=100)]
     intents, _ = decide(prev, [claimed()], POLICY, agents, T0 + timedelta(minutes=10))
     assert Release(task=1, reason="stalled", attempt=2) in intents
+
+
+def _chain_policy():
+    return dataclasses.replace(
+        POLICY,
+        routes=(*POLICY.routes, ("build", ("chain",))),
+        agents=(("chain", "chain", "chain"),),
+        ceilings=(("chain", 40.0),),
+    )
+
+
+def test_chain_agent_under_own_ceiling_not_over_budget():
+    """A chain run spends 30 against a global ceiling of 2 and its own of 40.
+    Catches the over-budget check still reading `policy.per_task_usd`."""
+    task = dataclasses.replace(claimed(), klass="build")
+    agents = [AgentState(task=1, status="working", change_seq=10, cost_usd=30.0)]
+    intents, _ = decide(FleetState(), [task], _chain_policy(), agents, T0)
+    assert only(intents, Release) == []
+    assert only(intents, Escalate) == []
+
+
+def test_chain_agent_over_own_ceiling():
+    task = dataclasses.replace(claimed(), klass="build")
+    agents = [AgentState(task=1, status="working", change_seq=10, cost_usd=41.0)]
+    intents, _ = decide(FleetState(), [task], _chain_policy(), agents, T0)
+    assert Release(task=1, reason="over_budget", attempt=2) in intents
+
+
+def test_later_stage_over_budget_uses_the_roles_ceiling():
+    """The REVIEW-stage branch, which escalates rather than releases. A reviewer
+    on a kind with a 5.0 ceiling at cost 3 is under it; at 6 it escalates and
+    the detail names the ceiling it was measured against."""
+    policy = dataclasses.replace(
+        POLICY,
+        agents=(("reviewer", "codex", "m"),),
+        ceilings=(("codex", 5.0),),
+    )
+    task = claimed(state="review")
+    under = [AgentState(task=1, status="working", change_seq=10, cost_usd=3.0)]
+    intents, _ = decide(FleetState(), [task], policy, under, T0)
+    assert only(intents, Escalate) == []
+    over = [AgentState(task=1, status="working", change_seq=10, cost_usd=6.0)]
+    intents, _ = decide(FleetState(), [task], policy, over, T0)
+    assert Escalate(task=1, reason="over_budget", detail="spent 6.00 of 5.00") in intents

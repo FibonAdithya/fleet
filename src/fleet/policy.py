@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 from fleet import labels as labels_module
-from fleet.config import FleetConfig
+from fleet.config import CHAIN_KIND, FleetConfig
 from fleet.cost import PROVIDER_KINDS
 from fleet.model import AgentSpec, Policy
 
@@ -208,7 +208,20 @@ def _validate_agents(
     """
     known = set(PROVIDER_KINDS)
     for role, kind, model in agents:
-        if kind not in known:
+        if kind == CHAIN_KIND:
+            # Chain is a separate build tool: fleet reads no transcript of
+            # its and prices no tokens for it (it reports its own spend), so
+            # the reader and price checks do not apply. The launch-config
+            # check below still does. The Model cell must say `chain`, so a
+            # model name never reads as a declaration fleet checks.
+            if model != CHAIN_KIND:
+                raise PolicyError(
+                    f"role {role!r} is routed to agent kind {CHAIN_KIND!r} with model "
+                    f"{model!r}; the Model cell for kind {CHAIN_KIND!r} must be the "
+                    f"literal `{CHAIN_KIND}`, because chain chooses its own models "
+                    "and fleet checks none of them."
+                )
+        elif kind not in known:
             raise PolicyError(
                 f"role {role!r} is routed to agent {kind!r}, which has no transcript "
                 f"reader. Known: {sorted(known)}. Its agents could not be priced and "
@@ -224,7 +237,7 @@ def _validate_agents(
                 "an attempt, and the whole backlog walks to NEEDS_HUMAN overnight "
                 "having launched nothing."
             )
-        if model not in prices:
+        if kind != CHAIN_KIND and model not in prices:
             raise PolicyError(
                 f"role {role!r} declares model {model!r}, which has no [prices] row "
                 "in fleet.toml. Dispatching it would drain the run mid-night rather "
@@ -245,14 +258,29 @@ def _validate_agents(
                 )
 
 
+def _validate_chain_area(area: str | None, areas: tuple[tuple[str, str], ...]) -> None:
+    """An adopted issue is labelled with this area, and an area the ownership
+    map does not have makes `ledger.read_one` raise for that issue on every
+    tick. Refused here, at load, instead."""
+    if area is None:
+        return
+    names = sorted({name for _, name in areas})
+    if area not in names:
+        raise PolicyError(
+            f"[chain] default_area {area!r} is not an area of the ownership map. Known: {names}."
+        )
+
+
 def load(cfg: FleetConfig) -> Policy:
     roles = known_roles(cfg.roles_dir)
     classes_text = cfg.task_classes.read_text()
     agents = parse_agents(classes_text, roles)
     routes = parse_routes(classes_text, roles)
     _validate_agents(agents, cfg.agents, cfg.prices, routes)
+    areas = parse_ownership(cfg.ownership.read_text())
+    _validate_chain_area(cfg.chain_default_area, areas)
     return Policy(
-        areas=parse_ownership(cfg.ownership.read_text()),
+        areas=areas,
         routes=routes,
         agents=agents,
         slots=cfg.slots,
@@ -263,4 +291,11 @@ def load(cfg: FleetConfig) -> Policy:
         per_task_usd=cfg.per_task_usd,
         fleet_usd=cfg.fleet_usd,
         integration_branch=cfg.integration_branch,
+        ceilings=tuple(
+            (kind, spec.per_task_usd)
+            for kind, spec in sorted(cfg.agents.items())
+            if spec.per_task_usd is not None
+        ),
+        chain_default_area=cfg.chain_default_area,
+        chain_max_age_days=cfg.chain_max_age_days,
     )
