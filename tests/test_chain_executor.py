@@ -6,25 +6,31 @@ import json
 import os
 import re
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from fleet import chain_executor
+from fleet import chain_executor, escalation, labels, packet
 from fleet.chain_executor import ChainExecutor, ChainRun, ChainStateError, parse_status
 from fleet.decide import decide
-from fleet.gh import FakeGh
+from fleet.expand import expand
+from fleet.gh import FakeGh, GhError
 from fleet.model import (
     AgentState,
     Comment,
+    Continue,
+    Escalate,
     FleetState,
+    Observation,
     Policy,
     Release,
+    Retire,
     StartAgent,
     StopAgent,
     Task,
 )
+from fleet.schemas import validate
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures/chain/status-v1.json"
 COMMAND = "./bin/chain"
@@ -709,3 +715,451 @@ def test_default_failures_are_bounded(ccfg):
     for _ in range(100):
         ex.agents()
     assert len(ex.failures) == 64
+
+
+# --- outcomes -------------------------------------------------------------------
+
+BASE_SHA = "b" * 40
+HEAD_SHA = "c" * 40
+INTEGRATION_SHA = "a1" * 20
+CLOCK = 1_790_000_000.0
+OUTCOME_POLICY = dataclasses.replace(
+    CHAIN_POLICY,
+    routes=(("build", ("chain", "integrator")),),
+)
+
+
+def _approved(run_id: str, number: int, **kw) -> dict:
+    """A run chain ended approved, with valid SHAs (the fixture's `h...` head
+    is not hex, and the handoff schema checks)."""
+    fields = {
+        "stage": "done",
+        "outcome": "approved",
+        "progress": 7,
+        "base_sha": BASE_SHA,
+        "head_sha": HEAD_SHA,
+        "branch": f"chain/{run_id}",
+        "base": "integration",
+        "test_command": "make check",
+        "pr": {"number": 42, "url": "https://github.com/o/r/pull/42"},
+    }
+    fields.update(kw)
+    return _run(run_id, number, status="approved", **fields)
+
+
+def _escalated(run_id: str, number: int, **kw) -> dict:
+    fields = {
+        "stage": "implement",
+        "outcome": "escalated",
+        "escalation": copy.deepcopy(_fixture()["runs"][3]["escalation"]),
+        "base_sha": BASE_SHA,
+        "head_sha": HEAD_SHA,
+        "branch": f"chain/{run_id}",
+    }
+    fields.update(kw)
+    # A real fleet-mode escalation ends with status `ended`.
+    return _run(run_id, number, status="ended", **fields)
+
+
+def _bug_verdict(run_id: str, number: int, fixture_index: int) -> dict:
+    source = _fixture()["runs"][fixture_index]
+    return _run(
+        run_id,
+        number,
+        status="ended",
+        stage="confirm",
+        outcome=source["outcome"],
+        verdict=copy.deepcopy(source["verdict"]),
+    )
+
+
+def _finished(ccfg, run: dict, gh=None, state_path=None, **script):
+    """An executor whose task 5 was started as `run["id"]` and whose status now
+    lists `run`."""
+    gh = gh or FakeGh()
+    _issue_at(gh, 5)
+    cli = ScriptedCli(start=[(0, f"{run['id']}\n", "")], status=[(0, _status(run), "")], **script)
+    ex = _executor(ccfg, gh, cli, state_path=state_path, clock=lambda: CLOCK)
+    ex.apply([StartAgent(task=5, role="chain", base="integration")])
+    return ex, gh, cli
+
+
+def _comments(gh: FakeGh, number: int = 5) -> list[str]:
+    return gh.get_issue(number)["comments"]
+
+
+def _handoffs(gh: FakeGh, number: int = 5) -> list[str]:
+    return [c for c in _comments(gh, number) if packet.MARKERS["handoff"] in c]
+
+
+def _verdicts(gh: FakeGh, number: int = 5) -> list[str]:
+    return [c for c in _comments(gh, number) if packet.MARKERS["verdict"] in c]
+
+
+def _state_labels(gh: FakeGh, number: int = 5) -> list[str]:
+    return [n for n in gh.get_issue(number)["labels"] if n in labels.all_state_labels()]
+
+
+def test_approved_run_hands_to_review_then_approves(ccfg):
+    ex, gh, _ = _finished(ccfg, _approved("r-e", 5))
+    ex.agents()
+    assert _state_labels(gh) == ["fleet:integrating"]
+    assert len(_handoffs(gh)) == 1
+    assert len(_verdicts(gh)) == 1
+    handoff = packet.parse_latest(_comments(gh), "handoff")
+    verdict = packet.parse_latest(_comments(gh), "verdict")
+    validate(ccfg, "handoff", handoff)
+    validate(ccfg, "verdict", verdict)
+    assert handoff["to"] == "review"
+    assert handoff["from"] == {
+        "role": "chain",
+        "agent": "chain-r-e",
+        "run": datetime.fromtimestamp(CLOCK, UTC).isoformat(),
+    }
+    assert (handoff["base_sha"], handoff["head_sha"]) == (BASE_SHA, HEAD_SHA)
+    assert handoff["branch"] == "chain/r-e"
+    assert handoff["did"] == "chain run r-e: plan, audit, implement, review"
+    assert handoff["evidence"]["checks"] == "test command passed at the reviewed SHA"
+    assert handoff["evidence"]["commands"] == ["make check"]
+    assert verdict["verdict"] == "approved"
+    assert verdict["head_sha"] == HEAD_SHA
+    assert verdict["reviewer"] == "chain-r-e"
+    assert verdict["findings"] == []
+    assert list(ex.failures) == []
+
+
+def test_approved_run_without_a_test_command_still_validates(ccfg):
+    """The handoff schema needs at least one command; a run with no test
+    command says so in `checks` rather than inventing one."""
+    ex, gh, _ = _finished(ccfg, _approved("r-e", 5, test_command=None))
+    ex.agents()
+    handoff = packet.parse_latest(_comments(gh), "handoff")
+    validate(ccfg, "handoff", handoff)
+    assert "no test command" in handoff["evidence"]["checks"]
+    assert "make check" not in handoff["evidence"]["commands"]
+    assert _state_labels(gh) == ["fleet:integrating"]
+
+
+def test_escalated_run_moves_to_human_with_question(ccfg):
+    ex, gh, _ = _finished(ccfg, _escalated("r-d", 5))
+    ex.agents()
+    assert _state_labels(gh) == ["fleet:human"]
+    found = escalation.latest(_comments(gh))
+    assert found["text"].startswith("Which database?")
+    assert "chain run r-d ended at stage implement (needs_owner)" in found["text"]
+    validate(ccfg, "handoff", packet.parse_latest(_comments(gh), "handoff"))
+    assert list(ex.failures) == []
+
+
+def test_escalated_outcome_unassigns(ccfg):
+    ex, gh, _ = _finished(ccfg, _escalated("r-d", 5))
+    gh.assign(5, "FibonAdithya")
+    ex.agents()
+    assert gh.get_issue(5)["assignees"] == []
+
+
+def test_not_reproduced_closes_with_comment(ccfg):
+    ex, gh, _ = _finished(ccfg, _bug_verdict("r-c", 5, 4))
+    ex.agents()
+    issue = gh.get_issue(5)
+    assert issue["state"] == "CLOSED"
+    assert _state_labels(gh) == ["fleet:done"]
+    [comment] = _comments(gh)
+    assert "ran the repro twice" in comment
+    assert list(ex.failures) == []
+
+
+def test_duplicate_closes_naming_the_duplicate(ccfg):
+    ex, gh, _ = _finished(ccfg, _bug_verdict("r-b", 5, 5))
+    ex.agents()
+    assert gh.get_issue(5)["state"] == "CLOSED"
+    assert _state_labels(gh) == ["fleet:done"]
+    [comment] = _comments(gh)
+    assert comment.startswith("Duplicate of #12")
+
+
+@pytest.mark.parametrize("status", ["aborted", "ended"])
+def test_aborted_run_reports_dirty(ccfg, status):
+    """A run that ended with no outcome writes nothing: `_fail` retries it."""
+    ex, gh, _ = _finished(ccfg, _run("r-a", 5, status=status, outcome=None, progress=4))
+    [agent] = ex.agents()
+    assert agent.status == "dirty"
+    assert _comments(gh) == []
+    assert _state_labels(gh) == ["fleet:claimed"]
+
+
+def test_escalation_before_setup_uses_integration_head(ccfg):
+    run = _escalated("r-d", 5, base_sha=None, head_sha=None, branch=None)
+    ex, gh, cli = _finished(ccfg, run, **{"-C": [(0, f"{INTEGRATION_SHA}\n", "")]})
+    ex.agents()
+    assert cli.calls_to("-C") == [["git", "-C", str(ccfg.root), "rev-parse", "origin/integration"]]
+    handoff = packet.parse_latest(_comments(gh), "handoff")
+    validate(ccfg, "handoff", handoff)
+    assert (handoff["base_sha"], handoff["head_sha"]) == (INTEGRATION_SHA, INTEGRATION_SHA)
+    assert _state_labels(gh) == ["fleet:human"]
+
+
+class RecordingGh(FakeGh):
+    """FakeGh that records every write it is asked for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[tuple] = []
+
+    def comment(self, issue: int, body: str) -> None:
+        self.writes.append(("comment", issue))
+        super().comment(issue, body)
+
+    def add_labels(self, issue: int, labels: list[str]) -> None:
+        self.writes.append(("add_labels", issue, tuple(labels)))
+        super().add_labels(issue, labels)
+
+    def remove_labels(self, issue: int, labels: list[str]) -> None:
+        self.writes.append(("remove_labels", issue, tuple(labels)))
+        super().remove_labels(issue, labels)
+
+    def close_issue(self, issue: int) -> None:
+        self.writes.append(("close", issue))
+        super().close_issue(issue)
+
+    def assign(self, issue: int, login: str | None) -> None:
+        self.writes.append(("assign", issue, login))
+        super().assign(issue, login)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [_approved("r-e", 5), _escalated("r-d", 5), _bug_verdict("r-c", 5, 4)],
+    ids=["approved", "escalated", "not_reproduced"],
+)
+def test_outcome_written_once_across_restart(ccfg, run):
+    """Two agents() calls, then a new executor on the same state file: the
+    outcome's writes happen once, and the restarted executor writes nothing
+    at all (not even a label move back and forth)."""
+    state_path = ccfg.root / "state" / "chain-runs.json"
+    ex, gh, cli = _finished(ccfg, run, gh=RecordingGh(), state_path=state_path)
+    ex.agents()
+    ex.agents()
+    after_first = list(gh.writes)
+    reborn = _executor(ccfg, gh, cli, state_path=state_path, clock=lambda: CLOCK)
+    reborn.agents()
+    reborn.agents()
+    assert gh.writes == after_first
+    # handoff + verdict; one escalation packet; one verdict comment.
+    expected = {"approved": 2, "escalated": 1, "not_reproduced": 1}[run["outcome"]]
+    assert len(_comments(gh)) == expected
+    assert len(_handoffs(gh)) == (0 if run["outcome"] == "not_reproduced" else 1)
+
+
+class FlakyVerdictGh(FakeGh):
+    """FakeGh whose first verdict comment fails, as a gh timeout would: the
+    comment is not posted and the labels do not move."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.verdict_failures = 1
+
+    def comment(self, issue: int, body: str) -> None:
+        if packet.MARKERS["verdict"] in body and self.verdict_failures:
+            self.verdict_failures -= 1
+            raise GhError("gh: timed out")
+        super().comment(issue, body)
+
+
+def test_failed_write_is_retried_next_tick(ccfg):
+    ex, gh, _ = _finished(ccfg, _approved("r-e", 5), gh=FlakyVerdictGh())
+    [agent] = ex.agents()
+    assert agent.status == "working"
+    assert _state_labels(gh) == ["fleet:review"]
+    assert _verdicts(gh) == []
+    assert len(ex.failures) == 1
+    ex.agents()
+    assert len(_handoffs(gh)) == 1
+    assert len(_verdicts(gh)) == 1
+    assert _state_labels(gh) == ["fleet:integrating"]
+
+
+def test_failed_status_read_writes_no_outcome(ccfg):
+    """Writes come only from a successful read of this call."""
+    ex, gh, cli = _finished(ccfg, _approved("r-e", 5))
+    cli.script["status"] = [(1, "", "chain: store locked")]
+    ex._last_runs = parse_status(_status(_approved("r-e", 5)))
+    ex._read_once = True
+    ex.agents()
+    assert _comments(gh) == []
+
+
+def _ledger_task(state: str, *, is_open: bool = True) -> Task:
+    return Task(
+        number=5,
+        title="Build it",
+        state=state,
+        area="eval",
+        klass="build",
+        auto_ok=True,
+        attempts=1,
+        is_open=is_open,
+    )
+
+
+def _stop_effects(intents) -> list[StopAgent]:
+    return [
+        effect
+        for intent in intents
+        for effect in expand(intent, OUTCOME_POLICY)
+        if isinstance(effect, StopAgent)
+    ]
+
+
+def _race(ccfg, run_spent_usd: float = 1.25):
+    """Drive decide() across the ticks after chain approves task 5.
+
+    The daemon reads the ledger before it calls agents(), so on the tick the
+    outcome is written decide sees the task still at `claimed`, with an
+    observation from before the run ended and older than `stall_minutes`."""
+    run = _approved("r-e", 5, progress=7, output_bytes=900, run_spent_usd=run_spent_usd)
+    ex, gh, cli = _finished(ccfg, run)
+    stale = Observation(change_seq=7, since=T0 - timedelta(minutes=30), transcript_bytes=900)
+    prev = FleetState(seen=((5, stale),))
+    ticks = []
+    # Tick 1: the write tick, decided over the ledger read before the writes.
+    agents = ex.agents()
+    intents, state = decide(prev, [_ledger_task("claimed")], OUTCOME_POLICY, agents, T0)
+    ticks.append((agents, intents, state))
+    # Tick 2: the ledger now shows the label the outcome wrote.
+    agents = ex.agents()
+    intents, state = decide(
+        state, [_ledger_task("integrating")], OUTCOME_POLICY, agents, T0 + timedelta(minutes=1)
+    )
+    ticks.append((agents, intents, state))
+    ex.apply(_stop_effects(intents))
+    # Tick 3: the executor has let the run go.
+    agents = ex.agents()
+    intents, state = decide(
+        state, [_ledger_task("integrating")], OUTCOME_POLICY, agents, T0 + timedelta(minutes=2)
+    )
+    ticks.append((agents, intents, state))
+    return ticks, gh, cli
+
+
+def test_no_release_race_after_outcome(ccfg):
+    """Mutations caught: reporting the run `done` on the write tick (decide's
+    done-without-packet path falls to the stall check and releases it), and
+    dropping the agent on the write tick (a `no_agent` release). Either would
+    relabel the task `ready` over the `integrating` label just written."""
+    ticks, gh, cli = _race(ccfg)
+    (a1, i1, _), (a2, i2, _), (a3, i3, _) = ticks
+    assert [a.status for a in a1] == ["working"]
+    assert [i for i in i1 if i.task == 5 and isinstance(i, (Release, Escalate))] == []
+    assert [a.status for a in a2] == ["done"]
+    assert Retire(task=5) in i2
+    assert [i for i in i2 if i.task == 5 and isinstance(i, (Release, Escalate))] == []
+    assert a3 == []
+    assert [i for i in i3 if isinstance(i, Continue)] == [
+        Continue(task=5, role="integrator", base="integration")
+    ]
+    # The run had ended: letting it go aborts nothing.
+    assert cli.calls_to("abort") == []
+    assert _state_labels(gh) == ["fleet:integrating"]
+
+
+def test_chain_cost_is_charged_once(ccfg):
+    """A chain agent dropped without being reaped is never charged; one reaped
+    twice would be charged twice."""
+    ticks, _, _ = _race(ccfg, run_spent_usd=12.5)
+    assert [state.spent_usd for _, _, state in ticks] == [0.0, 12.5, 12.5]
+
+
+def test_outcome_stop_forgets_without_abort_after_restart(ccfg):
+    """After a restart with no good read yet, the run's status is unknown; a
+    run whose outcome was written is still not aborted."""
+    state_path = ccfg.root / "state" / "chain-runs.json"
+    ex, gh, cli = _finished(ccfg, _approved("r-e", 5), state_path=state_path)
+    ex.agents()
+    cli.script["status"] = [(1, "", "chain: store locked")]
+    reborn = _executor(ccfg, gh, cli, state_path=state_path, clock=lambda: CLOCK)
+    [agent] = reborn.agents()
+    assert agent.status == "done"
+    reborn.apply([StopAgent(task=5)])
+    assert cli.calls_to("abort") == []
+    assert reborn.tasks() == set()
+
+
+@pytest.mark.parametrize(
+    "outcomes",
+    [
+        [],
+        {"r-e": []},
+        {"r-e": {"outcome": "approved", "steps": "handoff"}},
+        {"r-e": {"outcome": "approved", "steps": [1]}},
+        {"r-e": {"outcome": "approved", "steps": [], "cost_usd": "1"}},
+        {"r-e": {"outcome": 3, "steps": [], "cost_usd": 1.0, "progress": 1, "output_bytes": 0}},
+    ],
+    ids=["list", "record-list", "steps-str", "step-int", "cost-str", "outcome-int"],
+)
+def test_corrupt_outcome_records_raise_naming_the_path(ccfg, outcomes):
+    state_path = ccfg.root / "state" / "chain-runs.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({"runs": {"5": "r-e"}, "outcomes": outcomes}))
+    with pytest.raises(ChainStateError, match=re.escape(str(state_path))):
+        _executor(ccfg, FakeGh(), ScriptedCli(), state_path=state_path)
+
+
+class FlakyLabelGh(FakeGh):
+    """FakeGh whose first move to `fleet:review` fails after the handoff
+    comment has landed: `_post` comments, then moves the label."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.label_failures = 1
+
+    def add_labels(self, issue: int, labels: list[str]) -> None:
+        if "fleet:review" in labels and self.label_failures:
+            self.label_failures -= 1
+            raise GhError("gh: timed out")
+        super().add_labels(issue, labels)
+
+
+def test_handoff_posted_but_not_labelled_is_not_posted_again(ccfg):
+    """The retry finds its own packet on the issue and only moves the label.
+    Also covers a crash between a write and the state-file save."""
+    ex, gh, _ = _finished(ccfg, _approved("r-e", 5), gh=FlakyLabelGh())
+    ex.agents()
+    assert len(_handoffs(gh)) == 1
+    assert _state_labels(gh) == ["fleet:claimed"]
+    ex.agents()
+    assert len(_handoffs(gh)) == 1
+    assert len(_verdicts(gh)) == 1
+    assert _state_labels(gh) == ["fleet:integrating"]
+
+
+def test_a_crash_before_saving_a_step_does_not_repost(ccfg):
+    """The outcome landed but the state file never heard: a restart finds
+    the packets on the issue instead of posting them again."""
+    state_path = ccfg.root / "state" / "chain-runs.json"
+    ex, gh, cli = _finished(ccfg, _approved("r-e", 5), state_path=state_path)
+    saved = state_path.read_text()
+    ex.agents()
+    state_path.write_text(saved)  # as if every save after the start was lost
+    reborn = _executor(ccfg, gh, cli, state_path=state_path, clock=lambda: CLOCK)
+    reborn.agents()
+    assert len(_handoffs(gh)) == 1
+    assert len(_verdicts(gh)) == 1
+    assert _state_labels(gh) == ["fleet:integrating"]
+
+
+def test_escalation_posted_but_not_labelled_is_not_posted_again(ccfg):
+    class FlakyHumanGh(FakeGh):
+        failures = 1
+
+        def add_labels(self, issue, labels):
+            if "fleet:human" in labels and self.failures:
+                self.failures -= 1
+                raise GhError("gh: timed out")
+            super().add_labels(issue, labels)
+
+    ex, gh, _ = _finished(ccfg, _escalated("r-d", 5), gh=FlakyHumanGh())
+    ex.agents()
+    ex.agents()
+    assert len(_handoffs(gh)) == 1
+    assert _state_labels(gh) == ["fleet:human"]

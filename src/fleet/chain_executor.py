@@ -7,8 +7,15 @@ through its store. This executor handles only `StartAgent` and `StopAgent`.
 Ledger effects (labels, comments, assignees) stay in `HerdrExecutor.apply`; a
 composite routes each effect to the executor that owns its task.
 
-The one piece of state it keeps is which chain run is which fleet task, in a
-JSON file written atomically, so a daemon restart still knows its runs.
+The state it keeps -- which chain run is which fleet task, and which of a
+finished run's ledger writes have landed -- is a JSON file written atomically,
+so a daemon restart still knows its runs and never writes an outcome twice.
+
+A run that ends with an outcome (approved, escalated, not reproduced,
+duplicate) is turned into the packets a fleet stage would have written: a
+handoff and an approved verdict, an escalation to the owner, or a comment and
+a close. Those are the executor's only ledger writes, made from `agents()`
+because that is where a run is first seen to have ended.
 """
 
 from __future__ import annotations
@@ -23,14 +30,19 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
+from fleet import commands
+from fleet import labels as labels_module
 from fleet import ledger as ledger_module
+from fleet import packet as packet_module
 from fleet import policy as policy_module
 from fleet.config import FleetConfig
-from fleet.gh import GhClient
+from fleet.gh import GhClient, GhError
 from fleet.ledger import LedgerError
 from fleet.model import AgentState, Effect, StartAgent, StopAgent
+from fleet.schemas import SchemaError
 
 _LOG = logging.getLogger(__name__)
 
@@ -63,9 +75,38 @@ _EXEC_FAILED = 127
 #: with the stall timer refreshed every tick.
 PAUSE_GRACE_SECONDS = 600
 
+#: The ledger writes each outcome makes, in order. Each is recorded in the state
+#: file as it lands, so a retry after a partial failure (or a restart) resumes
+#: at the step that failed instead of posting a second handoff.
+OUTCOME_STEPS: dict[str, tuple[str, ...]] = {
+    "approved": ("handoff", "verdict"),
+    "escalated": ("escalate", "unassign"),
+    "not_reproduced": ("comment", "done", "close"),
+    "duplicate": ("comment", "done", "close"),
+}
+
+#: What a step can fail with. Anything else is a bug and is raised.
+_WRITE_ERRORS = (GhError, LedgerError, SchemaError, ValueError, OSError)
+
 
 class ChainStateError(Exception):
     """The task-map file exists but cannot be read as one."""
+
+
+@dataclass
+class Outcome:
+    """A finished run's ledger writes: which have landed, and the run's last
+    numbers, so it can be reported without another status read."""
+
+    outcome: str
+    steps: list[str]
+    cost_usd: float
+    progress: int
+    output_bytes: int
+
+    @property
+    def done(self) -> bool:
+        return all(step in self.steps for step in OUTCOME_STEPS[self.outcome])
 
 
 @dataclass(frozen=True)
@@ -238,8 +279,11 @@ class ChainExecutor:
         self.failures: deque[str] = (
             failures if failures is not None else deque(maxlen=_FAILURE_LIMIT)
         )
-        #: task -> chain run id, mirrored to `state_path`.
-        self._runs: dict[int, str] = self._load()
+        #: task -> chain run id, and run id -> its outcome's writes, both
+        #: mirrored to `state_path`.
+        self._runs: dict[int, str]
+        self._outcomes: dict[str, Outcome]
+        self._runs, self._outcomes = self._load()
         #: Tasks whose StartAgent started nothing. Reported as dirty agents
         #: until a StopAgent arrives: a ledger-drift `Release(no_agent)` is never
         #: escalated, so a start that fails every time would otherwise loop all
@@ -285,25 +329,254 @@ class ChainExecutor:
         through `_fail` like any other stall.
         """
         runs = self._read_status()
+        fresh = runs is not None
         if runs is not None:
             self._read_once = True
             self._last_runs = runs
             self._last_status = {run.id: run.status for run in runs}
         elif not self._read_once:
-            return [
-                AgentState(task=task, status="working", change_seq=-1)
-                for task in sorted(self._runs)
-            ] + self._failed_start_agents()
+            return (
+                [
+                    AgentState(task=task, status="working", change_seq=-1)
+                    for task, run_id in sorted(self._runs.items())
+                    if not self._outcome_done(run_id)
+                ]
+                + self._finished_agents(written=set())
+                + self._failed_start_agents()
+            )
         by_run = {run_id: task for task, run_id in self._runs.items()}
         out: list[AgentState] = []
+        written: set[str] = set()
         for run in self._last_runs:
             task = by_run.get(run.id)
             if task is None or run.fleet_task is None:
                 continue
             if run.fleet_task.slug != self.cfg.repo_slug:
                 continue
-            out.append(self._agent_of(task, run))
-        return out + self._failed_start_agents()
+            if self._outcome_done(run.id):
+                continue  # reported by _finished_agents below
+            if run.status in LIVE_STATUSES or run.outcome not in OUTCOME_STEPS:
+                out.append(self._agent_of(task, run))
+                continue
+            # Writes only from a read made by this call: the last good list
+            # after a failed read may be any number of ticks old.
+            if fresh:
+                self._write_outcome(task, run)
+                written.add(run.id)
+                if self._outcome_done(run.id):
+                    continue  # complete now: _finished_agents holds it
+            out.append(self._holding(task, self._outcomes.get(run.id), run))
+        return out + self._finished_agents(written) + self._failed_start_agents()
+
+    # -- outcomes ------------------------------------------------------------------
+    #
+    # The daemon reads the ledger, then calls agents(), so on the tick an
+    # outcome is written decide() still sees the task at `claimed`. A `done`
+    # agent there has no packet and falls to the stall check, and a missing one
+    # is released as `no_agent`; either relabels the task `ready` over the label
+    # just written. So a written run is held `working`, its sequence one past
+    # chain's last so the stall timer restarts, until the issue has left
+    # `claimed`. Then it is reported `done` with its cost until a StopAgent
+    # arrives: decide's Retire for that row is a reaping intent, the one place
+    # the run's cost is charged into the fleet's spend. A run simply dropped
+    # from agents() would never be charged.
+
+    def _outcome_done(self, run_id: str) -> bool:
+        record = self._outcomes.get(run_id)
+        return record is not None and record.done
+
+    def _holding(self, task: int, record: Outcome | None, run: ChainRun | None) -> AgentState:
+        """Working, with a sequence decide has not seen: no stall, no release."""
+        if record is not None:
+            progress, cost, size = record.progress, record.cost_usd, record.output_bytes
+        else:
+            assert run is not None
+            progress, cost, size = run.progress, run.run_spent_usd, run.output_bytes
+        return AgentState(
+            task=task,
+            status="working",
+            change_seq=progress + 1,
+            cost_usd=cost,
+            model=None,
+            transcript_bytes=size,
+            paused=False,
+        )
+
+    def _finished_agents(self, written: set[str]) -> list[AgentState]:
+        """Every mapped run whose outcome is fully written: held working on
+        the tick it was written and while the issue still reads `claimed`,
+        `done` after that."""
+        out: list[AgentState] = []
+        claimed = labels_module.state_label("claimed")
+        for task, run_id in sorted(self._runs.items()):
+            record = self._outcomes.get(run_id)
+            if record is None or not record.done:
+                continue
+            held = run_id in written
+            if not held:
+                try:
+                    held = claimed in self.gh.get_issue(task).get("labels", [])
+                except GhError as exc:
+                    self._record(f"task {task}: could not read the issue: {exc}")
+                    held = True
+            agent = self._holding(task, record, None)
+            if not held:
+                agent = AgentState(
+                    task=task,
+                    status="done",
+                    change_seq=agent.change_seq,
+                    cost_usd=agent.cost_usd,
+                    model=None,
+                    transcript_bytes=agent.transcript_bytes,
+                    paused=False,
+                )
+            out.append(agent)
+        return out
+
+    def _write_outcome(self, task: int, run: ChainRun) -> None:
+        """Make the outcome's remaining writes in order, recording each as it
+        lands. A failed step is recorded and the rest wait for the next tick."""
+        record = self._outcomes.get(run.id)
+        if record is None:
+            record = Outcome(
+                outcome=run.outcome or "",
+                steps=[],
+                cost_usd=run.run_spent_usd,
+                progress=run.progress,
+                output_bytes=run.output_bytes,
+            )
+            self._outcomes[run.id] = record
+        for step in OUTCOME_STEPS[record.outcome]:
+            if step in record.steps:
+                continue
+            try:
+                self._write_step(step, task, run)
+            except _WRITE_ERRORS as exc:
+                self._record(f"task {task}: chain run {run.id}: {step} failed: {exc}")
+                self._save()
+                return
+            record.steps.append(step)
+            self._save()
+
+    def _write_step(self, step: str, task: int, run: ChainRun) -> None:
+        agent = f"chain-{run.id}"
+        # A packet step is a comment and then a label move (`commands._post`).
+        # One whose comment landed but whose move failed, or whose success the
+        # state file never recorded (a crash before `_save`), is finished by
+        # moving the label rather than posting the packet a second time.
+        landed = self._landed(task, step, agent)
+        if landed is not None:
+            commands._move_state(self.gh, task, landed)
+            return
+        if step == "handoff":
+            commands.do_handoff(
+                self.cfg, self.gh, task=task, to="review", role="chain", **self._packet(run)
+            )
+        elif step == "verdict":
+            _, head = self._shas(run)
+            commands.do_verdict(
+                self.cfg,
+                self.gh,
+                task=task,
+                verdict="approved",
+                head_sha=head,
+                reviewer=agent,
+                role="chain",
+                findings=[],
+            )
+        elif step == "escalate":
+            found = run.escalation or {}
+            commands.do_escalate(
+                self.cfg,
+                self.gh,
+                task=task,
+                question=str(found.get("text") or ""),
+                considered=(f"chain run {run.id} ended at stage {run.stage} ({found.get('kind')})"),
+                role="chain",
+                **self._packet(run),
+            )
+        elif step == "unassign":
+            # As expand's Escalate does: the box reads an assigned
+            # `fleet:human` issue as taken by the owner.
+            self.gh.assign(task, None)
+        elif step == "comment":
+            self.gh.comment(task, _verdict_text(run))
+        elif step == "done":
+            commands._move_state(self.gh, task, "done")
+        elif step == "close":
+            self.gh.close_issue(task)
+        else:  # pragma: no cover - OUTCOME_STEPS names every step
+            raise AssertionError(step)
+
+    def _landed(self, task: int, step: str, agent: str) -> str | None:
+        """The state a packet step moves to, if this run's packet for it is
+        already the newest of its kind on the issue; else None."""
+        target = {"handoff": "review", "escalate": "human", "verdict": "integrating"}.get(step)
+        if target is None:
+            return None
+        comments = self.gh.get_issue(task).get("comments", [])
+        if step == "verdict":
+            found = packet_module.parse_latest(comments, "verdict")
+            mine = found is not None and found.get("reviewer") == agent
+        else:
+            found = packet_module.parse_latest(comments, "handoff")
+            sender = (found or {}).get("from") or {}
+            mine = sender.get("agent") == agent and (found or {}).get("to") == target
+        return target if mine else None
+
+    def _packet(self, run: ChainRun) -> dict:
+        """The handoff fields an approved or escalated run's packet shares."""
+        base, head = self._shas(run)
+        if run.outcome == "approved":
+            did = f"chain run {run.id}: plan, audit, implement, review"
+        else:
+            did = f"chain run {run.id}: escalated at stage {run.stage}"
+        if run.test_command:
+            checks = (
+                "test command passed at the reviewed SHA"
+                if run.outcome == "approved"
+                else "chain escalated before its tests ran to an approval"
+            )
+            cmds = [run.test_command]
+        else:
+            # The schema wants at least one command; name the run rather than
+            # invent a test command chain did not report.
+            checks = f"chain reported no test command for run {run.id}"
+            cmds = [f"{self.command} status --json"]
+        return {
+            "agent": f"chain-{run.id}",
+            "run": datetime.fromtimestamp(self.clock(), UTC).isoformat(),
+            "base_sha": base,
+            "head_sha": head,
+            "branch": run.branch or self.cfg.integration_branch,
+            "did": did,
+            "checks": checks,
+            "commands": cmds,
+        }
+
+    def _shas(self, run: ChainRun) -> tuple[str, str]:
+        """(base, head): the run's own, the base standing in for a missing
+        head, and the integration branch's head for a run that failed during
+        setup and has neither."""
+        head = run.head_sha or run.base_sha
+        if head is None:
+            sha = self._integration_head()
+            return sha, sha
+        return run.base_sha or head, head
+
+    def _integration_head(self) -> str:
+        argv = [
+            "git",
+            "-C",
+            str(self.cfg.root),
+            "rev-parse",
+            f"origin/{self.cfg.integration_branch}",
+        ]
+        code, out, err = self._call(argv)
+        sha = out.strip()
+        if code != 0 or not sha:
+            raise ValueError(f"git rev-parse exited {code}: {err.strip()}")
+        return sha
 
     def _failed_start_agents(self) -> list[AgentState]:
         return [
@@ -392,11 +665,15 @@ class ChainExecutor:
         if run_id is None:
             return
         status = self._last_status.get(run_id)
-        if status is None or status in LIVE_STATUSES:
+        # A run with an outcome record has ended, whatever this process has
+        # read: after a restart there may be no status read at all.
+        ended = run_id in self._outcomes
+        if not ended and (status is None or status in LIVE_STATUSES):
             code, _, err = self._call([self.command, "abort", run_id])
             if code != 0:
                 self._record(f"task {task}: could not abort run {run_id}: exit {code}: {err}")
         del self._runs[task]
+        self._outcomes.pop(run_id, None)
         self._save()
 
     # -- helpers -------------------------------------------------------------------
@@ -464,12 +741,13 @@ class ChainExecutor:
         _LOG.warning("%s", message)
         self.failures.append(message)
 
-    def _load(self) -> dict[int, str]:
-        """The task map. A missing file is an empty map; an unreadable one
-        raises ChainStateError naming the file, because an empty map would
-        orphan every run it named, and those runs keep spending."""
+    def _load(self) -> tuple[dict[int, str], dict[str, Outcome]]:
+        """The task map and the outcome records. A missing file is empty; an
+        unreadable one raises ChainStateError naming the file, because an empty
+        map would orphan every run it named, and those runs keep spending, and
+        empty outcome records would write every finished run's packets again."""
         if not self.state_path.exists():
-            return {}
+            return {}, {}
         try:
             doc = json.loads(self.state_path.read_text(encoding="utf-8"))
             runs = doc["runs"]
@@ -480,7 +758,12 @@ class ChainExecutor:
                 if not isinstance(run_id, str):
                     raise TypeError(f"run id for task {task!r} is {run_id!r}")
                 out[int(task)] = run_id
-            return out
+            # Absent in a file written before outcomes were recorded.
+            raw_outcomes = doc.get("outcomes", {})
+            if not isinstance(raw_outcomes, dict):
+                raise TypeError(f"outcomes is {type(raw_outcomes).__name__}, not an object")
+            outcomes = {run_id: _outcome_of(raw) for run_id, raw in raw_outcomes.items()}
+            return out, outcomes
         except (ValueError, KeyError, TypeError) as exc:
             raise ChainStateError(
                 f"chain task map {self.state_path} is unreadable ({exc!r}); "
@@ -491,7 +774,19 @@ class ChainExecutor:
         """Write the task map atomically: a temp file in the same directory,
         then a rename, so a crash mid-write leaves the old map whole."""
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        doc = {"runs": {str(task): run_id for task, run_id in sorted(self._runs.items())}}
+        doc = {
+            "runs": {str(task): run_id for task, run_id in sorted(self._runs.items())},
+            "outcomes": {
+                run_id: {
+                    "outcome": record.outcome,
+                    "steps": list(record.steps),
+                    "cost_usd": record.cost_usd,
+                    "progress": record.progress,
+                    "output_bytes": record.output_bytes,
+                }
+                for run_id, record in sorted(self._outcomes.items())
+            },
+        }
         fd, tmp = tempfile.mkstemp(dir=self.state_path.parent, prefix=".chain-runs-")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -504,3 +799,38 @@ class ChainExecutor:
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
+
+
+def _outcome_of(raw: dict) -> Outcome:
+    """One outcome record, read as strictly as a status run."""
+    if not isinstance(raw, dict):
+        raise TypeError(f"outcome record is {type(raw).__name__}, not an object")
+    outcome = _typed(raw, "outcome", str)
+    if outcome not in OUTCOME_STEPS:
+        raise ValueError(f"outcome {outcome!r} is not one fleet writes")
+    steps = raw["steps"]
+    if not isinstance(steps, list) or not all(step in OUTCOME_STEPS[outcome] for step in steps):
+        raise ValueError(f"steps {steps!r} are not steps of {outcome!r}")
+    spent = _finite(raw, "cost_usd")
+    if spent < 0:
+        raise ValueError(f"cost_usd is {spent!r}, below zero")
+    return Outcome(
+        outcome=outcome,
+        steps=list(steps),
+        cost_usd=spent,
+        progress=_typed(raw, "progress", int),
+        output_bytes=_typed(raw, "output_bytes", int),
+    )
+
+
+def _verdict_text(run: ChainRun) -> str:
+    """The comment a not-reproduced or duplicate bug closes with, from chain's
+    `verdict` object."""
+    verdict = run.verdict or {}
+    if run.outcome == "duplicate":
+        number = verdict.get("duplicate_of")
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise ValueError(f"chain run {run.id} is a duplicate of {number!r}, not an issue")
+        return f"Duplicate of #{number}\n\nchain run {run.id} found this issue already filed."
+    tried = verdict.get("tried") or "chain did not say what it tried"
+    return f"chain run {run.id} could not reproduce this bug.\n\nWhat was tried: {tried}"
