@@ -157,5 +157,6 @@ def test_a_malformed_schema_file_raises_ours_not_jsonschemas(cfg):
 
 
 def test_schema_accepts_chain_role(cfg):
+    """Catches a fixture handoff schema whose from.role enum lacks `chain`."""
     ok = {**VALID, "from": {**VALID["from"], "role": "chain"}}
     validate(cfg, "handoff", ok)

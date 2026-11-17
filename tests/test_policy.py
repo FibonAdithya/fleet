@@ -497,6 +497,7 @@ def test_ceiling_for_other_role_is_global():
 
 
 def test_fixture_policy_routes_build_and_bug():
+    """Catches a fixture task-classes.md missing the build/bug routes or the chain role row."""
     policy = load(load_config(FIXTURE_POLICY))
     assert policy.route_for("build") == ("chain", "integrator")
     assert policy.route_for("bug") == ("chain", "integrator")

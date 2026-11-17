@@ -39,3 +39,22 @@ def test_the_repository_policy_routes_build_and_bug_to_chain():
     policy = load(load_config(ROOT))
     assert policy.route_for("build") == ("chain", "integrator")
     assert policy.route_for("bug") == ("chain", "integrator")
+
+
+def test_repository_handoff_schema_accepts_chain_role():
+    """Catches `chain` missing from the root handoff schema's from.role enum."""
+    from fleet.schemas import validate
+
+    packet = {
+        "schema": "fleet.handoff.v1",
+        "task": 1,
+        "to": "review",
+        "attempt": 1,
+        "from": {"role": "chain", "agent": "chain-1", "run": "2026-11-17T00:00:00Z"},
+        "base_sha": "fb5ec5d",
+        "head_sha": "a91c204",
+        "branch": "fleet/1-x",
+        "did": "built it",
+        "evidence": {"checks": "make check: pass", "commands": ["make check"]},
+    }
+    validate(load_config(ROOT), "handoff", packet)
