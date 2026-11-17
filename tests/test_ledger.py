@@ -222,3 +222,13 @@ def test_answered_label_not_in_static_vocabulary():
     """The box writes `fleet:answered-N` and creates it when it does; the seed
     does not. Catches the answer counter added to the up-front label set."""
     assert not any(label.startswith("fleet:answered-") for label in static_vocabulary())
+
+
+@pytest.mark.parametrize("raw", ["2026-11-16T09:30:00", "yesterday", 1763285400])
+def test_a_created_at_without_an_offset_is_refused(raw):
+    """decide compares createdAt with an aware `now`; a naive time raises
+    TypeError there, inside the pure core, on every tick. Refused at the read,
+    where every other malformed row is."""
+    row = {"number": 1, "labels": [], "createdAt": raw}
+    with pytest.raises(ledger.LedgerError, match="createdAt"):
+        ledger.read_one(row)

@@ -135,7 +135,11 @@ def test_read_ledger_marks_the_owners_issues_and_reads_their_age():
     gh.ensure_label("agent-reported")
     mine = gh.create_issue("mine", "b", ["agent-reported"], author="FibonAdithya")
     theirs = gh.create_issue("theirs", "b", ["agent-reported"], author="someone-else")
+    triaged = gh.create_issue("triaged", "b", ["agent-reported", "fleet:triage"])
     tasks = {t.number: t for t in read_ledger(gh, login="FibonAdithya")}
+    # R11: both read as triage; only the label tells them apart.
+    assert tasks[triaged].state == tasks[mine].state == "triage"
+    assert tasks[triaged].has_state_label is True
     assert tasks[mine].by_owner is True
     assert tasks[theirs].by_owner is False
     assert tasks[mine].agent_reported is True
@@ -153,3 +157,5 @@ def test_captured_rows_without_author_or_created_at_are_never_the_owners():
     rows = json.loads((CAPTURE.parent / "issues.json").read_text())
     tasks = ledger_module.read(rows, login="FibonAdithya")
     assert tasks and all(not t.by_owner and t.created_at is None for t in tasks)
+    # No login and no author are both None; None is nobody, not a match.
+    assert all(not t.by_owner for t in ledger_module.read(rows))
