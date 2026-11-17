@@ -68,6 +68,14 @@ def slug_of(title: str) -> str:
     return slug or _SLUG_FALLBACK
 
 
+def _fenced(text: str) -> str:
+    """`text` inside a code fence longer than any backtick run in it, so an
+    answer cannot close its own fence or pass for a prompt part of its own."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
+
+
 def _answers_part(cfg: FleetConfig, task: int) -> str | None:
     """The prompt part for the owner's answers to `task`, or None when there is
     no answers file. A file that cannot be read as a JSON list of objects with a
@@ -93,7 +101,7 @@ def _answers_part(cfg: FleetConfig, task: int) -> str | None:
         texts.append(text)
     if not texts:
         return None
-    listing = "\n\n".join(f"{n}. {text}" for n, text in enumerate(texts, 1))
+    listing = "\n\n".join(f"{n}.\n{_fenced(text)}" for n, text in enumerate(texts, 1))
     return f"{_ANSWERS_HEADING}\n\n{listing}"
 
 
@@ -113,6 +121,10 @@ def build_prompt(cfg: FleetConfig, gh: GhClient, task: int, role: str) -> str:
     2026-09-25T11-23-12Z on project-b sent three fix-pass implementers back
     with no findings (each handed the same head straight back) and an integrator
     to escalate asking whether an approved verdict existed.
+
+    The owner's answers are the second addition: the file is the box's record of
+    what the owner said on Telegram, and without it a native role is the only
+    kind that would not see an answer. Each is fenced as untrusted text.
 
     A missing role prompt raises. An agent handed an empty role does something
     plausible and wrong, and a blank prompt buries the policy error that caused
