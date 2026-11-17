@@ -157,6 +157,7 @@ def test_no_intent_or_effect_exists_that_nothing_emits():
         "StartAgent",
         "StopAgent",
         "CloseIssue",
+        "Comment",
     }
 
 

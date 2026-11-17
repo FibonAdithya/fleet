@@ -428,7 +428,13 @@ def _reap(
                 # relabels to READY and throws away a review that happened.
                 # Status first, cost second -- a finished stage is already paid
                 # for, and the `done` branch above returns before this.
-                intents.append(Escalate(task=task.number, reason="over_budget"))
+                intents.append(
+                    Escalate(
+                        task=task.number,
+                        reason="over_budget",
+                        detail=f"spent {agent.cost_usd:.2f} of {policy.per_task_usd:.2f}",
+                    )
+                )
             continue
         if agent is None:
             # Ledger drift, and spec §5's table states this row unconditionally:

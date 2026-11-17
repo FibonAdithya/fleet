@@ -7,8 +7,10 @@ One live task per area. Tests live in the area of the code they cover.
 | `src/fleet/decide.py` | allocator |
 | `src/fleet/expand.py` | allocator |
 | `src/fleet/simulate.py` | allocator |
+| `src/fleet/escalation.py` | allocator |
 | `tests/test_decide*.py` | allocator |
 | `tests/test_expand.py` | allocator |
+| `tests/test_escalation.py` | allocator |
 | `tests/test_simulate.py` | allocator |
 | `tests/test_scenarios.py` | allocator |
 | `src/fleet/ledger.py` | ledger |

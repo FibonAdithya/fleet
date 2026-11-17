@@ -325,6 +325,7 @@ class Rebase:
 class Escalate:
     task: int
     reason: str
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -431,8 +432,17 @@ class StopAgent:
 
 
 @dataclass(frozen=True)
+class Comment:
+    """One issue comment. Applied before the state label that makes it matter, so a
+    reader that sees `fleet:human` also sees why."""
+
+    task: int
+    body: str
+
+
+@dataclass(frozen=True)
 class CloseIssue:
     task: int
 
 
-Effect = SetLabels | Assign | StartAgent | StopAgent | CloseIssue
+Effect = SetLabels | Assign | StartAgent | StopAgent | CloseIssue | Comment

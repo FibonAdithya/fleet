@@ -10,12 +10,14 @@ commands._post lost project-b#22 before it was changed to add first.
 
 from __future__ import annotations
 
+from fleet import escalation
 from fleet import labels as labels_module
 from fleet.model import (
     Advance,
     Assign,
     Close,
     CloseIssue,
+    Comment,
     Continue,
     Dispatch,
     Drain,
@@ -109,6 +111,7 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
         return [
             StopAgent(task=intent.task),
             Assign(task=intent.task, owner=None),
+            Comment(task=intent.task, body=escalation.render(intent.reason, intent.detail)),
             _to_state(intent.task, "human"),
         ]
 

@@ -76,14 +76,15 @@ def load_scenario(path: Path) -> dict:
 def render_intent(intent: Intent) -> str:
     """`Dispatch(5, implementer, 2)` — the form scenarios are written in.
 
-    Every field in declaration order except `base`, which is `policy
+    Every field in declaration order except `detail` (free text for the
+    escalation comment, not a decision) and `base`, which is `policy
     .integration_branch` for every dispatch M2 makes and so carries no
     information a scenario could assert on. The attempt number is rendered
     precisely because it does: it is the "attempt += 1" half of the stall and
     poison-task claims, and a renderer that dropped it would let
     `Release(1, stalled)` match a release on any attempt, the third included.
     """
-    values = [str(v) for k, v in vars(intent).items() if k != "base"]
+    values = [str(v) for k, v in vars(intent).items() if k not in ("base", "detail")]
     return f"{type(intent).__name__}({', '.join(values)})"
 
 

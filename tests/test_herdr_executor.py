@@ -9,7 +9,7 @@ from fleet.commands import do_handoff
 from fleet.gh import FakeGh, GhError
 from fleet.herdr import FakeHerdr, HerdrError
 from fleet.herdr_executor import HerdrExecutor, build_prompt, slug_of
-from fleet.model import Assign, CloseIssue, Effect, SetLabels, StartAgent, StopAgent
+from fleet.model import Assign, CloseIssue, Comment, Effect, SetLabels, StartAgent, StopAgent
 from fleet.packet import SCHEMA_IDS, render
 
 #: The kwargs `do_handoff` needs, mirroring tests/test_commands.py's BASE.
@@ -180,6 +180,13 @@ def test_close_issue_closes(cfg):
     assert gh.get_issue(number)["state"] == "CLOSED"
 
 
+def test_comment_posts_the_body(cfg):
+    gh = FakeGh()
+    number = _issue(gh)
+    _executor(cfg, gh).apply([Comment(task=number, body="<!-- fleet:escalation reason=x -->")])
+    assert [c["body"] for c in gh.list_comments(number)][-1] == "<!-- fleet:escalation reason=x -->"
+
+
 def test_every_effect_in_the_union_is_applied_rather_than_refused(cfg):
     """`apply` refuses what it does not recognise, and the union grows: M3 added
     `CloseIssue` after M2 shipped. A new effect this consumer does not handle is
@@ -194,6 +201,7 @@ def test_every_effect_in_the_union_is_applied_rather_than_refused(cfg):
         StartAgent: StartAgent(task=number, role="implementer", base="integration"),
         StopAgent: StopAgent(task=number),
         CloseIssue: CloseIssue(task=number),
+        Comment: Comment(task=number, body="why"),
     }
     assert set(get_args(Effect)) == set(samples), "the Effect union grew; handle the new member"
     ex = _executor(cfg, gh, herdr)

@@ -22,6 +22,7 @@ from fleet.model import (
     AgentState,
     Assign,
     CloseIssue,
+    Comment,
     Effect,
     SetLabels,
     StartAgent,
@@ -157,6 +158,8 @@ class HerdrExecutor:
                 self.gh.remove_labels(effect.task, list(effect.remove))
             elif isinstance(effect, Assign):
                 self.gh.assign(effect.task, effect.owner)
+            elif isinstance(effect, Comment):
+                self.gh.comment(effect.task, effect.body)
             elif isinstance(effect, CloseIssue):
                 self.gh.close_issue(effect.task)
             elif isinstance(effect, StartAgent):

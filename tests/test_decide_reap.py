@@ -587,7 +587,7 @@ def test_a_working_agent_over_the_per_task_ceiling_on_a_continuation_escalates()
     task = claimed(number=5, state="review")
     agents = [AgentState(task=5, status="working", change_seq=4, cost_usd=2.5)]
     intents, _ = decide(FleetState(), [task], POLICY, agents, T0)
-    assert intents == [Escalate(task=5, reason="over_budget")]
+    assert intents == [Escalate(task=5, reason="over_budget", detail="spent 2.50 of 2.00")]
 
 
 def test_a_continuation_agent_exactly_at_the_ceiling_is_left_alone():
