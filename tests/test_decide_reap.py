@@ -1154,3 +1154,51 @@ def test_later_stage_over_budget_uses_the_roles_ceiling():
     over = [AgentState(task=1, status="working", change_seq=10, cost_usd=6.0)]
     intents, _ = decide(FleetState(), [task], policy, over, T0)
     assert Escalate(task=1, reason="over_budget", detail="spent 6.00 of 5.00") in intents
+
+
+def _hold(state, task, policy, minutes, paused):
+    """Tick once a minute for `minutes` with a chain agent whose `change_seq`
+    never moves, collecting every intent."""
+    seen = []
+    agents = [AgentState(task=1, status="working", change_seq=3, paused=paused)]
+    for minute in range(1, minutes + 1):
+        intents, state = decide(state, [task], policy, agents, T0 + timedelta(minutes=minute))
+        seen.extend(intents)
+    return seen, state
+
+
+def test_paused_chain_run_is_not_stalled():
+    """A chain run paused on a usage limit makes no progress for an hour, and
+    under stall_minutes = 10 must not be released for it. Catches an `_observe`
+    that ignores `paused`."""
+    task = dataclasses.replace(claimed(), klass="build")
+    prev = FleetState(seen=((1, Observation(change_seq=3, since=T0)),))
+    intents, _ = _hold(prev, task, _chain_policy(), 60, paused=True)
+    assert only(intents, Release) == []
+    assert only(intents, Escalate) == []
+
+
+def test_unpaused_chain_run_unchanged_for_an_hour_is_stalled():
+    """The control: the same hour without `paused` is a stall. Catches an
+    `_observe` that refreshes the timer for every chain agent."""
+    task = dataclasses.replace(claimed(), klass="build")
+    prev = FleetState(seen=((1, Observation(change_seq=3, since=T0)),))
+    intents, _ = _hold(prev, task, _chain_policy(), 60, paused=False)
+    assert Release(task=1, reason="stalled", attempt=2) in intents
+
+
+def test_stall_timer_restarts_when_a_pause_ends():
+    """Paused for an hour, then running with the same `change_seq`: the stall
+    timer counts from the last paused tick, not from before the pause. Catches a
+    REAP that merely skips paused agents while `since` stays at T0, which
+    releases the run on the first tick after it resumes."""
+    task = dataclasses.replace(claimed(), klass="build")
+    prev = FleetState(seen=((1, Observation(change_seq=3, since=T0)),))
+    _, state = _hold(prev, task, _chain_policy(), 60, paused=True)
+    running = [AgentState(task=1, status="working", change_seq=3)]
+    intents, state = decide(
+        state, [task], _chain_policy(), running, T0 + timedelta(minutes=69, seconds=59)
+    )
+    assert only(intents, Release) == []
+    intents, _ = decide(state, [task], _chain_policy(), running, T0 + timedelta(minutes=70))
+    assert Release(task=1, reason="stalled", attempt=2) in intents

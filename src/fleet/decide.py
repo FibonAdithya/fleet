@@ -166,12 +166,19 @@ def _observe(prev: FleetState, agents: list[AgentState], now: datetime) -> dict[
     agents. A snapshot that momentarily omits an agent -- a herdr query racing a
     pane restart -- would otherwise reset that task's stall timer to zero, and a
     stall that keeps flickering is never detected at all.
+
+    A paused agent (a chain run waiting out a usage limit) refreshes `since` on
+    every tick it is seen paused, though nothing moved: waiting is not stalling,
+    and an hour's pause under `stall_minutes = 10` would otherwise be released.
+    Refreshing rather than skipping the stall check is what makes the timer
+    count from the end of the pause instead of from before it.
     """
     out = dict(prev.seen)
     for agent in agents:
         old = out.get(agent.task)
         if (
             old is None
+            or agent.paused
             or old.change_seq != agent.change_seq
             or old.transcript_bytes != agent.transcript_bytes
         ):

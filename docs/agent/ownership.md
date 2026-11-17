@@ -25,9 +25,12 @@ One live task per area. Tests live in the area of the code they cover.
 | `src/fleet/executor.py` | executor |
 | `src/fleet/herdr.py` | executor |
 | `src/fleet/herdr_executor.py` | executor |
+| `src/fleet/chain_executor.py` | executor |
 | `src/fleet/git.py` | executor |
 | `tests/test_executor.py` | executor |
 | `tests/test_herdr*.py` | executor |
+| `tests/test_chain_executor.py` | executor |
+| `tests/fixtures/chain/**` | executor |
 | `tests/test_git.py` | executor |
 | `src/fleet/daemon.py` | daemon |
 | `src/fleet/runlog.py` | daemon |

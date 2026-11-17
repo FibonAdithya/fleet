@@ -65,6 +65,11 @@ class AgentState:
 
     A departed agent has no status of its own: it is represented by its absence
     from `agents()`, not by a value here.
+
+    `paused` is True for a chain run waiting out a usage limit. It makes no
+    progress while it waits, and that is not a stall: `decide` refreshes the
+    stall timer on every tick it is seen paused, so the timer counts from when
+    the pause ends.
     """
 
     task: int
@@ -73,6 +78,7 @@ class AgentState:
     cost_usd: float = 0.0
     model: str | None = None
     transcript_bytes: int = 0
+    paused: bool = False
 
 
 #: `AgentState.model` when a transcript named more than one model carrying
