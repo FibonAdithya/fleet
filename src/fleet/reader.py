@@ -59,14 +59,15 @@ def read_ledger(
         if shallow.state not in PACKET_STATES:
             continue
         comments = gh.get_issue(row["number"]).get("comments") or []
-        found = current_packet(comments)
+        found = current_packet(comments, answers=shallow.answers)
         if found is not None:
             packets[row["number"]] = found
     return ledger_module.read(rows, packets, areas=areas, login=login)
 
 
-def current_packet(comments: list[str]) -> dict | None:
-    """The newest handoff packet, unless an escalation came at or after it.
+def current_packet(comments: list[str], answers: int = 0) -> dict | None:
+    """The newest handoff packet, unless the escalation it belongs to has been
+    dealt with since it was written.
 
     The issue outlives the attempt, and after an owner's answer `_dispatch`
     stamps `max(task.attempts, 1)` again, so the attempt binding in
@@ -79,16 +80,35 @@ def current_packet(comments: list[str]) -> dict | None:
     an integrator's rebase handback, which then advances or rebases on the work
     the owner asked to change.
 
-    "At or after": a packet to `human` is itself the escalation (same index).
-    A `to: blocked` packet is not an escalation, so its `blocked_on` survives
-    unless an escalation came later, when the block is stale too.
+    So the packet is stale when, after it:
+    - the allocator escalated (a marker comment). The packet is then evidence
+      from before the escalation, whether or not the owner has answered yet.
+    - the owner answered (`escalation.is_answer`). Counted only when the issue
+      carries an answer label (`answers` is the highest `fleet:answered-<n>`):
+      anyone can post a comment that starts like an answer, but hermes-harness
+      adds the label straight after its comment, and only a collaborator can.
+
+    A packet to `human` with neither after it is current: it is the agent's own
+    escalation, unanswered, and a finished agent's task advances to
+    `fleet:human` with its question even if the agent's own label move failed
+    (R19). Staleness is decided against the answer, not the escalation.
+
+    One fallback for an answer fleet cannot place: if the issue carries more
+    answer labels than answer comments (a label added by hand, or a changed
+    hermes-harness comment), a packet to `human` is treated as answered.
+    A missed answer would send the task back to `fleet:human` with no ping,
+    and a missed R19 only costs an attempt, so this errs toward stale.
     """
-    found = packet_module.parse_latest(comments, "handoff")
-    if found is None:
+    index = packet_module.latest_index(comments, "handoff")
+    if index is None:
         return None
-    escalated = escalation_module.latest(comments)
-    if escalated is not None and escalated["index"] >= packet_module.latest_index(
-        comments, "handoff"
-    ):
+    found = packet_module.parse_latest(comments, "handoff")
+    later = comments[index + 1 :]
+    if any(escalation_module.is_marker(body) for body in later):
+        return None
+    if answers >= 1 and any(escalation_module.is_answer(body) for body in later):
+        return None
+    placed = sum(1 for body in comments if escalation_module.is_answer(body))
+    if found is not None and found.get("to") == "human" and answers > placed:
         return None
     return found

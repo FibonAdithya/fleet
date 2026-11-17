@@ -112,8 +112,8 @@ def parse_latest(comments: list[str], kind: str) -> dict | None:
 def latest_index(comments: list[str], kind: str) -> int | None:
     """The index in `comments` of the payload `parse_latest` returns, or None.
 
-    The reader compares it with `escalation.latest`'s index: a packet written
-    at or before the newest escalation is not the current agent's handoff.
+    The reader reads the comments after it: an allocator escalation or an
+    owner's answer written after a packet makes it stale (`reader.current_packet`).
     """
     found = _latest(comments, kind)
     return found[0] if found is not None else None

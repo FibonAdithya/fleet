@@ -26,6 +26,12 @@ REASON_TEXT: dict[str, str] = {
 }
 
 
+#: The first line of the comment hermes-harness's `box/tasklib.py` `answer()`
+#: posts for the owner's Telegram answer (its `ANSWER_HEADER`), before it adds
+#: `fleet:answered-<n>` and `fleet:ready` and removes `fleet:human`.
+ANSWER_HEADER = "Owner's answer (from Telegram):"
+
+
 def render(reason: str, detail: str = "") -> str:
     """Marker line, then the plain sentence for `reason`, then `detail` if any."""
     lines = [f"{MARKER_PREFIX}{reason}{_MARKER_SUFFIX}"]
@@ -40,6 +46,18 @@ def _marker_reason(body: str) -> str | None:
     if first.startswith(MARKER_PREFIX) and first.endswith(_MARKER_SUFFIX):
         return first[len(MARKER_PREFIX) : -len(_MARKER_SUFFIX)].strip()
     return None
+
+
+def is_marker(body: str) -> bool:
+    """True when `body` is an allocator escalation: its first line is the marker."""
+    return _marker_reason(body) is not None
+
+
+def is_answer(body: str) -> bool:
+    """True when `body` starts with the line hermes-harness opens an owner's
+    answer with. Anyone can write that line; `reader.current_packet` counts it
+    only on an issue that carries an answer label."""
+    return body.split("\n", 1)[0].strip() == ANSWER_HEADER
 
 
 def _human_packet(body: str) -> dict | None:

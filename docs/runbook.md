@@ -478,6 +478,12 @@ escalations are written through `commands.do_escalate` as a `fleet.handoff.v1`
 packet to `human`, with no marker line. `fleet.escalation.latest` reads either
 kind.
 
+The daemon ignores a handoff packet once a marker escalation or the owner's
+answer comes after it (the `Owner's answer (from Telegram):` comment that
+hermes-harness posts, counted only on an issue with a `fleet:answered-<n>`
+label). An agent's own packet to `human` with neither after it still sends the
+task to `fleet:human`, even when the agent's own label move failed.
+
 A chain run's stall timer reads chaind's heartbeat. chain runs a stage as one
 `claude -p` session that writes nothing until it exits, so chain's `progress`
 and `output_bytes` stay flat for the whole of a session, which can run for

@@ -161,7 +161,7 @@ def test_captured_rows_without_author_or_created_at_are_never_the_owners():
     assert all(not t.by_owner for t in ledger_module.read(rows))
 
 
-# -- R18: a packet older than the latest escalation is not current ------------
+# -- R18: a packet from before an escalation or an answer is not current -------
 
 
 def _r18_policy():
@@ -232,7 +232,12 @@ def test_a_handoff_to_human_is_not_current_for_the_agent_after_the_answer():
     handoff to human, attempt 1); after the answer `_dispatch` stamps attempt 1
     again, so without the rule the packet passes `_advance`'s attempt check and
     the finished agent's task goes straight back to fleet:human with no new
-    escalation comment -- the owner is never told."""
+    escalation comment -- the owner is never told.
+
+    Here the answer is only the label, with no answer comment (added by hand,
+    or a hermes-harness whose comment changed): an answer fleet cannot place,
+    so the packet to human is taken as answered. The shape hermes-harness
+    actually leaves is the R19 section's I1 test."""
     from fleet.model import Advance, AgentState
 
     gh = FakeGh()
@@ -311,6 +316,91 @@ def test_with_no_escalation_the_packet_is_kept():
     gh.comment(number, "unrelated chatter")
     gh.comment(number, _handoff(number, "review", did="the work"))
     gh.comment(number, "more chatter after the packet")
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet is not None
+    assert tasks[number].packet["did"] == "the work"
+
+
+# -- R19: an agent's own escalation whose label move failed still reaches the
+# owner. Staleness is decided against the owner's answer, not the escalation.
+
+#: The comment hermes-harness's `box/tasklib.py` `answer()` posts, before it
+#: adds `fleet:answered-<n>` and `fleet:ready` and removes `fleet:human`.
+_OWNER_ANSWER = "Owner's answer (from Telegram):\n\n"
+
+
+def _escalate_packet(number):
+    return _handoff(number, "human", question="Which API?", considered="A or B")
+
+
+def test_an_escalation_whose_label_move_failed_still_advances_to_human():
+    """A native agent's `fleet escalate` posted its to-human packet, then the
+    label move failed, so the row still reads `claimed` when the agent exits.
+    Nobody has answered, so the packet is current and the task goes to the
+    owner with the agent's question. Dropping it instead released the task as
+    stalled and lost the question."""
+    from fleet.model import Advance, AgentState
+
+    gh = FakeGh()
+    number = gh.create_issue(
+        "t", "b", ["fleet:claimed", "area:eval", "class:patch", "fleet:attempt-1"]
+    )
+    gh.comment(number, _escalate_packet(number))
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet is not None
+    intents = _r18_decide(
+        list(tasks.values()), [AgentState(task=number, status="done", change_seq=10)]
+    )
+    assert Advance(task=number, to="human") in intents
+
+
+def test_an_escalation_after_an_earlier_answer_still_advances_to_human():
+    """The same failed label move on a task the owner answered once before:
+    the earlier answer predates this escalation, so it does not make it stale."""
+    from fleet.model import Advance, AgentState
+
+    gh = FakeGh()
+    number = _answered_claimed(gh)
+    gh.comment(number, _escalate_packet(number))
+    gh.comment(number, _OWNER_ANSWER + "Use A.")
+    gh.comment(number, _escalate_packet(number))
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet is not None
+    intents = _r18_decide(
+        list(tasks.values()), [AgentState(task=number, status="done", change_seq=10)]
+    )
+    assert Advance(task=number, to="human") in intents
+
+
+def test_an_answered_escalation_does_not_send_the_task_back_to_human():
+    """I1, as hermes-harness's `answer()` leaves the issue: the answer comment
+    after the agent's to-human packet, and `fleet:answered-1`. The next agent's
+    clean exit without a packet of its own must not reuse the answered
+    escalation and go straight back to fleet:human with no ping."""
+    from fleet.model import Advance, AgentState
+
+    gh = FakeGh()
+    number = _answered_claimed(gh)
+    gh.comment(number, _escalate_packet(number))
+    gh.comment(number, _OWNER_ANSWER + "Use A.")
+    tasks = {t.number: t for t in read_ledger(gh)}
+    assert tasks[number].packet is None
+    intents = _r18_decide(
+        list(tasks.values()), [AgentState(task=number, status="done", change_seq=10)]
+    )
+    assert [i for i in intents if isinstance(i, Advance)] == []
+
+
+def test_an_answer_comment_on_an_unanswered_issue_does_not_drop_the_packet():
+    """Anyone can post a comment that starts like the owner's answer. One on
+    an issue with no `fleet:answered-<n>` label is not an answer (hermes adds
+    the label right after the comment, and only a collaborator can add one)."""
+    gh = FakeGh()
+    number = gh.create_issue(
+        "t", "b", ["fleet:claimed", "area:eval", "class:patch", "fleet:attempt-1"]
+    )
+    gh.comment(number, _handoff(number, "review", did="the work"))
+    gh.comment(number, _OWNER_ANSWER + "not really")
     tasks = {t.number: t for t in read_ledger(gh)}
     assert tasks[number].packet is not None
     assert tasks[number].packet["did"] == "the work"
