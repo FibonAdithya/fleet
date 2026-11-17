@@ -219,15 +219,28 @@ def test_old_attempt_packet_does_not_advance_after_answer():
     stale = {"to": "review", "attempt": 1, "from": {"role": "implementer"}}
     task = claimed(attempts=3, answers=1, packet=stale)
     assert _advance(task) == []
+    fresh = {"to": "review", "attempt": 3, "from": {"role": "implementer"}}
+    current = claimed(attempts=3, answers=1, packet=fresh)
+    assert _advance(current) == [Advance(task=1, to="review")]
 
 
 def test_a_claimed_task_with_no_live_agent_is_released_even_at_the_attempt_cap():
     """Ledger drift; spec §5 states this row unconditionally. Catches applying
     the attempt cap to it, which burns a task to NEEDS_HUMAN for a daemon
-    restart -- the one event FleetState is disposable in order to survive."""
+    restart -- the one event FleetState is disposable in order to survive.
+    The attempt is held at the effective cap so a drift that repeats every tick
+    creates no new labels; it is still released, never escalated."""
     intents, _ = decide(FleetState(), [claimed(attempts=2)], POLICY, [], T0)
-    assert Release(task=1, reason="no_agent", attempt=3) in intents
+    assert Release(task=1, reason="no_agent", attempt=2) in intents
     assert only(intents, Escalate) == []
+
+
+def test_answered_task_drift_gets_the_raised_cap():
+    """The drift release is held at the effective cap, not the policy's: an
+    answered task on attempt 2 of 4 drifts to attempt 3. Catches the hold using
+    `policy.max_attempts` directly."""
+    intents, _ = decide(FleetState(), [claimed(attempts=2, answers=1)], POLICY, [], T0)
+    assert intents == [Release(task=1, reason="no_agent", attempt=3)]
 
 
 def test_over_per_task_budget_releases():
@@ -948,6 +961,10 @@ def test_a_handback_from_a_previous_attempt_is_not_a_rebase():
     did not make, hit `max_rebases`, and went to NEEDS_HUMAN naming
     `rebases_exhausted` for work that never happened. `_advance` implements
     exactly this check on exactly this shape; this path did not.
+
+    The drift release's attempt is held at the effective cap (2 here) so a
+    drift that repeats every tick creates no new labels; it is still a
+    release, never an escalation.
     """
     stale = claimed(
         number=4,
@@ -957,7 +974,7 @@ def test_a_handback_from_a_previous_attempt_is_not_a_rebase():
     )
     intents, _ = decide(FleetState(), [stale], POLICY, [], T0)
     assert only(intents, Escalate) == []
-    assert intents == [Release(task=4, reason="no_agent", attempt=3)]
+    assert intents == [Release(task=4, reason="no_agent", attempt=2)]
 
 
 def test_a_handback_with_no_attempt_at_all_is_not_a_rebase():

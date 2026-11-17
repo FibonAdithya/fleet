@@ -435,7 +435,14 @@ def _reap(
             # herdr's state is the tiebreaker. Escalating at the attempt cap
             # instead would burn a task to NEEDS_HUMAN for a daemon restart --
             # the one event FleetState is disposable precisely to survive.
-            intents.append(Release(task=task.number, reason="no_agent", attempt=task.attempts + 1))
+            #
+            # Held at the effective cap: a start that fails every tick
+            # (HerdrExecutor._begin records the error and starts nothing)
+            # repeats this release every tick, and an unheld counter would mint
+            # a new repo label each time -- attempt-3, attempt-4, all night.
+            max_attempts, _, _ = effective_caps(policy, task)
+            attempt = min(task.attempts + 1, max_attempts)
+            intents.append(Release(task=task.number, reason="no_agent", attempt=attempt))
             continue
         if agent.status == "done":
             advanced = _advance(task)
