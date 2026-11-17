@@ -429,7 +429,11 @@ agent kind `chain`, as in `fixtures/policy/fleet-fixture/docs/agent/task-classes
 
 ### How a task gets there
 
-- A `build` issue names its spec on a line that is exactly `Spec: <path>`.
+- A `build` issue names its spec on a line that is exactly `Spec: <path>`. The
+  path must be relative to the repository root: one that starts with `-`, is
+  absolute, or goes through `..` starts no run and is recorded as
+  `started no chain run: the spec '<path>' is not a relative path inside the
+  repository`.
 - `fleet discover --class bug|build` on a chain-routed class files the new
   issue `fleet:ready` and `fleet:auto-ok`, so it runs unattended. A `patch`, or
   a class not routed to chain, stays in `fleet:triage`. A `build` discovery

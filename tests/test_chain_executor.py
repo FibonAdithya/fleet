@@ -238,6 +238,7 @@ def test_start_build_passes_spec_and_base(ccfg):
             "build",
             "--base",
             "integration",
+            "--",
             str(ccfg.root),
             "docs/ai/specs/x.md",
         ]
@@ -271,6 +272,7 @@ def test_start_bug_has_no_spec(ccfg):
             "bug",
             "--base",
             "integration",
+            "--",
             str(ccfg.root),
         ]
     ]
@@ -294,7 +296,28 @@ def test_start_passes_answers_when_file_exists(ccfg):
     argv = cli.calls_to("start")[1]
     assert argv[argv.index("--answers") + 1] == str(answers)
     # Options before the positionals, as chain's grammar reads them.
-    assert argv[-2:] == [str(ccfg.root), "docs/ai/specs/x.md"]
+    assert argv[-3:] == ["--", str(ccfg.root), "docs/ai/specs/x.md"]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    ["--base=main", "--answers=/x", "-x", "/etc/passwd", "../x.md", "docs/../../x.md"],
+)
+def test_start_refuses_a_spec_outside_the_repository(ccfg, spec):
+    """The `Spec:` path comes from the issue body, which anyone who can edit
+    the issue writes. One that reads as an option would become a chain option
+    (argparse takes the later `--base`), and chain refuses an absolute path or
+    one with `..` itself. Refused here, it starts nothing and is reported as a
+    failed start."""
+    gh = FakeGh()
+    _issue_at(gh, 5, body=f"Goal\nSpec: {spec}\n")
+    cli = ScriptedCli(start=[(0, "r-1\n", "")], status=[(0, _status(), "")])
+    ex = _executor(ccfg, gh, cli)
+    ex.apply([StartAgent(task=5, role="chain", base="integration")])
+    assert cli.calls_to("start") == []
+    [failure] = ex.failures
+    assert repr(spec) in failure
+    assert ex.agents() == [AgentState(task=5, status="dirty", change_seq=0)]
 
 
 def test_start_build_without_spec_line_starts_nothing(ccfg):

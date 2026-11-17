@@ -32,7 +32,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fleet import commands
 from fleet import labels as labels_module
@@ -327,6 +327,25 @@ def spec_of(body: str) -> str | None:
         found = _SPEC_LINE.fullmatch(line)
         if found:
             return found.group(1)
+    return None
+
+
+def spec_refusal(spec: str) -> str | None:
+    """Why `spec` cannot be passed to `chain start`, or None when it can.
+
+    The path comes from the issue body, which anyone who can edit the issue
+    writes. One starting with `-` would be read as an option (argparse lets a
+    later `--base` override fleet's), so it is refused even though fleet also
+    ends its options with `--`. An absolute path or one through `..` is refused
+    as chain's own `_check_spec_path` refuses it, so the reason is fleet's.
+    """
+    if spec.startswith("-"):
+        return "it starts with '-'"
+    path = PurePosixPath(spec)
+    if path.is_absolute():
+        return "it is an absolute path"
+    if ".." in path.parts:
+        return "it goes through '..'"
     return None
 
 
@@ -811,11 +830,20 @@ class ChainExecutor:
         answers = answers_path(self.cfg, task)
         if answers.is_file():
             argv += ["--answers", str(answers)]
-        argv.append(str(self.cfg.root))
+        # `--` ends the options: what follows is read as positionals, whatever
+        # it starts with.
+        argv += ["--", str(self.cfg.root)]
         if klass == "build":
             spec = spec_of(issue.get("body") or "")
             if spec is None:
                 self._start_failed(task, "a build issue has no `Spec: <path>` line")
+                return
+            refusal = spec_refusal(spec)
+            if refusal is not None:
+                self._start_failed(
+                    task,
+                    f"the spec {spec!r} is not a relative path inside the repository: {refusal}",
+                )
                 return
             argv.append(spec)
         code, out, err = self._call(argv)
