@@ -243,11 +243,24 @@ def escalate(task, question, considered, did, checks, commands):
 @click.option("--title", required=True)
 @click.option("--area", required=True, help="An area from the target repository's ownership map.")
 @click.option("--evidence", required=True, help="file:line and what is wrong there.")
-def discover(parent, title, area, evidence):
+@click.option(
+    "--class",
+    "klass",
+    type=click.Choice(["patch", "build", "bug"]),
+    default="bug",
+    show_default=True,
+    help="bug for a defect you found; a planner's child is patch or build.",
+)
+@click.option(
+    "--spec",
+    default=None,
+    help="build only: the spec's path, committed on the integration branch.",
+)
+def discover(parent, title, area, evidence, klass, spec):
     """File an unrelated defect for someone else. Then carry on with your task."""
     # The only command that records no role: do_discover ignores identity, and a
-    # discovery lands in TRIAGE whoever files it. Requiring FLEET_ROLE here would
-    # refuse a human triaging by hand and gate nothing.
+    # discovery's labels follow its --class, whoever files it. Requiring
+    # FLEET_ROLE here would refuse a human triaging by hand and gate nothing.
     cfg, gh, _ = _context(role_required=False)
     known = policy_module.area_names(cfg)
     if area not in known:
@@ -255,8 +268,20 @@ def discover(parent, title, area, evidence):
             f"{area!r} is not an area in {cfg.ownership}; choose from {', '.join(sorted(known))}",
             param_hint="--area",
         )
-    number = do_discover(cfg, gh, parent=parent, title=title, area=area, evidence=evidence)
-    click.echo(f"filed #{number} in triage (discovered by #{parent})")
+    try:
+        number = do_discover(
+            cfg,
+            gh,
+            parent=parent,
+            title=title,
+            area=area,
+            evidence=evidence,
+            klass=klass,
+            spec=spec,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"filed #{number} as {klass} (discovered by #{parent})")
 
 
 @main.command()
@@ -399,7 +424,7 @@ def run(once: bool, poll_seconds: int | None, run_id: str | None, new_run: bool)
     )
     run_id, origin = resolve_run_id(cfg.runlog_path, run_id, new_run, datetime.now(UTC))
     log = RunLog(cfg.runlog_path, run_id=run_id)
-    daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id)
+    daemon = Daemon(cfg, policy, gh, executor, log, run_id=run_id, login=owner)
 
     stop = threading.Event()
     # PULL-based: the socket calls back into the daemon's own last snapshot on

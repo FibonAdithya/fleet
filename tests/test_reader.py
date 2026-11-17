@@ -122,3 +122,34 @@ def test_the_captured_packet_recovers_through_parse_latest_with_no_attempt():
     assert recovered is not None
     assert recovered["to"] == "review"
     assert "attempt" not in recovered
+
+
+def test_read_ledger_marks_the_owners_issues_and_reads_their_age():
+    """ADOPT needs three facts the label set does not carry: who wrote the
+    issue, when, and whether it has any state label at all. `by_owner` is True
+    only for the login the daemon runs as; with no login, nobody is the owner."""
+    from datetime import UTC, datetime
+
+    gh = FakeGh(clock=lambda: datetime(2026, 11, 16, 9, 30, tzinfo=UTC))
+    # The box creates this label in the target repo; it is not fleet's.
+    gh.ensure_label("agent-reported")
+    mine = gh.create_issue("mine", "b", ["agent-reported"], author="FibonAdithya")
+    theirs = gh.create_issue("theirs", "b", ["agent-reported"], author="someone-else")
+    tasks = {t.number: t for t in read_ledger(gh, login="FibonAdithya")}
+    assert tasks[mine].by_owner is True
+    assert tasks[theirs].by_owner is False
+    assert tasks[mine].agent_reported is True
+    assert tasks[mine].has_state_label is False
+    assert tasks[mine].created_at == datetime(2026, 11, 16, 9, 30, tzinfo=UTC)
+    assert all(not t.by_owner for t in read_ledger(gh))
+
+
+def test_captured_rows_without_author_or_created_at_are_never_the_owners():
+    """fixtures/ledger was captured before `author,createdAt` were fetched and is
+    not re-captured. A missing author is not the owner and a missing createdAt
+    has no age, so neither row can be adopted."""
+    from fleet import ledger as ledger_module
+
+    rows = json.loads((CAPTURE.parent / "issues.json").read_text())
+    tasks = ledger_module.read(rows, login="FibonAdithya")
+    assert tasks and all(not t.by_owner and t.created_at is None for t in tasks)

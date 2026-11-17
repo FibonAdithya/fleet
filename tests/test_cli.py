@@ -271,6 +271,31 @@ def test_a_restarted_fleet_run_resumes_the_night_s_spend(monkeypatch, tmp_path):
     assert "spent=$7.50" in second.output
 
 
+def test_fleet_run_adopts_the_owners_agent_reported_issue(monkeypatch, tmp_path):
+    """The daemon has to know whose issues are the owner's: `fleet run` passes
+    `gh`'s login to the Daemon, which passes it to the ledger read. Without that
+    wiring no row reads `by_owner` and ADOPT never fires outside its unit tests.
+    A row by anyone else is left in triage."""
+    cfg = dataclasses.replace(_run_cfg(tmp_path), chain_default_area="eval")
+    gh, herdr = FakeGh(), FakeHerdr(worktree_root=cfg.worktree_root)
+    _fake_backends(monkeypatch, cfg, gh, herdr)
+    gh.ensure_label("agent-reported")
+    mine = gh.create_issue("lid rounds early", "b", ["agent-reported"])
+    theirs = gh.create_issue("lid rounds late", "b", ["agent-reported"], author="someone-else")
+
+    result = CliRunner().invoke(main, ["run", "--once"])
+
+    assert result.exit_code == 0, result.output
+    assert set(gh.get_issue(mine)["labels"]) == {
+        "agent-reported",
+        "fleet:ready",
+        "class:bug",
+        "fleet:auto-ok",
+        "area:eval",
+    }
+    assert gh.get_issue(theirs)["labels"] == ["agent-reported"]
+
+
 def test_run_new_run_mints_a_fresh_id_and_starts_at_zero(monkeypatch, tmp_path):
     """The escape hatch. Resuming is the safe default -- forgetting the night's
     spend hands the fleet a second full budget -- but a genuinely new night must
@@ -395,3 +420,23 @@ def test_run_hands_the_daemon_a_composite_with_chain(monkeypatch, tmp_path):
     assert executor.chain.run_cli is chain_executor.run_cli
     assert executor.chain.run_cli(["chain", "status"])[0] == 127
     assert executor.chain.failures is executor.herdr.failures
+
+
+def test_discover_passes_class_and_spec_through(monkeypatch, cfg):
+    """`--class` defaults to bug and `--spec` reaches do_discover; any other
+    class is refused by click before anything is filed."""
+    seen = []
+    monkeypatch.chdir(cfg.root)
+    monkeypatch.setattr("fleet.cli.do_discover", lambda *a, **kw: (seen.append(kw), 7)[1])
+    base = ["discover", "--from", "1", "--title", "t", "--area", "eval", "--evidence", "x:1"]
+
+    assert CliRunner().invoke(main, base).exit_code == 0
+    spec = ["--class", "build", "--spec", "docs/ai/specs/x.md"]
+    assert CliRunner().invoke(main, [*base, *spec]).exit_code == 0
+    refused = CliRunner().invoke(main, [*base, "--class", "spec"])
+
+    assert [(kw["klass"], kw["spec"]) for kw in seen] == [
+        ("bug", None),
+        ("build", "docs/ai/specs/x.md"),
+    ]
+    assert refused.exit_code == 2

@@ -637,6 +637,8 @@ def test_the_daemon_holds_no_authoritative_state(cfg, tmp_path):
         "executor",
         "runlog",
         "run_id",
+        # Read from `gh` at start, like the executor's owner; not state.
+        "login",
         "tick_number",
         "snapshot",
         "state",

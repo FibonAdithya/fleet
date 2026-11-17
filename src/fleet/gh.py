@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Collection
+from collections.abc import Callable, Collection
+from datetime import UTC, datetime
 from typing import Protocol
 
 from fleet import labels as labels_module
@@ -115,12 +116,15 @@ class RealGh:
                 "--limit",
                 "200",
                 "--json",
-                "number,title,body,labels,state,assignees",
+                "number,title,body,labels,state,assignees,author,createdAt",
             )
         )
         for row in raw:
             row["labels"] = [label["name"] for label in row.get("labels", [])]
             row["assignees"] = [a["login"] for a in row.get("assignees", [])]
+            # The bare login, as for assignees. gh can return a null author
+            # (a deleted account); that is nobody's issue.
+            row["author"] = (row.get("author") or {}).get("login")
         return raw
 
     def assign(self, issue: int, login: str | None) -> None:
@@ -234,8 +238,12 @@ class FakeGh:
         max_rebases: int = labels_module.DEFAULT_MAX_REBASES,
         known_logins: set[str] | frozenset[str] = DEFAULT_KNOWN_LOGINS,
         areas: Collection[str] = labels_module.AREAS,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.issues: dict[int, dict] = {}
+        # `createdAt` of each new issue. Injectable so a test that ages an issue
+        # does not depend on the wall clock.
+        self.clock = clock
         self._next = 1
         # Comment ids, monotonic across the whole fake -- not scoped per issue
         # -- because delete_comment's real endpoint
@@ -275,7 +283,15 @@ class FakeGh:
             raise GhError(f"no such issue: {issue}")
         return self.issues[issue]
 
-    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+    #: Who `create_issue` files as by default: real gh files as the login it
+    #: is authenticated as, and the fake's one known login is that.
+    DEFAULT_AUTHOR = "FibonAdithya"
+
+    def create_issue(
+        self, title: str, body: str, labels: list[str], author: str = DEFAULT_AUTHOR
+    ) -> int:
+        """`author` is the fake's only way to stand in for an issue someone
+        else opened; real gh always files as itself."""
         self._check_labels(labels)
         number = self._next
         self._next += 1
@@ -287,6 +303,9 @@ class FakeGh:
             "state": "OPEN",
             "comments": [],
             "assignees": [],
+            "author": author,
+            # gh's own format: UTC with a `Z`, whole seconds.
+            "createdAt": self.clock().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         return number
 
@@ -338,7 +357,9 @@ class FakeGh:
         they are lists, and a shallow dict copy would still share them with the
         store."""
         record = self._get(issue)
-        copy = dict(record)
+        # RealGh's `issue view --json` does not ask for author or createdAt, so
+        # neither does this; only list_issues carries them.
+        copy = {k: v for k, v in record.items() if k not in ("author", "createdAt")}
         copy["labels"] = list(record["labels"])
         # Bare body strings, matching RealGh's get_issue -- comments are
         # stored internally as {id, body} now (list_comments needs the id),

@@ -34,7 +34,9 @@ from fleet.model import Task
 PACKET_STATES = ("claimed", "review", "integrating", "blocked")
 
 
-def read_ledger(gh: GhClient, areas: Collection[str] = labels_module.AREAS) -> list[Task]:
+def read_ledger(
+    gh: GhClient, areas: Collection[str] = labels_module.AREAS, login: str | None = None
+) -> list[Task]:
     """Every row, open and closed, with packets for the states that carry one.
 
     `all`, not `open`. Once packets are fetched, `blocked_on` is populated and
@@ -45,6 +47,9 @@ def read_ledger(gh: GhClient, areas: Collection[str] = labels_module.AREAS) -> l
     Closed rows are returned rather than filtered: three phases in `decide()`
     disagree about what a closed row means, and filtering here would take that
     choice away from the only code that can make it.
+
+    `login` is the account the daemon runs as; it marks the owner's own issues
+    (`Task.by_owner`), which is what ADOPT requires. None marks nothing.
     """
     rows = gh.list_issues("all")
     packets: dict[int, dict] = {}
@@ -57,4 +62,4 @@ def read_ledger(gh: GhClient, areas: Collection[str] = labels_module.AREAS) -> l
         )
         if found is not None:
             packets[row["number"]] = found
-    return ledger_module.read(rows, packets, areas=areas)
+    return ledger_module.read(rows, packets, areas=areas, login=login)

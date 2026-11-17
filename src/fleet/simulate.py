@@ -25,6 +25,7 @@ from fleet.decide import decide
 from fleet.executor import FakeExecutor
 from fleet.expand import expand
 from fleet.model import (
+    Adopt,
     Advance,
     AgentState,
     Close,
@@ -61,7 +62,19 @@ _AGENT_STATUSES = ("working", "done", "dirty")
 # `[Dispatch(1, implementer, 1)]` into three scalars, and a string comparison
 # turns that into a silent mismatch instead of a complaint about the file.
 _CALL = re.compile(r"^(\w+)\((.*)\)$")
-_INTENTS = (Advance, Close, Continue, Dispatch, Drain, Escalate, Rebase, Release, Retire, Unblock)
+_INTENTS = (
+    Adopt,
+    Advance,
+    Close,
+    Continue,
+    Dispatch,
+    Drain,
+    Escalate,
+    Rebase,
+    Release,
+    Retire,
+    Unblock,
+)
 _INTENT_NAMES = frozenset(cls.__name__ for cls in _INTENTS)
 
 

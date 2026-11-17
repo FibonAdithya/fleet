@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
+from fleet import git as git_module
 from fleet import labels
 from fleet import policy as policy_module
 from fleet.config import FleetConfig
+from fleet.decide import chain_route_enabled
 from fleet.gh import GhClient
 from fleet.ledger import read_one
+from fleet.model import Policy
 from fleet.packet import build_handoff, render
 from fleet.schemas import validate
 
@@ -248,10 +253,44 @@ _To be written by a scout during triage._
 """
 
 
+#: The classes `fleet discover` files: what an agent finds (`bug`) and what a
+#: planner splits an epic into (`patch`, `build`).
+DISCOVER_CLASSES = ("patch", "build", "bug")
+
+# What ChainExecutor's `Spec: (\S+)` reads back: one path, no whitespace.
+_SPEC_PATH = re.compile(r"\S+")
+
+
 def do_discover(
-    cfg: FleetConfig, gh: GhClient, *, parent: int, title: str, area: str, evidence: str
+    cfg: FleetConfig,
+    gh: GhClient,
+    *,
+    parent: int,
+    title: str,
+    area: str,
+    evidence: str,
+    klass: str = "bug",
+    spec: str | None = None,
+    policy: Policy | None = None,
 ) -> int:
-    """File a discovery in TRIAGE. Never READY, never auto-ok."""
+    """File a discovery. A `bug` or `build` whose class the target routes to
+    chain is filed READY and auto-ok, to run unattended; anything else --
+    a `patch` above all, or a class not routed to chain -- lands in TRIAGE for
+    a human or scout, as every discovery used to.
+
+    A `build` names its spec, which must already be committed on
+    `origin/<integration_branch>` because that is the branch chain builds
+    from; its body's first line is `Spec: <path>`, the line ChainExecutor
+    reads. `spec` is refused for every other class.
+
+    `policy` is loaded from `cfg` when not given."""
+    if klass not in DISCOVER_CLASSES:
+        raise ValueError(f"discover files class {', '.join(DISCOVER_CLASSES)}, not {klass!r}")
+    if klass == "build":
+        if spec is None or not _SPEC_PATH.fullmatch(spec):
+            raise ValueError("a build discovery needs --spec, one path with no spaces")
+    elif spec is not None:
+        raise ValueError(f"--spec is only for a build; a {klass} has no spec to build")
     # Strip first: search_titles is a substring scan over UNSTRIPPED stored
     # titles, so " foo" would not match a stored "foo" and the exact-match guard
     # below would never run.
@@ -268,6 +307,15 @@ def do_discover(
             f"{area!r} is not an area in {cfg.ownership}; choose from {', '.join(sorted(known))}"
         )
     area_label = labels.area_label(area)
+    if spec is not None:
+        ref = f"origin/{cfg.integration_branch}"
+        if not git_module.exists_on(cfg.root, ref, spec):
+            raise ValueError(
+                f"spec {spec!r} is not committed on {ref}; chain builds from there, "
+                "so commit and push it first"
+            )
+    if policy is None:
+        policy = policy_module.load(cfg)
     gh.get_issue(parent)
     # search_titles is a substring scan, so a short title collides with unrelated
     # issues -- "t" matches "...explicit k". Narrow with it, then require an exact
@@ -293,8 +341,12 @@ def do_discover(
     # repo's label set. gh refuses an unknown label and creates no issue at all.
     parentage = f"discovered-by:{parent}"
     gh.ensure_label(parentage)
-    return gh.create_issue(
-        title,
-        DISCOVERY_BODY.format(parent=parent, evidence=evidence),
-        [labels.state_label("triage"), area_label, parentage],
-    )
+    body = DISCOVERY_BODY.format(parent=parent, evidence=evidence)
+    if spec is not None:
+        body = f"Spec: {spec}\n\n{body}"
+    class_label = labels.class_label(klass)
+    if klass != "patch" and chain_route_enabled(policy, klass):
+        names = [labels.state_label("ready"), class_label, labels.AUTO_OK, area_label, parentage]
+    else:
+        names = [labels.state_label("triage"), area_label, parentage, class_label]
+    return gh.create_issue(title, body, names)

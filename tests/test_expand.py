@@ -7,6 +7,7 @@ import pytest
 from fleet.expand import expand
 from fleet.labels import static_vocabulary
 from fleet.model import (
+    Adopt,
     Advance,
     Assign,
     Close,
@@ -240,3 +241,20 @@ def test_close_closes_before_it_stops_so_a_failed_close_can_be_retried():
     """
     effects = expand(Close(task=5), POLICY)
     assert effects.index(CloseIssue(task=5)) < effects.index(StopAgent(task=5))
+
+
+def test_adopt_needs_a_default_area():
+    """decide emits Adopt only when `chain_default_area` is set; an Adopt that
+    reached expand without one must fail loudly, not file `area:None`."""
+    with pytest.raises(ValueError, match="default_area"):
+        expand(Adopt(task=9), POLICY)
+
+
+def test_adopt_writes_only_labels_the_repo_already_has():
+    """gh refuses an unknown label by failing the whole edit. Every label Adopt
+    adds is in the static vocabulary, so no ensure_label is needed, and
+    `agent-reported` (the box's label, not fleet's) is not touched."""
+    policy = dataclasses.replace(POLICY, chain_default_area="eval")
+    (move,) = expand(Adopt(task=9), policy)
+    assert set(move.add) <= static_vocabulary(areas=policy.area_names)
+    assert "agent-reported" not in move.remove

@@ -15,7 +15,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from fleet import labels as labels_module
+from fleet.config import CHAIN_KIND
 from fleet.model import (
+    Adopt,
     Advance,
     AgentState,
     Close,
@@ -516,6 +518,58 @@ def _reap(
     return intents
 
 
+#: The class an adopted issue is filed as. `build` needs a spec, which an
+#: agent-reported issue does not carry.
+_ADOPT_CLASS = "bug"
+
+
+def chain_route_enabled(policy: Policy, klass: str) -> bool:
+    """A class runs on the chain route when its route's first role is of agent
+    kind `chain`. One definition for ADOPT and for `fleet discover`, so the two
+    cannot disagree about whether a `bug` will run unattended."""
+    route = policy.route_for(klass)
+    if not route:
+        return False
+    declared = policy.agent_for(route[0])
+    return declared is not None and declared[0] == CHAIN_KIND
+
+
+def _adopt(ledger: list[Task], policy: Policy, now: datetime) -> list[Intent]:
+    """Issues the owner's own agent reported go to the chain route as bugs.
+
+    Every condition is something an issue that should wait for a human fails:
+    - `agent_reported` and `by_owner`: the label alone is not enough, because
+      anyone can open an issue on a public repo and add it.
+    - `has_state_label is False`: a row labelled `fleet:triage` reads as triage
+      just as an unlabelled one does, and is a human's choice to triage it.
+    - `created_at` within `chain_max_age_days`: an old one sat untouched for a
+      reason. No `created_at` is no age, and is not adopted.
+    - `chain_default_area` set and `bug` routed to chain: with no area the
+      adopted task would hold none, and area exclusion could not run it.
+    - no class or area other than the ones Adopt writes: a second `class:` or
+      `area:` label makes `ledger.read_one` refuse the whole ledger.
+
+    No per-day cap. Every adopted issue gets the same area, so area exclusion
+    already runs them one at a time.
+    """
+    area = policy.chain_default_area
+    if area is None or not chain_route_enabled(policy, _ADOPT_CLASS):
+        return []
+    oldest = now - timedelta(days=policy.chain_max_age_days)
+    return [
+        Adopt(task=t.number)
+        for t in ledger
+        if t.is_open
+        and t.agent_reported
+        and t.by_owner
+        and not t.has_state_label
+        and t.created_at is not None
+        and t.created_at >= oldest
+        and t.klass in (None, _ADOPT_CLASS)
+        and t.area in (None, area)
+    ]
+
+
 def _unblock(ledger: list[Task], all_rows: list[Task]) -> list[Intent]:
     """BLOCKED tasks whose dependency reached DONE. No human is involved -- that
     is the entire reason `block` is kept distinct from `escalate`.
@@ -751,6 +805,7 @@ def decide(
     # until something does. DISPATCH and UNBLOCK must not act on a closed row,
     # so the filter cannot stay one blanket call shared by all three phases.
     intents += _reap(ledger, policy, agents, observations, now, dict(prev.dispatched))
+    intents += _adopt(open_ledger, policy, now)
     intents += _unblock(open_ledger, ledger)
     intents += _unroutable(open_ledger, policy)
     intents += _dispatch(open_ledger, policy, agents, prev.spent_usd)

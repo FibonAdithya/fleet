@@ -40,6 +40,21 @@ class Task:
     parent_epic: int | None = None
     packet: dict | None = field(default=None, hash=False)
     verdict: dict | None = field(default=None, hash=False)
+    #: Carries the `agent-reported` label: the owner's own agent filed it from
+    #: outside the fleet. Read by `decide._adopt`.
+    agent_reported: bool = False
+    #: Written by the login the daemon runs as. False whenever that login is
+    #: unknown, so nobody's issue is mistaken for the owner's.
+    by_owner: bool = False
+    #: gh's `createdAt`, timezone-aware. None for a row that did not carry it
+    #: (the captured ledger fixtures predate the field), and such a row has no
+    #: age, so it is never adopted.
+    created_at: datetime | None = None
+    #: False only when the row carries no `fleet:<state>` label at all. `state`
+    #: reads such a row as `triage`, which makes it indistinguishable from one
+    #: a human deliberately labelled `fleet:triage`; this field is the
+    #: difference, and only the unlabelled row may be adopted.
+    has_state_label: bool = True
 
 
 @dataclass(frozen=True)
@@ -429,8 +444,32 @@ class Drain:
     reason: str
 
 
+@dataclass(frozen=True)
+class Adopt:
+    """Hand an agent-reported issue to the chain route as a `bug`.
+
+    The issue has no fleet state label, so it would otherwise wait in triage
+    for a human. `expand` writes READY, `class:bug`, auto-ok and the target's
+    `[chain] default_area`; the next tick dispatches it like any READY task.
+    No area field: the area is the policy's, not the issue's, and `decide`
+    emits this only when the policy has one.
+    """
+
+    task: int
+
+
 Intent = (
-    Dispatch | Continue | Release | Rebase | Escalate | Unblock | Advance | Retire | Close | Drain
+    Dispatch
+    | Continue
+    | Release
+    | Rebase
+    | Escalate
+    | Unblock
+    | Advance
+    | Retire
+    | Close
+    | Drain
+    | Adopt
 )
 
 

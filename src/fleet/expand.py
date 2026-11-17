@@ -13,6 +13,7 @@ from __future__ import annotations
 from fleet import escalation
 from fleet import labels as labels_module
 from fleet.model import (
+    Adopt,
     Advance,
     Assign,
     Close,
@@ -117,6 +118,24 @@ def expand(intent: Intent, policy: Policy) -> list[Effect]:
 
     if isinstance(intent, Unblock):
         return [_to_state(intent.task, "ready")]
+
+    if isinstance(intent, Adopt):
+        # Every label here is in labels.static_vocabulary, so none needs
+        # creating. `agent-reported` is left on: it is the box's, and the
+        # record of where the issue came from.
+        if policy.chain_default_area is None:
+            raise ValueError(f"cannot adopt task {intent.task}: no [chain] default_area")
+        return [
+            _to_state(
+                intent.task,
+                "ready",
+                (
+                    labels_module.class_label("bug"),
+                    labels_module.AUTO_OK,
+                    labels_module.area_label(policy.chain_default_area),
+                ),
+            )
+        ]
 
     if isinstance(intent, Retire):
         # StopAgent for the same reason Advance carries one: an agent left in the

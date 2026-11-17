@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -432,3 +433,44 @@ def test_no_subprocess_call_in_the_tree_is_unbounded():
     # reporting any of them.
     assert seen >= 4, f"the sweep found only {seen} call sites; it has stopped looking"
     assert not unbounded, f"unbounded subprocess calls: {unbounded}"
+
+
+def test_list_issues_fetches_author_and_created_at_as_logins(monkeypatch):
+    """ADOPT reads who wrote an issue and when. gh returns `author` as an object;
+    RealGh hands back the bare login, the same normalisation `assignees` gets,
+    so FakeGh and RealGh rows have one shape."""
+    seen = []
+
+    def run(args, **kwargs):
+        seen.append(args)
+        rows = [
+            {
+                "number": 3,
+                "title": "t",
+                "body": "b",
+                "labels": [{"name": "agent-reported"}],
+                "state": "OPEN",
+                "assignees": [],
+                "author": {"login": "FibonAdithya", "is_bot": False},
+                "createdAt": "2026-11-16T09:30:00Z",
+            }
+        ]
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(rows), stderr="")
+
+    monkeypatch.setattr(gh_module.subprocess, "run", run)
+    (row,) = RealGh("o/r").list_issues("all")
+    fields = seen[0][seen[0].index("--json") + 1].split(",")
+    assert {"author", "createdAt"} <= set(fields)
+    assert row["author"] == "FibonAdithya"
+    assert row["createdAt"] == "2026-11-16T09:30:00Z"
+
+
+def test_fake_rows_carry_author_and_created_at_like_real_ones():
+    from datetime import UTC, datetime
+
+    gh = FakeGh(clock=lambda: datetime(2026, 11, 16, 9, 30, tzinfo=UTC))
+    gh.create_issue("t", "b", [])
+    gh.create_issue("u", "b", [], author="someone-else")
+    rows = gh.list_issues("all")
+    assert [r["author"] for r in rows] == ["FibonAdithya", "someone-else"]
+    assert rows[0]["createdAt"] == "2026-11-16T09:30:00Z"
