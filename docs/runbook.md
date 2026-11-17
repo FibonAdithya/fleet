@@ -490,11 +490,13 @@ A running chain run's cost counts toward the fleet budget while it runs: the
 executor reports chain's `run_spent_usd` as the agent's cost, and the allocator
 adds every live agent's cost to the night's spend before it dispatches anything
 new, so a run that is spending can drain the fleet. On the tick its outcome is
-written, and while the issue still reads `claimed`, the run is reported at zero
-cost so the per-task ceiling cannot escalate or release the task over the
-outcome. The run's cost is added to the night's recorded spend (`spent_usd`)
-only when the allocator reaps the run, which happens once the issue has left
-`claimed` and the run is reported `done` with its cost.
+written, and while the issue still reads `claimed`, the run is reported as
+holding: its cost still counts toward the drain, but the per-task ceiling is
+not applied, so it cannot escalate or release the task over the outcome. The
+run's cost is added to the night's recorded spend (`spent_usd`) once, when the
+allocator reaps the run: normally once the issue has left `claimed` and the run
+is reported `done`, or by the stall timer if the outcome's writes keep failing
+for `stall_minutes`.
 
 ### Failure lines
 

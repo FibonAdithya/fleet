@@ -22,6 +22,7 @@ from fleet.model import (
     AgentState,
     Comment,
     Continue,
+    Dispatch,
     Escalate,
     FleetState,
     Observation,
@@ -1405,7 +1406,8 @@ def _intents_for(ticks, task: int = 5, kinds=(Release, Escalate)):
 def test_no_race_when_run_cost_exceeds_chain_ceiling(ccfg):
     """A run that finished above the chain ceiling (40) is not released as
     over budget on the write tick over the label it just wrote: the held
-    report carries no cost, and the `done` report that Retire reaps does."""
+    report is `holding`, which no ceiling applies to, and the Retire that
+    reaps the `done` report charges the cost."""
     ticks, gh, _ = _race(ccfg, run_spent_usd=50.0)
     assert _intents_for(ticks) == []
     assert Retire(task=5) in ticks[1][1]
@@ -1416,8 +1418,8 @@ def test_no_race_when_run_cost_exceeds_chain_ceiling(ccfg):
 def test_flaky_verdict_does_not_escalate_over_budget(ccfg):
     """The verdict fails once, so on the next tick the ledger reads `review`
     while the run is still held. Its cost (12.5) against the integrator's
-    ceiling (2.0) would escalate it as over budget if the held report
-    carried it."""
+    ceiling (2.0) would escalate it as over budget if decide judged a
+    `holding` report against a ceiling."""
     run = _approved("r-e", 5, progress=7, output_bytes=900, run_spent_usd=12.5)
     ex, gh, _ = _finished(ccfg, run, gh=FlakyVerdictGh())
     stale = Observation(change_seq=7, since=T0 - timedelta(minutes=30), transcript_bytes=900)
@@ -1440,6 +1442,85 @@ def test_flaky_verdict_does_not_escalate_over_budget(ccfg):
     assert _state_labels(gh) == ["fleet:integrating"]
     assert len(_handoffs(gh)) == 1
     assert len(_verdicts(gh)) == 1
+
+
+def test_a_held_run_reports_its_cost_and_holding(ccfg):
+    """Held: working, `holding`, with the run's real cost. Done: not holding,
+    the same cost, which the reap charges."""
+    run = _approved("r-e", 5, progress=7, run_spent_usd=18.0)
+    ex, gh, _ = _finished(ccfg, run)
+    [held] = ex.agents()
+    assert (held.status, held.holding, held.cost_usd) == ("working", True, 18.0)
+    [done] = ex.agents()
+    assert (done.status, done.holding, done.cost_usd) == ("done", False, 18.0)
+
+
+def test_a_held_run_keeps_the_fleet_drained(ccfg):
+    """The tick before chain finished, its $18 live cost drains a $25 fleet
+    (drain at 80%). The tick its outcome is written must not undo that and
+    dispatch a new task past the budget."""
+    policy = dataclasses.replace(OUTCOME_POLICY, fleet_usd=25.0)
+    prev = FleetState(spent_usd=5.0)
+    ready = Task(number=6, title="t", state="ready", area=None, klass="build", auto_ok=True)
+    ledger = [_ledger_task("claimed"), ready]
+    live = [AgentState(task=5, status="working", change_seq=6, cost_usd=18.0)]
+    before, _ = decide(prev, ledger, policy, live, T0)
+    assert [i for i in before if isinstance(i, Dispatch)] == []
+    ex, _, _ = _finished(ccfg, _approved("r-e", 5, progress=7, run_spent_usd=18.0))
+    agents = ex.agents()
+    assert [a.holding for a in agents] == [True]
+    after, _ = decide(prev, ledger, policy, agents, T0)
+    assert [i for i in after if isinstance(i, Dispatch)] == []
+
+
+class AlwaysFailVerdictGh(FakeGh):
+    def comment(self, issue: int, body: str) -> None:
+        if packet.MARKERS["verdict"] in body:
+            raise GhError("gh: timed out")
+        super().comment(issue, body)
+
+
+def test_a_held_run_the_stall_timer_ends_is_charged(ccfg):
+    """A verdict that never lands holds the run until the stall timer ends the
+    hold. The reap that ends it charges the run's cost, once."""
+    run = _approved("r-e", 5, progress=7, run_spent_usd=18.0)
+    ex, _, _ = _finished(ccfg, run, gh=AlwaysFailVerdictGh())
+    state = FleetState()
+    reaped = []
+    for minute in range(30):
+        # The handoff landed, so from the second tick on the ledger reads review.
+        ledger = [_ledger_task("claimed" if minute == 0 else "review")]
+        intents, state = decide(
+            state, ledger, OUTCOME_POLICY, ex.agents(), T0 + timedelta(minutes=minute)
+        )
+        reaped = [i for i in intents if isinstance(i, (Release, Escalate)) and i.task == 5]
+        if reaped:
+            break
+    assert reaped == [Escalate(task=5, reason="stalled")]
+    assert state.spent_usd == 18.0
+
+
+class UnreadableIssueGh(FakeGh):
+    """FakeGh whose `get_issue` fails once `unreadable` is set."""
+
+    unreadable = False
+
+    def get_issue(self, number: int) -> dict:
+        if self.unreadable:
+            raise GhError("gh: timed out")
+        return super().get_issue(number)
+
+
+def test_a_finished_run_is_held_while_its_issue_cannot_be_read(ccfg):
+    """Whether the issue has left `claimed` is unknown, so the run stays held:
+    reported `done` on a stale `claimed` ledger, it would fall to the stall
+    check and be released over the label just written."""
+    ex, gh, _ = _finished(ccfg, _approved("r-e", 5, run_spent_usd=3.0), gh=UnreadableIssueGh())
+    ex.agents()
+    gh.unreadable = True
+    [agent] = ex.agents()
+    assert (agent.status, agent.holding, agent.cost_usd) == ("working", True, 3.0)
+    assert "could not read the issue" in ex.failures[-1]
 
 
 @pytest.mark.parametrize(

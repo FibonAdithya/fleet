@@ -1202,3 +1202,39 @@ def test_stall_timer_restarts_when_a_pause_ends():
     assert only(intents, Release) == []
     intents, _ = decide(state, [task], _chain_policy(), running, T0 + timedelta(minutes=70))
     assert Release(task=1, reason="stalled", attempt=2) in intents
+
+
+# --- a held chain outcome --------------------------------------------------------
+#
+# A chain run whose outcome fleet is still writing is reported `holding`: its
+# cost is final and real, so the drain counts it and a reap charges it, but no
+# per-task ceiling applies to a run that has already finished.
+
+
+def test_a_held_agent_over_its_ceiling_is_not_released_or_escalated():
+    """The claimed path's `_fail(over_budget)` and the later-stage path's
+    over_budget Escalate would both relabel the row over the outcome being
+    written."""
+    for state in ("claimed", "review", "integrating"):
+        agents = [AgentState(task=1, status="working", change_seq=10, cost_usd=50.0, holding=True)]
+        intents, _ = decide(FleetState(), [claimed(state=state)], POLICY, agents, T0)
+        assert [i for i in intents if getattr(i, "task", None) == 1] == [], state
+
+
+def test_a_held_agent_still_counts_toward_the_drain():
+    """`committed = spent + every live cost`: a held run's dollars are spent,
+    so a fleet at the drain line dispatches nothing new."""
+    held = AgentState(task=1, status="working", change_seq=10, cost_usd=18.0, holding=True)
+    ready = Task(number=2, title="t", state="ready", area="docs", klass="patch", auto_ok=True)
+    intents, _ = decide(FleetState(spent_usd=5.0), [claimed(), ready], POLICY, [held], T0)
+    assert only(intents, Dispatch) == []
+
+
+def test_a_held_agent_the_stall_timer_releases_is_charged():
+    """The stall timer still bounds a hold whose writes never land, and the
+    release charges the run's whole cost."""
+    held = AgentState(task=1, status="working", change_seq=10, cost_usd=18.0, holding=True)
+    seen = Observation(change_seq=10, since=T0 - timedelta(minutes=11))
+    intents, state = decide(FleetState(seen=((1, seen),)), [claimed()], POLICY, [held], T0)
+    assert Release(task=1, reason="stalled", attempt=2) in intents
+    assert state.spent_usd == 18.0

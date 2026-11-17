@@ -30,7 +30,7 @@ import tempfile
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -480,33 +480,36 @@ class ChainExecutor:
     # outcome is written decide() still sees the task at `claimed`. A `done`
     # agent there has no packet and falls to the stall check, and a missing one
     # is released as `no_agent`; either relabels the task `ready` over the label
-    # just written. So a written run is held `working`, its sequence one past
-    # chain's last so the stall timer restarts, until the issue has left
-    # `claimed`. Then it is reported `done` with its cost until a StopAgent
-    # arrives: decide's Retire for that row is a reaping intent, the one place
-    # the run's cost is charged into the fleet's spend. A run simply dropped
-    # from agents() would never be charged.
+    # just written. So a written run is held `working` and `holding`, its
+    # sequence one past chain's last so the stall timer restarts, until the
+    # issue has left `claimed`. Then it is reported `done` until a StopAgent
+    # arrives: decide's Retire for that row is a reaping intent, and the reap
+    # charges the run's cost into the fleet's spend. Both reports carry that
+    # cost, so the drain counts it on every tick and whichever reap ends the
+    # run (a Retire, or the stall timer's Release on a hold that never ends)
+    # charges it once. A run simply dropped from agents() would never be
+    # charged.
 
     def _outcome_done(self, run_id: str) -> bool:
         record = self._outcomes.get(run_id)
         return record is not None and record.done
 
     def _holding(self, task: int, record: Outcome | None, run: ChainRun | None) -> AgentState:
-        """Working, with a sequence decide has not seen: no stall, no release.
+        """Working and `holding`, with a sequence decide has not seen: no
+        stall, no release.
 
-        At zero cost. decide checks a working agent's cost against the ceiling
-        of the role the row is owed, and a held row may already read `review`
+        With the run's real cost, so the fleet drain still counts it and
+        whichever reap ends the hold charges it. `holding` is what keeps decide
+        from judging it against a ceiling: a held row may already read `review`
         (a verdict that failed once) or the run may have ended above the chain
-        ceiling: either would escalate or release over the outcome just
-        written. The cost rides on the `done` report instead, which decide's
-        Retire reaps and charges. Accepted: a held run reaped by a stall
-        Release (its writes failing for `stall_minutes`) is charged as 0.
+        ceiling, and either would escalate or release over the outcome being
+        written. The stall timer still bounds a hold whose writes keep failing.
         """
         if record is not None:
-            progress, size = record.progress, record.output_bytes
+            progress, size, cost = record.progress, record.output_bytes, record.cost_usd
         else:
             assert run is not None
-            progress, size = run.progress, run.output_bytes
+            progress, size, cost = run.progress, run.output_bytes, run.run_spent_usd
         return AgentState(
             task=task,
             status="working",
@@ -514,10 +517,11 @@ class ChainExecutor:
             # than any live report of the run (see `_sequence`), so the stall
             # timer restarts on the write tick and then bounds the hold.
             change_seq=_sequence(progress + 1),
-            cost_usd=0.0,
+            cost_usd=cost,
             model=None,
             transcript_bytes=size,
             paused=False,
+            holding=True,
         )
 
     def _finished_agents(self, written: set[str]) -> list[AgentState]:
@@ -539,15 +543,7 @@ class ChainExecutor:
                     held = True
             agent = self._holding(task, record, None)
             if not held:
-                agent = AgentState(
-                    task=task,
-                    status="done",
-                    change_seq=agent.change_seq,
-                    cost_usd=record.cost_usd,
-                    model=None,
-                    transcript_bytes=agent.transcript_bytes,
-                    paused=False,
-                )
+                agent = replace(agent, status="done", holding=False)
             out.append(agent)
         return out
 

@@ -85,6 +85,14 @@ class AgentState:
     progress while it waits, and that is not a stall: `decide` refreshes the
     stall timer on every tick it is seen paused, so the timer counts from when
     the pause ends.
+
+    `holding` is True for a chain run that has finished while fleet writes its
+    outcome to the ledger, which can be read before those writes land. Its
+    `cost_usd` is the run's final, real cost: the drain counts it and a reap
+    charges it, as for any agent. What `decide` does not do is judge it against
+    a per-task ceiling: the run has finished, and an over_budget Release or
+    Escalate would relabel the row over the outcome being written. The stall
+    timer still bounds a hold whose writes never land.
     """
 
     task: int
@@ -94,6 +102,7 @@ class AgentState:
     model: str | None = None
     transcript_bytes: int = 0
     paused: bool = False
+    holding: bool = False
 
 
 #: `AgentState.model` when a transcript named more than one model carrying

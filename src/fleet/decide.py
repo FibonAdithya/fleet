@@ -429,6 +429,10 @@ def _reap(
                 # directly -- a reviewer judges the implementer's work and
                 # runs long enough to burn real money at a rate nobody chose.
                 intents.append(Escalate(task=task.number, reason="model_mismatch"))
+            elif agent.holding:
+                # A finished chain run whose outcome is being written: its cost
+                # is final, so no ceiling applies (see `AgentState.holding`).
+                pass
             elif agent.cost_usd > (ceiling := policy.ceiling_for(_role_for(task, policy))):
                 # Task 3 left this branch with no cost check at all, so a
                 # reviewer that was healthy, moving and far over its ceiling got
@@ -494,8 +498,8 @@ def _reap(
             continue
         # Cost is checked only for a live agent. A finished agent a cent over
         # budget still advances its packet rather than discarding work already
-        # paid for.
-        if agent.cost_usd > policy.ceiling_for(_role_for(task, policy)):
+        # paid for -- and a held chain run has finished, too.
+        if not agent.holding and agent.cost_usd > policy.ceiling_for(_role_for(task, policy)):
             intents.append(_fail(task, "over_budget", policy))
     # An orphaned agent: its task sits on a row in READY, DONE or BLOCKED, or
     # has no ledger row at all. The per-row loop above only ever visits rows,
