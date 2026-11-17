@@ -466,6 +466,11 @@ runs, so losing it would write every finished run's packets again.
 | anything else (aborted, ended without an outcome, `waiting`) | the agent reads as dirty; the task is retried within its caps |
 | an outcome fleet cannot record | an escalation written by fleet, naming the run |
 
+An `approved` outcome is recorded only with a 40-hex `head_sha`, a `branch`
+other than the integration branch, and a `pr`. An approval missing any of them
+is an outcome fleet cannot record, so the owner gets fleet's escalation rather
+than an approval bound to the base SHA or to the integration branch.
+
 Two kinds of escalation exist. The allocator's own (stalled,
 attempts_exhausted and the like) start with the exact line
 `<!-- fleet:escalation reason=<reason> -->`. Chain-outcome and fallback

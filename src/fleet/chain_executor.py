@@ -119,6 +119,8 @@ _TRANSIENT = (GhError, OSError)
 
 #: A git SHA as the handoff and verdict schemas accept one.
 _SHA = re.compile(r"[0-9a-f]{7,40}")
+#: The head an approval binds to: chain records the full SHA it reviewed.
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
 #: The hidden last line of a not-reproduced or duplicate closing comment, so
 #: a retry can tell that its comment already landed.
@@ -606,7 +608,7 @@ class ChainExecutor:
                 self.cfg, self.gh, task=task, to="review", role="chain", **self._packet(run)
             )
         elif step == "verdict":
-            _, head = self._shas(run)
+            head = self._approved_head(run)
             commands.do_verdict(
                 self.cfg,
                 self.gh,
@@ -695,8 +697,32 @@ class ChainExecutor:
             mine = sender.get("agent") == agent and (found or {}).get("to") == target
         return target if mine else None
 
+    def _approved_head(self, run: ChainRun) -> str:
+        """The head SHA an approved run's handoff and verdict bind to.
+
+        chain approves a run only with the full head SHA it reviewed, on the
+        run's own branch, with its PR open. An approval missing any of them is
+        a contract break: `_shas` would put the base SHA in for the head, and
+        `_packet` the integration branch for the branch, so the approval would
+        bind to work nobody reviewed. ValueError is permanent (see
+        `_TRANSIENT`), so the outcome becomes fleet's own escalation.
+        """
+        missing = []
+        head = run.head_sha
+        if not (isinstance(head, str) and _FULL_SHA.fullmatch(head)):
+            missing.append(f"a 40-hex head_sha (got {head!r})")
+        if not run.branch or run.branch == self.cfg.integration_branch:
+            missing.append(f"a branch of its own (got {run.branch!r})")
+        if not isinstance(run.pr, dict):
+            missing.append(f"a pr (got {run.pr!r})")
+        if missing:
+            raise ValueError(f"chain run {run.id} was approved without {', '.join(missing)}")
+        return str(head)
+
     def _packet(self, run: ChainRun) -> dict:
         """The handoff fields an approved or escalated run's packet shares."""
+        if run.outcome == "approved":
+            self._approved_head(run)
         base, head = self._shas(run)
         if run.outcome == "approved":
             did = f"chain run {run.id}: plan, audit, implement, review"

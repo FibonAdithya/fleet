@@ -1468,12 +1468,36 @@ def test_flaky_verdict_does_not_escalate_over_budget(ccfg):
             "chain run r-e ended with outcome approved, but fleet could not record it",
             1,
         ),
+        # An approval binds to the head chain reviewed, on chain's branch, with
+        # its PR. Without one of them it would bind to something else: the
+        # base SHA standing in for the head, or the integration branch.
+        *[
+            (
+                _approved("r-e", 5, **fields),
+                "chain run r-e ended with outcome approved, but fleet could not record it",
+                1,
+            )
+            for fields in [
+                {"head_sha": None},
+                {"head_sha": "c" * 7},
+                {"branch": None},
+                {"branch": ""},
+                {"branch": "integration"},
+                {"pr": None},
+            ]
+        ],
     ],
     ids=[
         "blank-escalation-text",
         "null-duplicate-of",
         "non-hex-head-sha",
         "approved-null-test-command",
+        "approved-null-head-sha",
+        "approved-short-head-sha",
+        "approved-null-branch",
+        "approved-empty-branch",
+        "approved-on-integration-branch",
+        "approved-null-pr",
     ],
 )
 def test_unrecordable_outcome_escalates_once(ccfg, run, needs, failures):
@@ -1489,11 +1513,27 @@ def test_unrecordable_outcome_escalates_once(ccfg, run, needs, failures):
     escalations = [c for c in _handoffs(gh) if packet.parse_latest([c], "handoff")["to"] == "human"]
     assert len(escalations) == 1
     assert len(_handoffs(gh)) == 1
+    assert _verdicts(gh) == []
     validate(ccfg, "handoff", packet.parse_latest(_comments(gh), "handoff"))
     assert gh.get_issue(5)["assignees"] == []
     assert len(ex.failures) == failures
     # The run is held, then done -- never dirty, so `_fail` never retries it.
     assert ex.agents()[0].status == "done"
+
+
+def test_a_verdict_after_a_landed_handoff_still_needs_the_reviewed_head(ccfg):
+    """A handoff recorded before the run's approval was checked (an older
+    fleet, or a state file from one) leaves only the verdict to write. It is
+    checked on its own: an approval at the base SHA is not written."""
+    ex, gh, _ = _finished(ccfg, _approved("r-e", 5, head_sha=None))
+    ex._outcomes["r-e"] = chain_executor.Outcome(
+        outcome="approved", steps=["handoff"], cost_usd=1.0, progress=7, output_bytes=0
+    )
+    chain_executor.commands._move_state(gh, 5, "review")
+    ex.agents()
+    assert _verdicts(gh) == []
+    assert _state_labels(gh) == ["fleet:human"]
+    assert "approved without a 40-hex head_sha" in escalation.latest(_comments(gh))["text"]
 
 
 def test_permanent_failure_after_a_landed_step_keeps_it(ccfg):
